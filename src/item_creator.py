@@ -283,9 +283,11 @@ class ItemCreatorWidget(QWidget):
         basic_group = QGroupBox("Basics", self)
         basic_group.setObjectName("TransparentContainer")
         basic_layout = QHBoxLayout(basic_group)
+        basic_layout.setContentsMargins(12, 12, 12, 12)
         basic_layout.setSpacing(12)
 
         title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
         title_col.setSpacing(4)
         title_label = QLabel("Title")
         title_label.setStyleSheet("opacity: 0.72; font-size: 12px;")
@@ -296,25 +298,31 @@ class ItemCreatorWidget(QWidget):
         basic_layout.addLayout(title_col, 3)
 
         rarity_col = QVBoxLayout()
+        rarity_col.setContentsMargins(0, 0, 0, 0)
         rarity_col.setSpacing(4)
         rarity_label = QLabel("Rarity")
         rarity_label.setStyleSheet("opacity: 0.72; font-size: 12px;")
         rarity_col.addWidget(rarity_label)
         self.rarity_combo = QComboBox(basic_group)
         self.rarity_combo.setFixedHeight(INPUT_H)
+        self.rarity_combo.setFixedWidth(106)
         self.rarity_combo.addItems(
             ["common", "uncommon", "rare", "epic", "legendary", "artifact"]
         )
-        self.rarity_combo.setCurrentText("uncommon")
+        self.rarity_combo.setFixedWidth(160)
         rarity_col.addWidget(self.rarity_combo)
-        basic_layout.addLayout(rarity_col, 1)
+        basic_layout.addLayout(rarity_col)
 
         form_layout.addWidget(basic_group)
 
         icon_group = QGroupBox("Icon", self)
         icon_group.setObjectName("TransparentContainer")
         icon_layout = QVBoxLayout(icon_group)
+        icon_layout.setContentsMargins(12, 12, 12, 12)
+        icon_layout.setSpacing(10)
         icon_row = QHBoxLayout()
+        icon_row.setContentsMargins(0, 0, 0, 0)
+        icon_row.setSpacing(12)
         self.icon_edit = QLineEdit(icon_group)
         self.icon_edit.setPlaceholderText("Path to icon image")
         self.icon_edit.setFixedHeight(INPUT_H)
@@ -322,26 +330,29 @@ class ItemCreatorWidget(QWidget):
         self.icon_browse_btn.setObjectName("SecondaryButton")
         self.icon_browse_btn.setText("Browse")
         self.icon_browse_btn.setFixedHeight(INPUT_H)
-        self.icon_browse_btn.setMinimumWidth(84)
+        self.icon_browse_btn.setFixedWidth(160)
         self.icon_browse_btn.setStyleSheet(
-            "QToolButton { padding: 4px 12px; }"
+            "QToolButton { padding: 0px; border-radius: 6px; }"
         )
         self.icon_browse_btn.clicked.connect(self._browse_icon)
-        icon_row.addWidget(self.icon_edit, 3)
-        icon_row.addWidget(self.icon_browse_btn, 1)
+        icon_row.addWidget(self.icon_edit, 1)
+        icon_row.addWidget(self.icon_browse_btn)
         icon_layout.addLayout(icon_row)
 
         self.icon_category_combo = QComboBox(icon_group)
         self.icon_category_combo.setFixedHeight(INPUT_H)
+        self.icon_category_combo.setFixedWidth(160)
         self.icon_category_combo.currentTextChanged.connect(self._on_icon_category_changed)
 
         search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(12)
         self._icon_search_edit = QLineEdit(icon_group)
         self._icon_search_edit.setPlaceholderText("Search icons...")
         self._icon_search_edit.setFixedHeight(INPUT_H)
         self._icon_search_edit.textChanged.connect(self._on_icon_search_changed)
-        search_row.addWidget(self._icon_search_edit, 3)
-        search_row.addWidget(self.icon_category_combo, 1)
+        search_row.addWidget(self._icon_search_edit, 1)
+        search_row.addWidget(self.icon_category_combo)
         icon_layout.addLayout(search_row)
 
         self._icon_buttons: Dict[str, QToolButton] = {}
@@ -415,16 +426,18 @@ class ItemCreatorWidget(QWidget):
         stats_group = QGroupBox("Stats", self)
         stats_group.setObjectName("TransparentContainer")
         stats_layout = QVBoxLayout(stats_group)
+        stats_layout.setContentsMargins(0, 0, 0, 0)
         self.stats_table = QTableWidget(0, 3, stats_group)
         self.stats_table.setHorizontalHeaderLabels(["Value", "Stat", ""])
         self.stats_table.horizontalHeader().setSectionResizeMode(0, self.stats_table.horizontalHeader().ResizeMode.Fixed)
         self.stats_table.horizontalHeader().setSectionResizeMode(1, self.stats_table.horizontalHeader().ResizeMode.Stretch)
         self.stats_table.horizontalHeader().setSectionResizeMode(2, self.stats_table.horizontalHeader().ResizeMode.Fixed)
-        self.stats_table.setColumnWidth(0, 72)
-        self.stats_table.setColumnWidth(2, 32)
+        self.stats_table.setColumnWidth(0, 80)
+        self.stats_table.setColumnWidth(2, 64)
         self.stats_table.verticalHeader().setVisible(False)
+        self.stats_table.verticalHeader().setDefaultSectionSize(40)
         self.stats_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.stats_table.setMinimumHeight(140)
+        self.stats_table.setMinimumHeight(200)
         self.stats_table.setShowGrid(False)
         self.stats_table.setAlternatingRowColors(True)
         self.stats_table.setCornerButtonEnabled(False)
@@ -435,24 +448,35 @@ class ItemCreatorWidget(QWidget):
                 border-radius: 6px;
                 selection-background-color: #3a5a7a;
                 gridline-color: transparent;
+                padding: 0px;
+                margin: 0px;
             }
             QTableWidget::item {
-                padding: 4px 10px;
+                padding-left: 10px;
+                padding-right: 10px;
                 border-bottom: 1px solid #21262d; 
             }
             QHeaderView::section {
                 background-color: #161b22;
                 border: none;
                 border-bottom: 1px solid #30363d;
-                padding: 0px 10px;
-                height: 32px;
+                padding-left: 14px;
+                height: 36px;
                 color: #8b949e;
                 font-weight: 600;
                 text-align: left;
+                margin: 0px;
+            }
+            QHeaderView {
+                background-color: transparent;
+                border: none;
+                margin: 0px;
+                padding: 0px;
             }
         """)
         self.stats_table.horizontalHeader().setHighlightSections(False)
         self.stats_table.horizontalHeader().setSectionsClickable(False)
+        self.stats_table.horizontalHeader().setSortIndicatorShown(False)
         self.stats_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.stats_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.stats_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -847,6 +871,7 @@ class ItemCreatorWidget(QWidget):
         container = QWidget()
         lay = QHBoxLayout(container)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         remove_btn = QToolButton(container)
@@ -854,8 +879,8 @@ class ItemCreatorWidget(QWidget):
         remove_btn.setProperty("compact", "true")
         remove_btn.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "trash.svg")))
         remove_btn.setIconSize(QSize(14, 14))
-        remove_btn.setFixedSize(24, 24)
-        remove_btn.setStyleSheet("padding: 0px; border-radius: 4px;")
+        remove_btn.setFixedSize(30, 30)
+        remove_btn.setStyleSheet("QToolButton { padding: 0px; border-radius: 4px; border: 1px solid #3b424b; background-color: #1c2128; min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px; }")
         remove_btn.setToolTip("Remove Stat")
         remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         remove_btn.clicked.connect(lambda _=False, r=row: self._remove_stat_at(r))

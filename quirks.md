@@ -171,3 +171,18 @@
     - `self.session_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)`
   - Keep selection coloring controlled by explicit active/inactive selected-item styles (already in app stylesheet), so selection remains visible without the extra focus rectangle.
 - **Result**: Selection stays styled correctly, and the white focus/text box artifact is removed.
+
+## 11. Table Header and Row Alignment (Stats Table)
+- **Issue**: Horizontal misalignment between table headers ("Value", "Stat") and content rows, and misalignment between the header background box and row selection shadows.
+- **Root Cause**:
+    - **Box Misalignment**: Default layout margins and component-level padding/border spacing in `QHeaderView` and `QTableWidget` differ by default (often causing an ~11px shift).
+    - **Character Misalignment**: `QHeaderView::section` and `QTableWidget::item` have different internal rendering offsets for text/icons, even when `padding` is set equally in QSS.
+- **Solution**:
+    - **Flush Boxes**: Zero out all margins/padding for the container layout and the table components:
+      ```python
+      layout.setContentsMargins(0, 0, 0, 0)
+      table.setStyleSheet("QTableWidget { padding: 0px; margin: 0px; }")
+      ```
+    - **Header Background**: Apply background color to the entire `QHeaderView` (not just `::section`) to ensure the background fills the full width and aligns with row shadows.
+    - **Pixel-Matched Text**: Use a diagnostic script to measure the actual visual offset of row text and match the header's `padding-left` to that offset (e.g., if items are shifted 14px, set header `padding-left: 14px`).
+    - **Square Buttons in Rows**: For small icon buttons (trash icons), use strict CSS `min-width/height` AND `max-width/height` to prevent global stylesheet rules from squashing the button into a rectangle.

@@ -233,9 +233,10 @@ class EncounterPanel(QWidget):
         btn.setFixedSize(EncounterPanel._PARTY_STEP_SIZE, EncounterPanel._PARTY_VALUE_H)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
-            "QPushButton { background-color: #1b2432; border: 1px solid #3b424b;"
-            " border-radius: 4px; color: #c9d1d9; font-weight: 600; padding: 0px;"
-            " min-width: 0px; min-height: 0px; }"
+            f"QPushButton {{ background-color: #1b2432; border: 1px solid #3b424b;"
+            f" border-radius: 4px; color: #c9d1d9; font-weight: 600; padding: 0px;"
+            f" min-width: {EncounterPanel._PARTY_STEP_SIZE}px; max-width: {EncounterPanel._PARTY_STEP_SIZE}px;"
+            f" min-height: {EncounterPanel._PARTY_VALUE_H}px; max-height: {EncounterPanel._PARTY_VALUE_H}px; }}"
             "QPushButton:hover { border-color: #58a6ff; color: #e6edf3; }"
         )
         return btn
