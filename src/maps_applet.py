@@ -1018,7 +1018,7 @@ class MapsWidget(QWidget):
             )
 
     def _is_test_env(self) -> bool:
-        if os.environ.get("AIOHUB_TEST_MODE") == "1":
+        if os.environ.get("DMT_TEST_MODE") == "1":
             return True
         if os.environ.get("PYTEST_CURRENT_TEST"):
             return True

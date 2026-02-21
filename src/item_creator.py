@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -232,12 +233,7 @@ class ItemCreatorWidget(QWidget):
         form_layout = QVBoxLayout(form_panel)
         form_layout.setSpacing(10)
 
-        header = QLabel("Item Editor")
-        header.setObjectName("Header")
-        subheader = QLabel("Edit fields or click the preview to jump to a section.")
-        subheader.setObjectName("Subheader")
-        form_layout.addWidget(header)
-        form_layout.addWidget(subheader)
+
 
         action_row = QHBoxLayout()
         self.load_button = QToolButton(self)
@@ -282,146 +278,71 @@ class ItemCreatorWidget(QWidget):
         action_row.addStretch(1)
         form_layout.addLayout(action_row)
 
+        INPUT_H = 36  # Uniform height for all inputs and buttons
+
         basic_group = QGroupBox("Basics", self)
         basic_group.setObjectName("TransparentContainer")
-        basic_layout = QFormLayout(basic_group)
-        basic_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        basic_layout = QHBoxLayout(basic_group)
+        basic_layout.setSpacing(12)
 
+        title_col = QVBoxLayout()
+        title_col.setSpacing(4)
+        title_label = QLabel("Title")
+        title_label.setStyleSheet("opacity: 0.72; font-size: 12px;")
+        title_col.addWidget(title_label)
         self.title_edit = QLineEdit("Sample Item", basic_group)
+        self.title_edit.setFixedHeight(INPUT_H)
+        title_col.addWidget(self.title_edit)
+        basic_layout.addLayout(title_col, 3)
+
+        rarity_col = QVBoxLayout()
+        rarity_col.setSpacing(4)
+        rarity_label = QLabel("Rarity")
+        rarity_label.setStyleSheet("opacity: 0.72; font-size: 12px;")
+        rarity_col.addWidget(rarity_label)
         self.rarity_combo = QComboBox(basic_group)
+        self.rarity_combo.setFixedHeight(INPUT_H)
         self.rarity_combo.addItems(
             ["common", "uncommon", "rare", "epic", "legendary", "artifact"]
         )
         self.rarity_combo.setCurrentText("uncommon")
-
-        basic_layout.addRow("Title", self.title_edit)
-        basic_layout.addRow("Rarity", self.rarity_combo)
-
-        # Multi-class selection
-        classes_group = QGroupBox("Classes", self)
-        classes_group.setObjectName("TransparentContainer")
-        classes_layout = QVBoxLayout(classes_group)
-        classes_layout.setSpacing(4)
-        
-        self.all_classes_check = QCheckBox("All Classes", classes_group)
-        self.all_classes_check.setChecked(True)
-        classes_layout.addWidget(self.all_classes_check)
-        
-        # Class checkboxes in a grid
-        class_grid_widget = QWidget(classes_group)
-        class_grid_widget.setObjectName("TransparentContainer")
-        class_grid = QGridLayout(class_grid_widget)
-        class_grid.setContentsMargins(0, 4, 0, 0)
-        class_grid.setSpacing(4)
-        
-        self._class_names = [
-            "Barbarian", "Bard", "Cleric", "Druid", "Fighter", "Monk",
-            "Paladin", "Ranger", "Rogue", "Sorcerer", "Warlock", "Wizard", "Artificer"
-        ]
-        self._class_checks: Dict[str, QCheckBox] = {}
-        for i, cls_name in enumerate(self._class_names):
-            cb = QCheckBox(cls_name, class_grid_widget)
-            cb.setEnabled(False)  # Disabled when "All Classes" is checked
-            cb.stateChanged.connect(self._mark_dirty)
-            self._class_checks[cls_name] = cb
-            class_grid.addWidget(cb, i // 3, i % 3)
-        
-        classes_layout.addWidget(class_grid_widget)
-
-        tags_group = QGroupBox("Categories (internal)", self)
-        tags_group.setObjectName("TransparentContainer")
-        tags_layout = QVBoxLayout(tags_group)
-        tags_layout.setSpacing(6)
-        tags_grid_widget = QWidget(tags_group)
-        tags_grid_widget.setObjectName("TransparentContainer")
-        tags_grid = QGridLayout(tags_grid_widget)
-        tags_grid.setContentsMargins(0, 0, 0, 0)
-        tags_grid.setSpacing(4)
-        self._category_names = [
-            "equipment",
-            "consumables",
-            "valuables",
-            "magic",
-            "miscellaneous",
-        ]
-        self._category_checks: Dict[str, QCheckBox] = {}
-        for i, name in enumerate(self._category_names):
-            label = name.capitalize()
-            cb = QCheckBox(label, tags_grid_widget)
-            cb.stateChanged.connect(self._mark_dirty)
-            self._category_checks[name] = cb
-            tags_grid.addWidget(cb, i // 2, i % 2)
-        tags_layout.addWidget(tags_grid_widget)
-        self._tag_custom_edit = QLineEdit(tags_group)
-        self._tag_custom_edit.setPlaceholderText(
-            "Extra tags (comma separated)"
-        )
-        self._tag_custom_edit.textChanged.connect(self._mark_dirty)
-        self._level_edit = QLineEdit(tags_group)
-        self._level_edit.setPlaceholderText("Level (internal)")
-        self._level_edit.setValidator(QIntValidator(1, 20, self))
-        self._level_edit.setText(str(self._level_value))
-        self._level_edit.textChanged.connect(self._on_level_text_changed)
-        self._level_edit.editingFinished.connect(self._on_level_edit_finished)
-        tags_label = QLabel("Tags:", tags_group)
-        level_label = QLabel("Level:", tags_group)
-        metrics = QFontMetrics(tags_label.font())
-        label_width = max(metrics.horizontalAdvance("Tags:"), metrics.horizontalAdvance("Level:"))
-        tags_label.setFixedWidth(label_width)
-        level_label.setFixedWidth(label_width)
-
-        tags_row = QWidget(tags_group)
-        tags_row.setObjectName("TransparentContainer")
-        tags_row_layout = QHBoxLayout(tags_row)
-        tags_row_layout.setContentsMargins(0, 0, 0, 0)
-        tags_row_layout.setSpacing(6)
-        tags_row_layout.addWidget(tags_label)
-        tags_row_layout.addWidget(self._tag_custom_edit, 1)
-        tags_layout.addWidget(tags_row)
-
-        level_row = QWidget(tags_group)
-        level_row.setObjectName("TransparentContainer")
-        level_row_layout = QHBoxLayout(level_row)
-        level_row_layout.setContentsMargins(0, 0, 0, 0)
-        level_row_layout.setSpacing(6)
-        level_row_layout.addWidget(level_label)
-        level_row_layout.addWidget(self._level_edit, 1)
-        tags_layout.addWidget(level_row)
-
-        classes_tags_row = QWidget(self)
-        classes_tags_row.setObjectName("TransparentContainer")
-        classes_tags_layout = QHBoxLayout(classes_tags_row)
-        classes_tags_layout.setContentsMargins(0, 0, 0, 0)
-        classes_tags_layout.setSpacing(10)
-        classes_tags_layout.addWidget(classes_group, 1)
-        classes_tags_layout.addWidget(tags_group, 1)
+        rarity_col.addWidget(self.rarity_combo)
+        basic_layout.addLayout(rarity_col, 1)
 
         form_layout.addWidget(basic_group)
-        form_layout.addWidget(classes_tags_row)
 
         icon_group = QGroupBox("Icon", self)
         icon_group.setObjectName("TransparentContainer")
         icon_layout = QVBoxLayout(icon_group)
         icon_row = QHBoxLayout()
         self.icon_edit = QLineEdit(icon_group)
-        self.icon_edit.setPlaceholderText("Path to icon image (optional)")
-        icon_button = QPushButton("Browse", icon_group)
-        icon_button.clicked.connect(self._browse_icon)
-        icon_row.addWidget(self.icon_edit)
-        icon_row.addWidget(icon_button)
+        self.icon_edit.setPlaceholderText("Path to icon image")
+        self.icon_edit.setFixedHeight(INPUT_H)
+        self.icon_browse_btn = QToolButton(icon_group)
+        self.icon_browse_btn.setObjectName("SecondaryButton")
+        self.icon_browse_btn.setText("Browse")
+        self.icon_browse_btn.setFixedHeight(INPUT_H)
+        self.icon_browse_btn.setMinimumWidth(84)
+        self.icon_browse_btn.setStyleSheet(
+            "QToolButton { padding: 4px 12px; }"
+        )
+        self.icon_browse_btn.clicked.connect(self._browse_icon)
+        icon_row.addWidget(self.icon_edit, 3)
+        icon_row.addWidget(self.icon_browse_btn, 1)
         icon_layout.addLayout(icon_row)
 
-        filter_row = QHBoxLayout()
-        self.icon_search = QLineEdit(icon_group)
-        self.icon_search.setPlaceholderText("Search icons...")
-        self.icon_search.textChanged.connect(self._filter_icons)
-        
-        self.icon_category_filter = QComboBox(icon_group)
-        self.icon_category_filter.currentTextChanged.connect(self._filter_icons)
-        
-        filter_row.addWidget(self.icon_search, 2)
-        filter_row.addWidget(self.icon_category_filter, 1)
-        icon_layout.addLayout(filter_row)
+        self.icon_category_combo = QComboBox(icon_group)
+        self.icon_category_combo.setFixedHeight(INPUT_H)
+        self.icon_category_combo.currentTextChanged.connect(self._on_icon_category_changed)
+
+        search_row = QHBoxLayout()
+        self._icon_search_edit = QLineEdit(icon_group)
+        self._icon_search_edit.setPlaceholderText("Search icons...")
+        self._icon_search_edit.setFixedHeight(INPUT_H)
+        self._icon_search_edit.textChanged.connect(self._on_icon_search_changed)
+        search_row.addWidget(self._icon_search_edit, 3)
+        search_row.addWidget(self.icon_category_combo, 1)
+        icon_layout.addLayout(search_row)
 
         self._icon_buttons: Dict[str, QToolButton] = {}
         self._icon_group = QButtonGroup(self)
@@ -446,13 +367,13 @@ class ItemCreatorWidget(QWidget):
         self._all_icon_data = self._discover_item_icons()
         
         # Populate category filter (blocking signals during setup to avoid rapid-fire updates)
-        self.icon_category_filter.blockSignals(True)
-        self.icon_search.blockSignals(True)
+        self.icon_category_combo.blockSignals(True)
+        self._icon_search_edit.blockSignals(True)
         categories = sorted(list(set(icon['category'] for icon in self._all_icon_data if icon['category'] != "All")))
-        self.icon_category_filter.addItem("All Categories")
-        self.icon_category_filter.addItems(categories)
-        self.icon_category_filter.blockSignals(False)
-        self.icon_search.blockSignals(False)
+        self.icon_category_combo.addItem("All Categories")
+        self.icon_category_combo.addItems(categories)
+        self.icon_category_combo.blockSignals(False)
+        self._icon_search_edit.blockSignals(False)
         
         if self._all_icon_data:
             for icon_data in self._all_icon_data:
@@ -485,12 +406,22 @@ class ItemCreatorWidget(QWidget):
         icon_layout.addWidget(icon_scroll)
         form_layout.addWidget(icon_group)
 
+        stats_effects_row = QWidget(self)
+        stats_effects_row.setObjectName("TransparentContainer")
+        se_layout = QHBoxLayout(stats_effects_row)
+        se_layout.setContentsMargins(0, 0, 0, 0)
+        se_layout.setSpacing(10)
+
         stats_group = QGroupBox("Stats", self)
         stats_group.setObjectName("TransparentContainer")
         stats_layout = QVBoxLayout(stats_group)
-        self.stats_table = QTableWidget(0, 2, stats_group)
-        self.stats_table.setHorizontalHeaderLabels(["Value", "Stat"])
-        self.stats_table.horizontalHeader().setStretchLastSection(True)
+        self.stats_table = QTableWidget(0, 3, stats_group)
+        self.stats_table.setHorizontalHeaderLabels(["Value", "Stat", ""])
+        self.stats_table.horizontalHeader().setSectionResizeMode(0, self.stats_table.horizontalHeader().ResizeMode.Fixed)
+        self.stats_table.horizontalHeader().setSectionResizeMode(1, self.stats_table.horizontalHeader().ResizeMode.Stretch)
+        self.stats_table.horizontalHeader().setSectionResizeMode(2, self.stats_table.horizontalHeader().ResizeMode.Fixed)
+        self.stats_table.setColumnWidth(0, 72)
+        self.stats_table.setColumnWidth(2, 32)
         self.stats_table.verticalHeader().setVisible(False)
         self.stats_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.stats_table.setMinimumHeight(140)
@@ -503,7 +434,7 @@ class ItemCreatorWidget(QWidget):
                 border: 1px solid #30363d;
                 border-radius: 6px;
                 selection-background-color: #3a5a7a;
-                gridline-color: #30363d;
+                gridline-color: transparent;
             }
             QTableWidget::item {
                 padding: 4px;
@@ -513,11 +444,16 @@ class ItemCreatorWidget(QWidget):
                 background-color: #161b22;
                 border: none;
                 border-bottom: 1px solid #30363d;
-                padding: 6px;
+                padding: 0px 10px;
+                height: 32px;
                 color: #8b949e;
                 font-weight: 600;
+                text-align: left;
             }
         """)
+        self.stats_table.horizontalHeader().setHighlightSections(False)
+        self.stats_table.horizontalHeader().setSectionsClickable(False)
+        self.stats_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         stats_layout.addWidget(self.stats_table)
         stats_buttons = QHBoxLayout()
         self.add_stat_btn = QToolButton(stats_group)
@@ -527,14 +463,6 @@ class ItemCreatorWidget(QWidget):
         self.add_stat_btn.setToolTip("Add Stat")
         self.add_stat_btn.setFixedSize(32, 32)
         
-        self.remove_stat_btn = QToolButton(stats_group)
-        self.remove_stat_btn.setObjectName("DestructiveButton")
-        self.remove_stat_btn.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "minus.svg")))
-        self.remove_stat_btn.setIconSize(QSize(16, 16))
-        self.remove_stat_btn.setToolTip("Remove Selected Stat")
-        self.remove_stat_btn.setFixedSize(32, 32)
-        
-        # Override global padding to force square shape
         square_btn_style = """
             QToolButton {
                 padding: 4px;
@@ -542,15 +470,12 @@ class ItemCreatorWidget(QWidget):
             }
         """
         self.add_stat_btn.setStyleSheet(square_btn_style)
-        self.remove_stat_btn.setStyleSheet(square_btn_style)
         
         self.add_stat_btn.clicked.connect(self._add_stat_row)
-        self.remove_stat_btn.clicked.connect(self._remove_stat_row)
         stats_buttons.addWidget(self.add_stat_btn)
-        stats_buttons.addWidget(self.remove_stat_btn)
         stats_buttons.addStretch(1)
         stats_layout.addLayout(stats_buttons)
-        form_layout.addWidget(stats_group)
+        se_layout.addWidget(stats_group, 1)
 
         effects_group = QGroupBox("Effects", self)
         effects_group.setObjectName("TransparentContainer")
@@ -568,8 +493,9 @@ class ItemCreatorWidget(QWidget):
         self.fuse_stats_check.setToolTip("Combine stats and effects boxes. Only available when no stats are set.")
         self.fuse_stats_check.stateChanged.connect(self._on_fuse_stats_changed)
         effects_layout.addWidget(self.fuse_stats_check)
-        
-        form_layout.addWidget(effects_group)
+        se_layout.addWidget(effects_group, 1)
+
+        form_layout.addWidget(stats_effects_row)
 
         flavor_group = QGroupBox("Flavor Text", self)
         flavor_group.setObjectName("TransparentContainer")
@@ -587,6 +513,127 @@ class ItemCreatorWidget(QWidget):
         preview_panel = QWidget(self)
         preview_layout = QVBoxLayout(preview_panel)
         preview_layout.setSpacing(8)
+
+        # ── Top bar: Classes | Categories+Level | Display Options ──
+        top_bar = QFrame(preview_panel)
+        top_bar.setStyleSheet(
+            "QFrame#ItemTopBar { background-color: #161b22;"
+            " border: 1px solid #30363d; border-radius: 8px; }"
+        )
+        top_bar.setObjectName("ItemTopBar")
+        tb_layout = QHBoxLayout(top_bar)
+        tb_layout.setContentsMargins(24, 20, 24, 20)
+        tb_layout.setSpacing(40)
+
+        # --- Classes column ---
+        classes_col = QVBoxLayout()
+        classes_col.setSpacing(10)
+
+        classes_hdr = QLabel("CLASSES")
+        classes_hdr.setStyleSheet(
+            "font-size: 11px; font-weight: bold; color: #8b949e; border: none;"
+        )
+        classes_col.addWidget(classes_hdr)
+
+        self._classes_edit = QLineEdit()
+        self._classes_edit.setPlaceholderText("e.g. Fighter, Rogue, Wizard...")
+        self._classes_edit.setStyleSheet("font-size: 12px;")
+        self._classes_edit.textChanged.connect(self._mark_dirty)
+        classes_col.addWidget(self._classes_edit)
+
+        # --- Level section (under classes) ---
+        level_hdr = QLabel("LEVEL")
+        level_hdr.setStyleSheet(
+            "font-size: 11px; font-weight: bold; color: #8b949e; border: none;"
+            " margin-top: 8px;"
+        )
+        classes_col.addWidget(level_hdr)
+        level_row_widget = QWidget()
+        level_row_widget.setObjectName("TransparentContainer")
+        level_row_layout = QHBoxLayout(level_row_widget)
+        level_row_layout.setContentsMargins(0, 0, 0, 0)
+        level_row_layout.setSpacing(6)
+        self._level_edit = QLineEdit()
+        self._level_edit.setFixedWidth(42)
+        self._level_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._level_edit.setValidator(QIntValidator(1, 20, self))
+        self._level_edit.setText(str(self._level_value))
+        self._level_edit.textChanged.connect(self._on_level_text_changed)
+        self._level_edit.editingFinished.connect(self._on_level_edit_finished)
+        level_row_layout.addWidget(self._level_edit)
+        self._level_slider = QSlider(Qt.Orientation.Horizontal)
+        self._level_slider.setRange(1, 20)
+        self._level_slider.setValue(self._level_value)
+        self._level_slider.setTickInterval(1)
+        self._level_slider.setSingleStep(1)
+        self._level_slider.valueChanged.connect(
+            lambda v: (
+                self._level_edit.setText(str(v)),
+                setattr(self, "_level_value", v),
+                self._mark_dirty(),
+            )
+        )
+        level_row_layout.addWidget(self._level_slider, 1)
+        classes_col.addWidget(level_row_widget)
+
+        tb_layout.addLayout(classes_col)
+
+        # --- Categories column ---
+        cats_col = QVBoxLayout()
+        cats_col.setSpacing(10)
+        cats_hdr = QLabel("CATEGORIES")
+        cats_hdr.setStyleSheet(
+            "font-size: 11px; font-weight: bold; color: #8b949e; border: none;"
+        )
+        cats_col.addWidget(cats_hdr)
+        cats_col.addStretch(1) # Align content to bottom
+
+        tags_grid_widget = QWidget()
+        tags_grid_widget.setObjectName("TransparentContainer")
+        tags_grid = QGridLayout(tags_grid_widget)
+        tags_grid.setContentsMargins(0, 0, 0, 0)
+        tags_grid.setHorizontalSpacing(4)
+        tags_grid.setVerticalSpacing(10)
+        self._category_names = [
+            "equipment", "consumables", "valuables", "magic", "miscellaneous", "quest",
+        ]
+        self._category_checks: Dict[str, QCheckBox] = {}
+        for i, name in enumerate(self._category_names):
+            label_text = name.capitalize()
+            cb = QCheckBox(label_text)
+            cb.setStyleSheet("font-size: 12px; opacity: 0.9;")
+            cb.stateChanged.connect(self._mark_dirty)
+            self._category_checks[name] = cb
+            tags_grid.addWidget(cb, i // 2, i % 2)
+        cats_col.addWidget(tags_grid_widget)
+        tb_layout.addLayout(cats_col)
+
+        # --- Display options column ---
+        disp_col = QVBoxLayout()
+        disp_col.setSpacing(10)
+        disp_hdr = QLabel("DISPLAY OPTIONS")
+        disp_hdr.setStyleSheet(
+            "font-size: 11px; font-weight: bold; color: #8b949e; border: none;"
+        )
+        disp_col.addWidget(disp_hdr)
+        disp_col.addStretch(1) # Align content to bottom
+        self._show_level_check = QCheckBox("Show Level")
+        self._show_level_check.setStyleSheet("font-size: 12px; opacity: 0.9;")
+        self._show_level_check.stateChanged.connect(self._mark_dirty)
+        self._show_rarity_check = QCheckBox("Show Rarity")
+        self._show_rarity_check.setChecked(True)
+        self._show_rarity_check.setStyleSheet("font-size: 12px; opacity: 0.9;")
+        self._show_rarity_check.stateChanged.connect(self._mark_dirty)
+        self._icon_padding_check = QCheckBox("Icon Padding")
+        self._icon_padding_check.setStyleSheet("font-size: 12px; opacity: 0.9;")
+        self._icon_padding_check.stateChanged.connect(self._mark_dirty)
+        disp_col.addWidget(self._show_level_check)
+        disp_col.addWidget(self._show_rarity_check)
+        disp_col.addWidget(self._icon_padding_check)
+        tb_layout.addLayout(disp_col)
+        preview_layout.addWidget(top_bar)
+
+        # ── Preview header ──
         self._preview_header = QLabel("Preview", preview_panel)
         self._preview_header.setObjectName("Header")
         header_row = QHBoxLayout()
@@ -628,7 +675,6 @@ class ItemCreatorWidget(QWidget):
 
         self.title_edit.textChanged.connect(self._mark_dirty)
         self.rarity_combo.currentTextChanged.connect(self._mark_dirty)
-        self.all_classes_check.stateChanged.connect(self._on_all_classes_changed)
         self.icon_edit.textChanged.connect(self._mark_dirty)
         self.icon_edit.textChanged.connect(self._sync_icon_selection)
         self.effects_edit.textChanged.connect(self._mark_dirty)
@@ -648,23 +694,13 @@ class ItemCreatorWidget(QWidget):
         super().showEvent(event)
         self.update_preview()
 
-    def _on_all_classes_changed(self, state: int) -> None:
-        """Enable/disable individual class checkboxes based on 'All Classes' state."""
-        is_all = state == Qt.CheckState.Checked.value
-        for cb in self._class_checks.values():
-            cb.setEnabled(not is_all)
-            if is_all:
-                cb.setChecked(False)
-        self._mark_dirty()
+
 
     def _seed_stats(self) -> None:
         sample_rows = [("+1", "AC"), ("+1", "CON")]
         self.stats_table.blockSignals(True)
         for value, name in sample_rows:
-            row = self.stats_table.rowCount()
-            self.stats_table.insertRow(row)
-            self.stats_table.setItem(row, 0, QTableWidgetItem(value))
-            self.stats_table.setItem(row, 1, QTableWidgetItem(name))
+            self._insert_stat_row(value, name)
         self.stats_table.blockSignals(False)
 
     def _normalize_icon_path(self, path: str) -> str:
@@ -691,9 +727,15 @@ class ItemCreatorWidget(QWidget):
                         })
         return sorted(icons, key=lambda x: (x['category'] != "All", x['category'], x['label'].lower()))
 
+    def _on_icon_category_changed(self, text: str) -> None:
+        self._filter_icons()
+
+    def _on_icon_search_changed(self, text: str) -> None:
+        self._filter_icons()
+
     def _filter_icons(self) -> None:
-        search_text = self.icon_search.text().lower().strip()
-        category_filter = self.icon_category_filter.currentText()
+        search_text = self._icon_search_edit.text().lower().strip()
+        category_filter = self.icon_category_combo.currentText()
         
         self._icon_grid_buttons = []
         for icon_data in self._all_icon_data:
@@ -778,12 +820,53 @@ class ItemCreatorWidget(QWidget):
         if path:
             self._set_icon_path(path)
 
-    def _add_stat_row(self) -> None:
+    def _insert_stat_row(self, value: str = "+1", name: str = "Stat") -> None:
+        """Insert a stat row with value, name, and inline remove button."""
         row = self.stats_table.rowCount()
         self.stats_table.insertRow(row)
-        self.stats_table.setItem(row, 0, QTableWidgetItem("+1"))
-        self.stats_table.setItem(row, 1, QTableWidgetItem("Stat"))
+        self.stats_table.setItem(row, 0, QTableWidgetItem(value))
+        self.stats_table.setItem(row, 1, QTableWidgetItem(name))
+        
+        # Center the remove button in a layout
+        container = QWidget()
+        lay = QHBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        remove_btn = QToolButton()
+        remove_btn.setObjectName("DestructiveButton")
+        remove_btn.setProperty("compact", "true")
+        remove_btn.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "minus.svg")))
+        remove_btn.setIconSize(QSize(12, 12))
+        remove_btn.setFixedSize(24, 24)
+        remove_btn.setToolTip("Remove Stat")
+        remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove_btn.clicked.connect(lambda _=False, r=row: self._remove_stat_at(r))
+        
+        lay.addWidget(remove_btn)
+        self.stats_table.setCellWidget(row, 2, container)
+
+    def _add_stat_row(self) -> None:
+        self._insert_stat_row()
         self._mark_dirty()
+
+    def _remove_stat_at(self, row: int) -> None:
+        """Remove stat row at given index, then re-wire remaining buttons."""
+        if row < self.stats_table.rowCount():
+            self.stats_table.removeRow(row)
+            # Re-wire all remaining remove buttons to correct row indices
+            for r in range(self.stats_table.rowCount()):
+                btn = self.stats_table.cellWidget(r, 2)
+                if btn:
+                    # The button is inside a container widget, so we need to get the button itself
+                    # Assuming the button is the only widget in the layout of the container
+                    actual_btn = btn.layout().itemAt(0).widget()
+                    try:
+                        actual_btn.clicked.disconnect()
+                    except Exception:
+                        pass
+                    actual_btn.clicked.connect(lambda _=False, idx=r: self._remove_stat_at(idx))
+            self._mark_dirty()
 
     def _remove_stat_row(self) -> None:
         selected = self.stats_table.selectionModel().selectedRows()
@@ -791,6 +874,17 @@ class ItemCreatorWidget(QWidget):
             return
         for index in sorted(selected, key=lambda i: i.row(), reverse=True):
             self.stats_table.removeRow(index.row())
+        # Re-wire remaining remove buttons
+        for r in range(self.stats_table.rowCount()):
+            btn = self.stats_table.cellWidget(r, 2)
+            if btn:
+                # The button is inside a container widget, so we need to get the button itself
+                actual_btn = btn.layout().itemAt(0).widget()
+                try:
+                    actual_btn.clicked.disconnect()
+                except Exception:
+                    pass
+                actual_btn.clicked.connect(lambda _=False, idx=r: self._remove_stat_at(idx))
         self._mark_dirty()
 
     def _collect_stats(self) -> List[Tuple[str, str]]:
@@ -809,11 +903,12 @@ class ItemCreatorWidget(QWidget):
         return [line.strip() for line in lines if line.strip()]
 
     def _current_spec(self) -> ItemCardSpec:
-        # Collect selected classes as list
-        if self.all_classes_check.isChecked():
-            class_value = []  # Empty list means "All Classes"
+        # Collect classes from text input
+        classes_raw = self._classes_edit.text().strip()
+        if classes_raw:
+            class_value = [c.strip() for c in classes_raw.split(",") if c.strip()]
         else:
-            class_value = [name for name, cb in self._class_checks.items() if cb.isChecked()]
+            class_value = []  # Empty list means "All Classes"
         tags: List[str] = []
         seen: set[str] = set()
         for tag, cb in self._category_checks.items():
@@ -822,15 +917,6 @@ class ItemCreatorWidget(QWidget):
                 if key not in seen:
                     tags.append(tag)
                     seen.add(key)
-        custom_raw = self._tag_custom_edit.text().strip()
-        if custom_raw:
-            for part in custom_raw.split(","):
-                cleaned = part.strip()
-                if cleaned:
-                    key = cleaned.lower()
-                    if key not in seen:
-                        tags.append(cleaned)
-                        seen.add(key)
         level = self._level_value
         
         return ItemCardSpec(
@@ -844,23 +930,27 @@ class ItemCreatorWidget(QWidget):
             tags=tags,
             level=level,
             fused_stats_effects=self.fuse_stats_check.isChecked(),
+            show_level=self._show_level_check.isChecked(),
+            show_rarity=self._show_rarity_check.isChecked(),
+            show_icon_padding=self._icon_padding_check.isChecked(),
         )
 
     def _apply_spec(self, spec: ItemCardSpec) -> None:
         self.title_edit.blockSignals(True)
         self.rarity_combo.blockSignals(True)
-        self.all_classes_check.blockSignals(True)
-        for cb in self._class_checks.values():
-            cb.blockSignals(True)
+        self._classes_edit.blockSignals(True)
         for cb in self._category_checks.values():
             cb.blockSignals(True)
-        self._tag_custom_edit.blockSignals(True)
         self._level_edit.blockSignals(True)
+        self._level_slider.blockSignals(True)
         self.icon_edit.blockSignals(True)
         self.effects_edit.blockSignals(True)
         self.flavor_edit.blockSignals(True)
         self.stats_table.blockSignals(True)
         self.fuse_stats_check.blockSignals(True)
+        self._show_level_check.blockSignals(True)
+        self._show_rarity_check.blockSignals(True)
+        self._icon_padding_check.blockSignals(True)
 
         self.title_edit.setText(spec.title or "Untitled Item")
         if spec.rarity in [self.rarity_combo.itemText(i) for i in range(self.rarity_combo.count())]:
@@ -868,33 +958,22 @@ class ItemCreatorWidget(QWidget):
         else:
             self.rarity_combo.setCurrentText("common")
         
-        # Apply classes - classes is now a List[str]
-        if not spec.classes or len(spec.classes) == 0:
-            # Empty list means "All Classes"
-            self.all_classes_check.setChecked(True)
-            for cb in self._class_checks.values():
-                cb.setChecked(False)
-                cb.setEnabled(False)
+        # Apply classes from text input
+        if spec.classes:
+            self._classes_edit.setText(", ".join(spec.classes))
         else:
-            self.all_classes_check.setChecked(False)
-            for name, cb in self._class_checks.items():
-                cb.setEnabled(True)
-                cb.setChecked(name in spec.classes)
+            self._classes_edit.setText("")
 
         raw_tags = [str(t).strip() for t in (spec.tags or []) if str(t).strip()]
         normalized = {t.lower() for t in raw_tags}
-        extras = []
         for tag, cb in self._category_checks.items():
             cb.setChecked(tag in normalized)
-        for tag in raw_tags:
-            if tag.lower() not in self._category_checks:
-                extras.append(tag)
-        self._tag_custom_edit.setText(", ".join(extras))
         level = spec.level if spec.level is not None else 1
         if level < 1 or level > 20:
             level = 1
         self._level_value = level
         self._level_edit.setText(str(level))
+        self._level_slider.setValue(level)
         
         self.icon_edit.setText(spec.icon_path or "")
         self.effects_edit.setPlainText("\n".join(spec.effects))
@@ -902,27 +981,28 @@ class ItemCreatorWidget(QWidget):
 
         self.stats_table.setRowCount(0)
         for value, name in spec.stats:
-            row = self.stats_table.rowCount()
-            self.stats_table.insertRow(row)
-            self.stats_table.setItem(row, 0, QTableWidgetItem(value))
-            self.stats_table.setItem(row, 1, QTableWidgetItem(name))
+            self._insert_stat_row(value, name)
 
         self.fuse_stats_check.setChecked(spec.fused_stats_effects)
+        self._show_level_check.setChecked(spec.show_level)
+        self._show_rarity_check.setChecked(spec.show_rarity)
+        self._icon_padding_check.setChecked(spec.show_icon_padding)
 
         self.title_edit.blockSignals(False)
         self.rarity_combo.blockSignals(False)
-        self.all_classes_check.blockSignals(False)
-        for cb in self._class_checks.values():
-            cb.blockSignals(False)
+        self._classes_edit.blockSignals(False)
         for cb in self._category_checks.values():
             cb.blockSignals(False)
-        self._tag_custom_edit.blockSignals(False)
         self._level_edit.blockSignals(False)
+        self._level_slider.blockSignals(False)
         self.icon_edit.blockSignals(False)
         self.effects_edit.blockSignals(False)
         self.flavor_edit.blockSignals(False)
         self.stats_table.blockSignals(False)
         self.fuse_stats_check.blockSignals(False)
+        self._show_level_check.blockSignals(False)
+        self._show_rarity_check.blockSignals(False)
+        self._icon_padding_check.blockSignals(False)
         self._sync_icon_selection()
         self._update_ui_states()
         self.update_preview()
@@ -1157,7 +1237,6 @@ class ItemCreatorWidget(QWidget):
         fused = self.fuse_stats_check.isChecked()
         self.stats_table.setEnabled(not fused)
         self.add_stat_btn.setEnabled(not fused)
-        self.remove_stat_btn.setEnabled(not fused)
 
     def _update_dirty_indicator(self) -> None:
         if self._dirty:

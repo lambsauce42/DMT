@@ -92,28 +92,24 @@ def test_item_toolbar_buttons_are_square(item_widget):
 
 def test_item_stats_buttons(item_widget, qtbot):
     """
-    Click Add/Remove Stat buttons.
+    Click Add stat button and inline remove buttons.
     """
-    # Find add/remove buttons in the stats group
-    # They are QToolButtons with specific icons or tooltips
-    
-    # We can find them by object name if they have unique ones, or by tooltip
-    # Add Stat, Remove Selected Stat
-    
     buttons = item_widget.findChildren(QToolButton)
     add_btn = next((b for b in buttons if b.toolTip() == "Add Stat"), None)
-    remove_btn = next((b for b in buttons if b.toolTip() == "Remove Selected Stat"), None)
     
     assert add_btn is not None
-    assert remove_btn is not None
     
     # Click Add
     row_count_before = item_widget.stats_table.rowCount()
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
     assert item_widget.stats_table.rowCount() == row_count_before + 1
     
-    # Select row to remove
-    item_widget.stats_table.selectRow(0)
+    # Find the inline remove button in the last row
+    last_row = item_widget.stats_table.rowCount() - 1
+    container = item_widget.stats_table.cellWidget(last_row, 2)
+    assert container is not None
+    remove_btn = container.layout().itemAt(0).widget()
+    assert remove_btn is not None
     qtbot.mouseClick(remove_btn, Qt.MouseButton.LeftButton)
     assert item_widget.stats_table.rowCount() == row_count_before
 

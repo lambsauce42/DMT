@@ -59,14 +59,12 @@ def test_fusion_logic_enable_disable(item_widget, qtbot):
     # Stats UI should be disabled
     assert not item_widget.stats_table.isEnabled()
     assert not item_widget.add_stat_btn.isEnabled()
-    assert not item_widget.remove_stat_btn.isEnabled()
     
     # Uncheck it
     qtbot.mouseClick(item_widget.fuse_stats_check, Qt.MouseButton.LeftButton)
     assert not item_widget.fuse_stats_check.isChecked()
     assert item_widget.stats_table.isEnabled()
     assert item_widget.add_stat_btn.isEnabled()
-    assert item_widget.remove_stat_btn.isEnabled()
 
 def test_fusion_persistence(item_widget, qtbot):
     # Prepare fused state

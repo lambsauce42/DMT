@@ -5,13 +5,13 @@ import sys
 import shutil
 from pathlib import Path
 
-DEFAULT_SAVE_DIR_PARTS = ("Documents", "AIOHub", "DMT")
-DEFAULT_SAVE_DIR_FALLBACK_PARTS = ("documents", "AIOHub", "DMT")
+DEFAULT_SAVE_DIR_PARTS = ("Documents", "DMT")
+DEFAULT_SAVE_DIR_FALLBACK_PARTS = ("documents", "DMT")
 LEGACY_NESTED_DND_DIR_NAME = "DMT_saves"
 
 
 def _in_test_env() -> bool:
-    if os.environ.get("AIOHUB_TEST_MODE") == "1":
+    if os.environ.get("DMT_TEST_MODE") == "1":
         return True
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return True
@@ -19,38 +19,40 @@ def _in_test_env() -> bool:
 
 
 def _migrate_old_data(new_dir: Path) -> None:
-    """Migrates old DND-AAT data to the new DMT directory if it exists."""
+    """Migrates old DND-AAT and AIOHub data to the new DMT directory if they exist."""
     if _in_test_env():
         return
         
     home = os.path.expanduser("~")
-    old_dir_parts = ("Documents", "AIOHub", "DND-AAT")
-    old_fallback_parts = ("documents", "AIOHub", "DND-AAT")
+    migration_sources = [
+        ("Documents", "AIOHub", "DND-AAT"),
+        ("documents", "AIOHub", "DND-AAT"),
+        ("Documents", "AIOHub", "DMT"),
+        ("documents", "AIOHub", "DMT"),
+    ]
     
-    old_dir = Path(home).joinpath(*old_dir_parts)
-    if not old_dir.exists():
-        old_dir = Path(home).joinpath(*old_fallback_parts)
-        
-    if old_dir.exists():
-        try:
-            new_dir.parent.mkdir(parents=True, exist_ok=True)
-            if new_dir.exists():
-                if new_dir.is_dir():
-                    shutil.copytree(old_dir, new_dir, dirs_exist_ok=True)
-                    shutil.rmtree(old_dir, ignore_errors=True)
-                    print(f"Merged data from {old_dir} into {new_dir}")
+    for parts in migration_sources:
+        old_dir = Path(home).joinpath(*parts)
+        if old_dir.exists() and old_dir.resolve() != new_dir.resolve():
+            try:
+                new_dir.parent.mkdir(parents=True, exist_ok=True)
+                if new_dir.exists():
+                    if new_dir.is_dir():
+                        shutil.copytree(old_dir, new_dir, dirs_exist_ok=True)
+                        shutil.rmtree(old_dir, ignore_errors=True)
+                        print(f"Merged data from {old_dir} into {new_dir}")
+                    else:
+                        print(f"Failed to migrate data: target exists and is not a directory ({new_dir})")
                 else:
-                    print(f"Failed to migrate data: target exists and is not a directory ({new_dir})")
-            else:
-                shutil.move(str(old_dir), str(new_dir))
-                print(f"Migrated data from {old_dir} to {new_dir}")
-        except Exception as e:
-            print(f"Failed to migrate data: {e}")
+                    shutil.move(str(old_dir), str(new_dir))
+                    print(f"Migrated data from {old_dir} to {new_dir}")
+            except Exception as e:
+                print(f"Failed to migrate data from {old_dir}: {e}")
 
 
 def default_dnd_save_dir() -> str:
     if _in_test_env():
-        return str(Path.cwd() / "data" / "test_saves" / "DMT")
+        return str(Path.cwd() / "tests" / "test_saves" / "DMT")
     
     home = os.path.expanduser("~")
     primary = Path(home).joinpath(*DEFAULT_SAVE_DIR_PARTS)

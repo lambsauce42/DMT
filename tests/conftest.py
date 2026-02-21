@@ -9,6 +9,6 @@ import os
 os.environ["QT_API"] = "pyqt6"
 os.environ["PYTEST_QT_API"] = "pyqt6"
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("AIOHUB_TEST_MODE", "1")
+os.environ.setdefault("DMT_TEST_MODE", "1")
 
 import pytest

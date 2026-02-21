@@ -21,14 +21,14 @@ def test_icon_searching(app):
     widget = item_creator.ItemCreatorWidget()
     try:
         # Search for a specific icon name (e.g., 'amulett')
-        widget.icon_search.setText("amulett")
+        widget._icon_search_edit.setText("amulett")
         # Ensure only matching icons are visible
         visible_buttons = [btn for btn in widget._icon_grid_buttons if not btn.isHidden()]
         for btn in visible_buttons:
             assert "amulett" in btn.text().lower()
         
         # Clear search
-        widget.icon_search.setText("")
+        widget._icon_search_edit.setText("")
         visible_buttons_cleared = [btn for btn in widget._icon_grid_buttons if not btn.isHidden()]
         assert len(visible_buttons_cleared) > len(visible_buttons)
     finally:
@@ -38,9 +38,9 @@ def test_icon_category_filtering(app):
     widget = item_creator.ItemCreatorWidget()
     try:
         # Find 'Equipment' category in combo box
-        eq_index = widget.icon_category_filter.findText("Equipment")
+        eq_index = widget.icon_category_combo.findText("Equipment")
         if eq_index != -1:
-            widget.icon_category_filter.setCurrentIndex(eq_index)
+            widget.icon_category_combo.setCurrentIndex(eq_index)
             # All visible buttons should be equipment
             visible_buttons = [btn for btn in widget._icon_grid_buttons if not btn.isHidden()]
             # Check a few
@@ -50,9 +50,9 @@ def test_icon_category_filtering(app):
                 assert matching_data[0]['category'] == "Equipment"
         
         # Change to 'Consumables'
-        cons_index = widget.icon_category_filter.findText("Consumables")
+        cons_index = widget.icon_category_combo.findText("Consumables")
         if cons_index != -1:
-            widget.icon_category_filter.setCurrentIndex(cons_index)
+            widget.icon_category_combo.setCurrentIndex(cons_index)
             visible_buttons = [btn for btn in widget._icon_grid_buttons if not btn.isHidden()]
             for btn in visible_buttons:
                 matching_data = [d for d in widget._all_icon_data if d['button'] == btn]

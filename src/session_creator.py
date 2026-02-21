@@ -87,8 +87,8 @@ ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets
 
 
 def session_storage_dir() -> Path:
-    # MD specifies: ~/Documents/AIOHub/DMT/sessions/ 
-    # save_paths.default_dnd_save_dir() returns ~/Documents/AIOHub/DMT (or equivalent)
+    # MD specifies: ~/Documents/DMT/sessions/ 
+    # save_paths.default_dnd_save_dir() returns ~/Documents/DMT (or equivalent)
     return Path(default_dnd_save_dir()) / SESSION_DIR_NAME
 
 def session_storage_path() -> Path:

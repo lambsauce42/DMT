@@ -3,7 +3,7 @@ import sys
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("AIOHUB_TEST_MODE", "1")
+os.environ.setdefault("DMT_TEST_MODE", "1")
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")

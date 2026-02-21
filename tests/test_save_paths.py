@@ -22,9 +22,9 @@ class TestSavePaths(unittest.TestCase):
         self.assertTrue(save_paths._in_test_env())
 
     def test_default_dnd_save_dir_test_mode(self):
-        """In test environment, save dir should point to data/test_saves/DMT."""
+        """In test environment, save dir should point to tests/test_saves/DMT."""
         save_dir = save_paths.default_dnd_save_dir()
-        expected = str(Path.cwd() / "data" / "test_saves" / "DMT")
+        expected = str(Path.cwd() / "tests" / "test_saves" / "DMT")
         self.assertEqual(save_dir, expected)
 
     @patch("save_paths._in_test_env")
@@ -37,7 +37,7 @@ class TestSavePaths(unittest.TestCase):
         mock_exists.return_value = True # Primary exists
         
         save_dir = save_paths.default_dnd_save_dir()
-        self.assertEqual(Path(save_dir), Path("/home/user/Documents/AIOHub/DMT"))
+        self.assertEqual(Path(save_dir), Path("/home/user/Documents/DMT"))
 
     @patch("save_paths._in_test_env", return_value=False)
     @patch("os.path.expanduser")
@@ -46,7 +46,7 @@ class TestSavePaths(unittest.TestCase):
             home = Path(td)
             mock_expanduser.return_value = str(home)
             old_dir = home / "Documents" / "AIOHub" / "DND-AAT"
-            new_dir = home / "Documents" / "AIOHub" / "DMT"
+            new_dir = home / "Documents" / "DMT"
             old_dir.mkdir(parents=True, exist_ok=True)
             new_dir.mkdir(parents=True, exist_ok=True)
             (old_dir / "legacy.txt").write_text("legacy", encoding="utf-8")

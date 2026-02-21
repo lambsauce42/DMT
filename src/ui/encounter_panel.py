@@ -184,69 +184,152 @@ class EncounterPanel(QWidget):
         layout.addWidget(splitter, 1)
         QTimer.singleShot(0, self._apply_splitter_sizes)
 
+    # ── shared geometry for party-panel rows (mirrors C# encounter layout) ──
+    _PARTY_LABEL_W = 124
+    _PARTY_LABEL_H = 24
+    _PARTY_GAP_LS = 8      # label → slider
+    _PARTY_GAP_SV = 4      # slider → value
+    _PARTY_VALUE_W = 54
+    _PARTY_VALUE_H = 28
+    _PARTY_ROW_H = 28
+    _PARTY_STEP_SIZE = 26   # +/- buttons
+
+    @staticmethod
+    def _make_party_label_box(text: str) -> QFrame:
+        box = QFrame()
+        box.setFixedSize(EncounterPanel._PARTY_LABEL_W, EncounterPanel._PARTY_LABEL_H)
+        box.setStyleSheet(
+            "QFrame { background-color: #0d1117; border: 1px solid #2e3a4c;"
+            " border-radius: 4px; }"
+        )
+        lbl = QLabel(text, box)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet(
+            "QLabel { border: none; color: #c9d1d9; font-size: 12px; }"
+        )
+        lo = QHBoxLayout(box)
+        lo.setContentsMargins(8, 0, 8, 0)
+        lo.addWidget(lbl)
+        return box
+
+    @staticmethod
+    def _make_party_value_label(text: str = "") -> QLabel:
+        lbl = QLabel(text)
+        lbl.setFixedSize(EncounterPanel._PARTY_VALUE_W, EncounterPanel._PARTY_VALUE_H)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet(
+            "QLabel { background-color: #0d1117; border: 1px solid #2e3a4c;"
+            " border-radius: 4px; color: #c9d1d9; }"
+        )
+        return lbl
+
+    @staticmethod
+    def _make_step_button(icon_name: str) -> QPushButton:
+        """Create a +/- step button with SVG icon, matching the value box height."""
+        btn = QPushButton()
+        icon_path = os.path.join(ICON_DIR, f"{icon_name}.svg")
+        btn.setIcon(QIcon(icon_path))
+        btn.setIconSize(QSize(14, 14))
+        btn.setFixedSize(EncounterPanel._PARTY_STEP_SIZE, EncounterPanel._PARTY_VALUE_H)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(
+            "QPushButton { background-color: #1b2432; border: 1px solid #3b424b;"
+            " border-radius: 4px; color: #c9d1d9; font-weight: 600; }"
+            "QPushButton:hover { border-color: #58a6ff; color: #e6edf3; }"
+        )
+        return btn
+
     def _build_party_panel(self) -> QFrame:
         panel = QFrame(self)
         panel.setObjectName("Panel")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         title = QLabel("Party")
         title.setObjectName("PanelTitle")
         layout.addWidget(title)
 
-        form_container = QWidget()
-        form_container.setObjectName("TransparentContainer")
-        form = QFormLayout(form_container)
-        form.setContentsMargins(0, 0, 0, 0)
-        self._party_size = PlusMinusSpinBox()
-        self._party_size.setRange(1, 8)
-        self._party_size.setValue(4)
-        self._party_size.valueChanged.connect(self._rebuild_levels)
+        # ── Party size row ────────────────────────────────────────────
+        ps_row = QHBoxLayout()
+        ps_row.setSpacing(0)
+        ps_row.addWidget(self._make_party_label_box("Party size"))
+        ps_row.addSpacing(self._PARTY_GAP_LS)
+
+        self._party_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self._party_size_slider.setRange(1, 8)
+        self._party_size_slider.setValue(4)
+        self._party_size_slider.setTickInterval(1)
+        self._party_size_slider.setSingleStep(1)
+        self._party_size_slider.setMinimumHeight(self._PARTY_ROW_H)
+        ps_row.addWidget(self._party_size_slider, 1)
+        ps_row.addSpacing(self._PARTY_GAP_SV)
+
+        self._party_size_value = self._make_party_value_label("4")
+        ps_row.addWidget(self._party_size_value)
+
+        def _on_party_size_changed(val: int) -> None:
+            self._party_size_value.setText(str(val))
+            self._rebuild_levels(val)
+
+        self._party_size_slider.valueChanged.connect(_on_party_size_changed)
+        layout.addLayout(ps_row)
+
+        # ── Difficulty row ────────────────────────────────────────────
+        diff_row = QHBoxLayout()
+        diff_row.setSpacing(0)
+        diff_row.addWidget(self._make_party_label_box("Difficulty"))
+        diff_row.addSpacing(self._PARTY_GAP_LS)
 
         self._difficulty_combo = QComboBox()
         self._difficulty_combo.addItems(
             [key.title() for key in self._difficulty_keys] or ["Medium"]
         )
+        self._difficulty_combo.setMinimumHeight(self._PARTY_ROW_H)
         self._difficulty_combo.currentTextChanged.connect(self._recompute_totals)
+        diff_row.addWidget(self._difficulty_combo, 1)
+        layout.addLayout(diff_row)
 
-        form.addRow("Party size", self._party_size)
-        form.addRow("Difficulty", self._difficulty_combo)
+        # ── Custom factor row ─────────────────────────────────────────
+        cf_row = QHBoxLayout()
+        cf_row.setSpacing(0)
+        cf_row.addWidget(self._make_party_label_box("Custom factor"))
+        cf_row.addSpacing(self._PARTY_GAP_LS)
 
-        factor_row = QHBoxLayout()
         self._target_factor_slider = QSlider(Qt.Orientation.Horizontal)
-        self._target_factor_slider.setRange(50, 200)
+        self._target_factor_slider.setRange(10, 1000)
         self._target_factor_slider.setSingleStep(5)
         self._target_factor_slider.setValue(int(round(self._target_factor * 100)))
-        self._target_factor_slider.setMinimumWidth(260)
+        self._target_factor_slider.setMinimumHeight(self._PARTY_ROW_H)
         self._target_factor_slider.valueChanged.connect(
             self._on_target_factor_slider
         )
+        cf_row.addWidget(self._target_factor_slider, 1)
+        cf_row.addSpacing(self._PARTY_GAP_SV)
 
-        self._target_factor_spin = PlusMinusSpinBox()
-        self._target_factor_spin.setDecimals(2)
-        self._target_factor_spin.setRange(0.5, 2.0)
-        self._target_factor_spin.setSingleStep(0.05)
-        self._target_factor_spin.setValue(self._target_factor)
-        self._target_factor_spin.setSuffix("x")
-        self._target_factor_spin.valueChanged.connect(self._on_target_factor_spin)
+        self._target_factor_value = self._make_party_value_label(
+            f"{self._target_factor:.2f}"
+        )
+        cf_row.addWidget(self._target_factor_value)
+        layout.addLayout(cf_row)
 
-        factor_row.addWidget(self._target_factor_slider, 2)
-        factor_row.addWidget(self._target_factor_spin)
-        form.addRow("Custom factor", factor_row)
-        layout.addWidget(form_container)
+        # ── Player levels header ──────────────────────────────────────
+        levels_hdr = QLabel("Player Levels")
+        levels_hdr.setObjectName("PanelTitle")
+        levels_hdr.setStyleSheet(
+            "font-weight: 600; font-size: 13px; margin-top: 4px;"
+        )
+        layout.addWidget(levels_hdr)
 
-        levels_group = QGroupBox("Player Levels")
-        levels_group.setObjectName("TransparentContainer")
-        levels_layout = QVBoxLayout(levels_group)
+        # container for dynamically built level rows
         self._levels_container = QWidget()
         self._levels_container.setObjectName("TransparentContainer")
         self._levels_layout = QVBoxLayout(self._levels_container)
         self._levels_layout.setContentsMargins(0, 0, 0, 0)
-        self._levels_layout.setSpacing(6)
-        levels_layout.addWidget(self._levels_container)
-        layout.addWidget(levels_group)
+        self._levels_layout.setSpacing(4)
+        layout.addWidget(self._levels_container)
 
+        # target XP label
         self._target_label = QLabel("Target XP: 0")
         self._target_label.setObjectName("ColumnHeader")
         self._target_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -254,8 +337,10 @@ class EncounterPanel(QWidget):
         layout.addWidget(self._target_label)
         layout.addStretch(1)
 
-        self._level_spins: list[PlusMinusSpinBox] = []
-        self._rebuild_levels(self._party_size.value())
+        # init level tracking
+        self._level_sliders: list[QSlider] = []
+        self._level_value_labels: list[QLabel] = []
+        self._rebuild_levels(self._party_size_slider.value())
         return panel
 
     def _show_target_menu(self, pos) -> None:
@@ -568,38 +653,55 @@ class EncounterPanel(QWidget):
         QTimer.singleShot(0, self._sync_chip_widths)
 
         actions_row = QHBoxLayout()
+        actions_row.setSpacing(6)
+
+        _wide_btn_style = (
+            "QToolButton { background-color: #1b2432; border: 1px solid #3b424b;"
+            " border-radius: 6px; color: #c9d1d9; }"
+            "QToolButton:hover { border-color: #58a6ff; color: #e6edf3; }"
+        )
+        _danger_btn_style = (
+            "QToolButton { background-color: #8b1a1a; border: 1px solid #f85149;"
+            " border-radius: 6px; color: #ffe9e8; }"
+            "QToolButton:hover { background-color: #a42525;"
+            " border-color: #ff7b72; color: #ffffff; }"
+        )
+
         suggest_btn = QToolButton()
-        suggest_btn.setObjectName("SecondaryButton")
         suggest_btn.setIcon(QIcon(os.path.join(ICON_DIR, "lightbulb.svg")))
         suggest_btn.setToolTip("Suggest Monsters")
         suggest_btn.clicked.connect(self._suggest)
-        
+
         save_btn = QToolButton()
-        save_btn.setObjectName("SecondaryButton")
         save_btn.setIcon(QIcon(os.path.join(ICON_DIR, "save.svg")))
         save_btn.setToolTip("Save Encounter")
         save_btn.clicked.connect(self.save_encounter)
-        
+
         export_btn = QToolButton()
-        export_btn.setObjectName("SecondaryButton")
         export_btn.setIcon(QIcon(os.path.join(ICON_DIR, "export.svg")))
         export_btn.setToolTip("Export Encounter PDF")
         export_btn.clicked.connect(self._export_dialog)
-        
+
         clear_btn = QToolButton()
-        clear_btn.setObjectName("DestructiveButton")
         clear_btn.setIcon(QIcon(os.path.join(ICON_DIR, "trash.svg")))
         clear_btn.setToolTip("Clear Encounter")
         clear_btn.clicked.connect(self.new_encounter)
 
-        for btn in (suggest_btn, save_btn, export_btn, clear_btn):
-            btn.setFixedSize(36, 36)
-            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            btn.setIconSize(QSize(20, 20))
-            btn.setStyleSheet("padding: 0px;")
+        for btn in (suggest_btn, save_btn, export_btn):
+            btn.setFixedHeight(56)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setIconSize(QSize(22, 22))
+            btn.setStyleSheet(_wide_btn_style)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             actions_row.addWidget(btn)
-            
+
+        clear_btn.setFixedHeight(56)
+        clear_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        clear_btn.setIconSize(QSize(22, 22))
+        clear_btn.setStyleSheet(_danger_btn_style)
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        actions_row.addWidget(clear_btn)
+
         layout.addLayout(actions_row)
         return panel
 
@@ -614,18 +716,75 @@ class EncounterPanel(QWidget):
         return [cr for cr, _ in sorted(cr_map.items(), key=lambda item: item[1])]
 
     def _rebuild_levels(self, size: int) -> None:
-        previous = [spin.value() for spin in self._level_spins]
-        for spin in self._level_spins:
-            spin.deleteLater()
-        self._level_spins.clear()
+        previous = [s.value() for s in self._level_sliders]
+        # tear down old rows
+        for s in self._level_sliders:
+            s.deleteLater()
+        for lbl in self._level_value_labels:
+            lbl.deleteLater()
+        self._level_sliders.clear()
+        self._level_value_labels.clear()
+        # remove remaining row widgets from layout
+        while self._levels_layout.count():
+            item = self._levels_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+            elif item.layout():
+                sub = item.layout()
+                while sub.count():
+                    child = sub.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
 
-        for index in range(size):
-            spin = PlusMinusSpinBox()
-            spin.setRange(1, 20)
-            spin.setValue(previous[index] if index < len(previous) else 1)
-            spin.valueChanged.connect(self._recompute_totals)
-            self._levels_layout.addWidget(spin)
-            self._level_spins.append(spin)
+        for idx in range(size):
+            value = previous[idx] if idx < len(previous) else 1
+            row_widget = QWidget()
+            row_widget.setObjectName("TransparentContainer")
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(0)
+
+            label_box = self._make_party_label_box(f"Player {idx + 1}")
+            row_layout.addWidget(label_box)
+            row_layout.addSpacing(self._PARTY_GAP_LS)
+
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(1, 20)
+            slider.setValue(value)
+            slider.setTickInterval(1)
+            slider.setSingleStep(1)
+            slider.setMinimumHeight(self._PARTY_ROW_H)
+            row_layout.addWidget(slider, 1)
+            row_layout.addSpacing(self._PARTY_GAP_SV)
+
+            val_lbl = self._make_party_value_label(str(value))
+            row_layout.addWidget(val_lbl)
+            row_layout.addSpacing(4)
+
+            minus_btn = self._make_step_button("minus")
+            plus_btn = self._make_step_button("plus")
+            row_layout.addWidget(minus_btn)
+            row_layout.addSpacing(4)
+            row_layout.addWidget(plus_btn)
+
+            # wire slider ↔ label
+            def _sync(v: int, lbl=val_lbl) -> None:
+                lbl.setText(str(v))
+                self._recompute_totals()
+
+            slider.valueChanged.connect(_sync)
+            minus_btn.clicked.connect(
+                lambda _=False, s=slider: s.setValue(max(1, s.value() - 1))
+            )
+            plus_btn.clicked.connect(
+                lambda _=False, s=slider: s.setValue(min(20, s.value() + 1))
+            )
+
+            self._levels_layout.addWidget(row_widget)
+            self._level_sliders.append(slider)
+            self._level_value_labels.append(val_lbl)
+
         if hasattr(self, "_raw_label"):
             self._recompute_totals()
 
@@ -636,12 +795,12 @@ class EncounterPanel(QWidget):
 
     def _on_target_factor_slider(self, value: int) -> None:
         factor = value / 100.0
-        self._target_factor_spin.blockSignals(True)
-        self._target_factor_spin.setValue(factor)
-        self._target_factor_spin.blockSignals(False)
+        if hasattr(self, "_target_factor_value"):
+            self._target_factor_value.setText(f"{factor:.2f}")
         self._update_target_factor(factor)
 
     def _on_target_factor_spin(self, value: float) -> None:
+        # kept for API compat; slider drives value now
         slider_value = int(round(value * 100))
         self._target_factor_slider.blockSignals(True)
         self._target_factor_slider.setValue(slider_value)
@@ -655,7 +814,7 @@ class EncounterPanel(QWidget):
         self._recompute_totals()
 
     def _current_levels(self) -> list[int]:
-        return [spin.value() for spin in self._level_spins]
+        return [s.value() for s in self._level_sliders]
 
     def _difficulty_key(self) -> str:
         return self._difficulty_combo.currentText().strip().lower()
@@ -959,7 +1118,7 @@ class EncounterPanel(QWidget):
         self._target_label.setToolTip(self._breakdown_tooltip(levels, difficulty))
 
         raw_xp, multiplier, adjusted_xp = compute_adjusted_xp(
-            self._encounter_entries, self._party_size.value()
+            self._encounter_entries, self._party_size_slider.value()
         )
         self._raw_label.setText(f"Raw XP: {raw_xp}")
         self._mult_label.setText(f"Multiplier: {multiplier:.2f}")
@@ -1133,12 +1292,12 @@ class EncounterPanel(QWidget):
         data = json.loads(path.read_text(encoding="utf-8"))
         self._encounter_entries = []
         levels = data.get("party_levels") or []
-        self._party_size.setValue(max(1, len(levels)))
-        self._rebuild_levels(self._party_size.value())
+        self._party_size_slider.setValue(max(1, len(levels)))
+        self._rebuild_levels(self._party_size_slider.value())
         for index, level in enumerate(levels):
-            if index >= len(self._level_spins):
+            if index >= len(self._level_sliders):
                 break
-            self._level_spins[index].setValue(int(level))
+            self._level_sliders[index].setValue(int(level))
         difficulty = (data.get("difficulty") or "Medium").lower()
         if difficulty in self._difficulty_keys:
             self._difficulty_combo.setCurrentText(difficulty.title())
@@ -1189,7 +1348,7 @@ class EncounterPanel(QWidget):
     def _serialize_encounter(self, name: str) -> dict:
         levels = self._current_levels()
         raw_xp, multiplier, adjusted_xp = compute_adjusted_xp(
-            self._encounter_entries, self._party_size.value()
+            self._encounter_entries, self._party_size_slider.value()
         )
         return {
             "schema_version": 1,

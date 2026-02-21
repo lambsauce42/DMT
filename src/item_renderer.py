@@ -142,6 +142,9 @@ class ItemCardSpec:
     tags: List[str] = field(default_factory=list)
     level: int = 1
     fused_stats_effects: bool = False
+    show_level: bool = True
+    show_rarity: bool = True
+    show_icon_padding: bool = False
 
 
 @dataclass
@@ -609,7 +612,7 @@ def _layout_measure(spec: ItemCardSpec, opts: RenderOptions, s: float):
     if spec.classes and len(spec.classes) > 0:
         classes_text = ", ".join(spec.classes)
     else:
-        classes_text = "All Classes"
+        classes_text = ""  # Empty means hide classes line
 
     def _header_for_icon(icon_size: int) -> dict:
         icon_x = card_x0 + pad + frame_w
@@ -617,31 +620,51 @@ def _layout_measure(spec: ItemCardSpec, opts: RenderOptions, s: float):
         title_x = icon_x + icon_size + frame_w + pad
         title_max_w = max(1, card_x1 - title_x - pad)
 
-        classes_label = f"Classes: {classes_text}"
-        if _text_size(d, classes_label, label_font)[0] > title_max_w:
-            trimmed = classes_label
-            while trimmed and _text_size(d, f"{trimmed}...", label_font)[0] > title_max_w:
-                trimmed = trimmed[:-1]
-            classes_label = f"{trimmed}..." if trimmed else "..."
-        _, classes_h, classes_y_off = _text_metrics(d, classes_label, label_font)
+        # Build visible labels bottom-up from text_container_bottom
+        show_classes = bool(classes_text)
+        classes_label = f"CLASSES: {classes_text}" if show_classes else ""
+        if show_classes:
+            if _text_size(d, classes_label, label_font)[0] > title_max_w:
+                trimmed = classes_label
+                while trimmed and _text_size(d, f"{trimmed}...", label_font)[0] > title_max_w:
+                    trimmed = trimmed[:-1]
+                classes_label = f"{trimmed}..." if trimmed else "..."
+        _, classes_h, classes_y_off = _text_metrics(d, classes_label or "A", label_font)
 
         text_container_top = icon_y
         text_container_bottom = icon_y + icon_size + frame_w
         text_pad = max(1, _px(4 * s * body_scale))
-
-        classes_bottom = text_container_bottom - text_pad
-        classes_text_top = classes_bottom - classes_h
         label_gap = max(_px(4 * s), _px(5 * s * body_scale))
-        rarity_bottom = classes_text_top - label_gap
-        rarity_text_top = rarity_bottom - rarity_h
-        level_bottom = rarity_text_top - label_gap
-        level_text_top = level_bottom - level_h
-        rarity_y = rarity_text_top - rarity_y_off
-        level_y = level_text_top - level_y_off
+
+        # Stack visible labels from bottom up
+        cursor_bottom = text_container_bottom - text_pad
+
+        if show_classes:
+            classes_text_top = cursor_bottom - classes_h
+            classes_y_val = classes_text_top - classes_y_off
+            cursor_bottom = classes_text_top - label_gap
+        else:
+            classes_text_top = cursor_bottom
+            classes_y_val = cursor_bottom
+            classes_h = 0
+
+        if spec.show_rarity:
+            rarity_text_top = cursor_bottom - rarity_h
+            rarity_y = rarity_text_top - rarity_y_off
+            cursor_bottom = rarity_text_top - label_gap
+        else:
+            rarity_y = cursor_bottom
+
+        if spec.show_level:
+            level_text_top = cursor_bottom - level_h
+            level_y = level_text_top - level_y_off
+            cursor_bottom = level_text_top
+        else:
+            level_y = cursor_bottom
 
         title_rarity_gap = max(_px(8 * s), _px(10 * s * body_scale))
         title_area_top = text_container_top
-        title_area_bottom = max(title_area_top + 1, level_text_top - title_rarity_gap)
+        title_area_bottom = max(title_area_top + 1, cursor_bottom - title_rarity_gap)
         title_area_h = max(1, title_area_bottom - title_area_top)
 
         title_font, title_lines = fit_title(
@@ -682,8 +705,9 @@ def _layout_measure(spec: ItemCardSpec, opts: RenderOptions, s: float):
             "level_h": level_h,
             "rarity_y": rarity_y,
             "classes_label": classes_label,
-            "classes_y": classes_text_top - classes_y_off,
+            "classes_y": classes_y_val,
             "classes_h": classes_h,
+            "show_classes": show_classes,
         }
 
     icon_size = max(1, _px(84 * s))
@@ -739,8 +763,9 @@ def _layout_measure(spec: ItemCardSpec, opts: RenderOptions, s: float):
     if spec.effects:
         panel_pad = _px(14 * s)
         max_w = (content_x1 - content_x0) - 2 * panel_pad
-        for eff in spec.effects:
-            eff_lines.extend(wrap_text(d, f"• {eff}", body_font, max_w))
+        for i, eff in enumerate(spec.effects):
+            bullet = "• " if len(spec.effects) > 1 else ""
+            eff_lines.extend(wrap_text(d, f"{bullet}{eff}", body_font, max_w))
         body_line_gap = max(1, int(round(6 * s * body_scale * font_base)))
         _, bh = _text_size(d, "Ag", body_font)
         eff_box_h = panel_pad * 2 + (bh + body_line_gap) * len(eff_lines)
@@ -893,13 +918,14 @@ def render_item_card(
                 except Exception:
                     pass
             icon = icon.convert("RGBA")
-            mode = opts.icon_fit_mode.lower().strip()
-            if mode == "cover":
-                icon_sq = _icon_cover_resize(icon, icon_img_size)
-            else:
-                pad = _px(opts.icon_inner_pad * s)
+            if spec.show_icon_padding:
+                # When padding is on, use contain mode with standard inner pad
+                pad = _px(opts.icon_inner_pad * s) if opts.icon_inner_pad else _px(8 * s)
                 pad = min(pad, max(0, (icon_img_size - 1) // 2))
                 icon_sq = _icon_contain_resize(icon, icon_img_size, pad)
+            else:
+                # When padding is off, use cover mode (no padding)
+                icon_sq = _icon_cover_resize(icon, icon_img_size)
             img.alpha_composite(icon_sq, (icon_img_x, icon_img_y))
         except Exception:
             pass
@@ -923,27 +949,30 @@ def render_item_card(
         )
     
     # Draw level label above rarity
-    d.text(
-        (layout["title_x"], layout["level_y"]),
-        layout["level_label"],
-        font=layout["fonts"]["label"],
-        fill=(185, 185, 200),
-    )
+    if spec.show_level:
+        d.text(
+            (layout["title_x"], layout["level_y"]),
+            layout["level_label"],
+            font=layout["fonts"]["label"],
+            fill=(185, 185, 200),
+        )
     # Draw rarity label below level
-    d.text(
-        (layout["title_x"], layout["rarity_y"]),
-        layout["rarity_label"],
-        font=layout["fonts"]["label"],
-        fill=(180, 180, 195),
-    )
+    if spec.show_rarity:
+        d.text(
+            (layout["title_x"], layout["rarity_y"]),
+            layout["rarity_label"],
+            font=layout["fonts"]["label"],
+            fill=(180, 180, 195),
+        )
     
-    # Draw classes below rarity
-    d.text(
-        (layout["title_x"], layout["classes_y"]),
-        layout["classes_label"],
-        font=layout["fonts"]["label"],
-        fill=(175, 175, 190),
-    )
+    # Draw classes below rarity (only if non-empty)
+    if layout.get("show_classes"):
+        d.text(
+            (layout["title_x"], layout["classes_y"]),
+            layout["classes_label"],
+            font=layout["fonts"]["label"],
+            fill=(175, 175, 190),
+        )
 
     # Header divider line
     hb = layout["header_bottom"]
@@ -1039,7 +1068,7 @@ def render_item_card(
         )
 
     d = ImageDraw.Draw(img)
-    _draw_outer_ornaments(d, outer, s, rarity_rgb)
+    # Ornaments removed for cleaner look
 
     if downscale:
         out_h = max(1, int(round(H / s)))
@@ -1105,6 +1134,9 @@ def spec_to_dict(spec: ItemCardSpec) -> Dict[str, object]:
         "tags": list(spec.tags),
         "level": spec.level,
         "fused_stats_effects": spec.fused_stats_effects,
+        "show_level": spec.show_level,
+        "show_rarity": spec.show_rarity,
+        "show_icon_padding": spec.show_icon_padding,
     }
 
 
@@ -1151,6 +1183,9 @@ def spec_from_dict(data: Dict[str, object]) -> ItemCardSpec:
         tags=tags,
         level=level,
         fused_stats_effects=bool(data.get("fused_stats_effects", False)),
+        show_level=bool(data.get("show_level", True)),
+        show_rarity=bool(data.get("show_rarity", True)),
+        show_icon_padding=bool(data.get("show_icon_padding", False)),
     )
 
 
