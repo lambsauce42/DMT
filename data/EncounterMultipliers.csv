@@ -1,0 +1,7 @@
+entities,multiplier_players_1_2,multiplier_players_3_5,multiplier_players_gt5
+1,1.5,1.0,0.5
+2,2.0,1.5,1.0
+3-6,2.5,2.0,1.5
+7-10,3.0,2.5,2.0
+11-14,4.0,3.0,2.5
+>14,5.0,4.0,3.0

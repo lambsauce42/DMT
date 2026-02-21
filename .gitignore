@@ -1,0 +1,83 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# ── IDEs & editors ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Testing & coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.lcov
+
+# ── Logs & temp files ─────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+debug/
+
+# ── Images / binary media — everywhere EXCEPT the assets folder ───────────────
+# Exclude common image formats globally …
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+*.ico
+*.svg
+*.tiff
+*.tif
+*.avif
+
+# … then un-exclude EVERYTHING inside assets/ unconditionally
+!assets/
+!assets/**
+
+# ── Audio / video ─────────────────────────────────────────────────────────────
+*.mp3
+*.mp4
+*.wav
+*.ogg
+*.flac
+*.mkv
+*.avi
+*.mov
+
+# ── Compiled / binary ─────────────────────────────────────────────────────────
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+
+# ── Local config / secrets ────────────────────────────────────────────────────
+*.env
+secrets.*
+config.local.*
