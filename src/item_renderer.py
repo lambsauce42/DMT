@@ -144,7 +144,7 @@ class ItemCardSpec:
     fused_stats_effects: bool = False
     show_level: bool = True
     show_rarity: bool = True
-    show_icon_padding: bool = False
+    show_icon_padding: bool = True
 
 
 @dataclass
@@ -814,6 +814,7 @@ def _layout_measure(spec: ItemCardSpec, opts: RenderOptions, s: float):
         "classes_label": classes_label,
         "classes_y": classes_y,
         "classes_h": classes_h,
+        "show_classes": header["show_classes"],
         "header_bottom": header_bottom,
         "stat_lines": stat_lines,
         "stats_box_h": stats_box_h,
@@ -904,7 +905,10 @@ def render_item_card(
     icon_size = layout["icon_size"]
     bg = _icon_gradient_bg(icon_size, rarity_rgb, opts.icon_bg_curve)
     img.alpha_composite(bg, (icon_x, icon_y))
-    icon_scale = max(0.1, min(1.0, float(opts.icon_image_scale)))
+    # Coverage: 100% if padding is disabled, otherwise use configured scale (default 90%)
+    effective_scale = 1.0 if not spec.show_icon_padding else float(opts.icon_image_scale)
+    icon_scale = max(0.1, min(1.0, effective_scale))
+    
     icon_img_size = max(1, int(round(icon_size * icon_scale)))
     icon_img_x = icon_x + (icon_size - icon_img_size) // 2
     icon_img_y = icon_y + (icon_size - icon_img_size) // 2
@@ -919,12 +923,10 @@ def render_item_card(
                     pass
             icon = icon.convert("RGBA")
             if spec.show_icon_padding:
-                # When padding is on, use contain mode with standard inner pad
-                pad = _px(opts.icon_inner_pad * s) if opts.icon_inner_pad else _px(8 * s)
-                pad = min(pad, max(0, (icon_img_size - 1) // 2))
-                icon_sq = _icon_contain_resize(icon, icon_img_size, pad)
+                # Padding enabled: Use contain mode at reduced scale
+                icon_sq = _icon_contain_resize(icon, icon_img_size, inner_pad=0)
             else:
-                # When padding is off, use cover mode (no padding)
+                # Padding disabled: Use cover mode at 100% scale
                 icon_sq = _icon_cover_resize(icon, icon_img_size)
             img.alpha_composite(icon_sq, (icon_img_x, icon_img_y))
         except Exception:

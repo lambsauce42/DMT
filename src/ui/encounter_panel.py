@@ -148,7 +148,7 @@ class EncounterPanel(QWidget):
         total = splitter.size().width()
         if total <= 0:
             return
-        ratios = [1, 10, 10]
+        ratios = [8, 10, 10]
         ratio_total = sum(ratios)
         sizes = [max(1, int(total * r / ratio_total)) for r in ratios]
         sizes[-1] = max(1, total - sum(sizes[:-1]))
@@ -174,7 +174,7 @@ class EncounterPanel(QWidget):
         splitter.addWidget(left_panel)
         splitter.addWidget(center_panel)
         splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(0, 8)
         splitter.setStretchFactor(1, 10)
         splitter.setStretchFactor(2, 10)
         self._splitter = splitter
@@ -186,13 +186,13 @@ class EncounterPanel(QWidget):
 
     # ── shared geometry for party-panel rows (mirrors C# encounter layout) ──
     _PARTY_LABEL_W = 124
-    _PARTY_LABEL_H = 24
+    _PARTY_LABEL_H = 32
     _PARTY_GAP_LS = 8      # label → slider
     _PARTY_GAP_SV = 4      # slider → value
     _PARTY_VALUE_W = 54
-    _PARTY_VALUE_H = 28
-    _PARTY_ROW_H = 28
-    _PARTY_STEP_SIZE = 26   # +/- buttons
+    _PARTY_VALUE_H = 32
+    _PARTY_ROW_H = 32
+    _PARTY_STEP_SIZE = 32   # +/- buttons
 
     @staticmethod
     def _make_party_label_box(text: str) -> QFrame:
@@ -234,7 +234,8 @@ class EncounterPanel(QWidget):
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
             "QPushButton { background-color: #1b2432; border: 1px solid #3b424b;"
-            " border-radius: 4px; color: #c9d1d9; font-weight: 600; }"
+            " border-radius: 4px; color: #c9d1d9; font-weight: 600; padding: 0px;"
+            " min-width: 0px; min-height: 0px; }"
             "QPushButton:hover { border-color: #58a6ff; color: #e6edf3; }"
         )
         return btn

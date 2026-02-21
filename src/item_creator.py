@@ -437,7 +437,7 @@ class ItemCreatorWidget(QWidget):
                 gridline-color: transparent;
             }
             QTableWidget::item {
-                padding: 4px;
+                padding: 4px 10px;
                 border-bottom: 1px solid #21262d; 
             }
             QHeaderView::section {
@@ -454,6 +454,8 @@ class ItemCreatorWidget(QWidget):
         self.stats_table.horizontalHeader().setHighlightSections(False)
         self.stats_table.horizontalHeader().setSectionsClickable(False)
         self.stats_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.stats_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.stats_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         stats_layout.addWidget(self.stats_table)
         stats_buttons = QHBoxLayout()
         self.add_stat_btn = QToolButton(stats_group)
@@ -521,33 +523,93 @@ class ItemCreatorWidget(QWidget):
             " border: 1px solid #30363d; border-radius: 8px; }"
         )
         top_bar.setObjectName("ItemTopBar")
-        tb_layout = QHBoxLayout(top_bar)
-        tb_layout.setContentsMargins(24, 20, 24, 20)
-        tb_layout.setSpacing(40)
+        
+        # Grid layout for strict column/row alignment
+        tb_grid = QGridLayout(top_bar)
+        tb_grid.setContentsMargins(24, 20, 24, 20)
+        tb_grid.setHorizontalSpacing(40)
+        tb_grid.setVerticalSpacing(12) 
+        
+        # Set fixed widths for category columns to ensure they are identical
+        tb_grid.setColumnMinimumWidth(1, 120)
+        tb_grid.setColumnMinimumWidth(2, 120)
+        
+        # Force rows 1, 2, 3 to have identical heights to ensure equal spacing
+        # while matching the 36px height of the left-hand input box
+        ROW_H = 36
+        tb_grid.setRowMinimumHeight(1, ROW_H)
+        tb_grid.setRowMinimumHeight(2, ROW_H)
+        tb_grid.setRowMinimumHeight(3, ROW_H)
 
-        # --- Classes column ---
-        classes_col = QVBoxLayout()
-        classes_col.setSpacing(10)
-
+        # --- Headers (Row 0) ---
         classes_hdr = QLabel("CLASSES")
-        classes_hdr.setStyleSheet(
-            "font-size: 11px; font-weight: bold; color: #8b949e; border: none;"
-        )
-        classes_col.addWidget(classes_hdr)
+        classes_hdr.setStyleSheet("font-size: 11px; font-weight: bold; color: #8b949e; border: none;")
+        tb_grid.addWidget(classes_hdr, 0, 0)
 
+        cats_hdr = QLabel("CATEGORIES")
+        cats_hdr.setStyleSheet("font-size: 11px; font-weight: bold; color: #8b949e; border: none;")
+        tb_grid.addWidget(cats_hdr, 0, 1, 1, 2)
+
+        disp_hdr = QLabel("DISPLAY OPTIONS")
+        disp_hdr.setStyleSheet("font-size: 11px; font-weight: bold; color: #8b949e; border: none;")
+        tb_grid.addWidget(disp_hdr, 0, 3)
+
+        # Helper for uniform checkboxes with alignment correction
+        self._category_checks: Dict[str, QCheckBox] = {}
+        def make_check(name, checked=False):
+            cb = QCheckBox(name.capitalize())
+            cb.setStyleSheet("font-size: 12px; opacity: 0.9;")
+            cb.setChecked(checked)
+            cb.stateChanged.connect(self._mark_dirty)
+            self._category_checks[name] = cb
+            return cb
+
+        # --- Content Row 1 (Input row) ---
+        # Row 1 Left: Classes Edit
         self._classes_edit = QLineEdit()
         self._classes_edit.setPlaceholderText("e.g. Fighter, Rogue, Wizard...")
         self._classes_edit.setStyleSheet("font-size: 12px;")
+        self._classes_edit.setFixedHeight(INPUT_H)
         self._classes_edit.textChanged.connect(self._mark_dirty)
-        classes_col.addWidget(self._classes_edit)
+        tb_grid.addWidget(self._classes_edit, 1, 0, Qt.AlignmentFlag.AlignTop)
 
-        # --- Level section (under classes) ---
-        level_hdr = QLabel("LEVEL")
-        level_hdr.setStyleSheet(
-            "font-size: 11px; font-weight: bold; color: #8b949e; border: none;"
-            " margin-top: 8px;"
+        # We use spanning layouts for the category columns to ensure perfect 
+        # vertical distribution between the top of Row 1 and bottom of Row 3.
+        def make_v_col(checks: List[QCheckBox]):
+            vbox = QVBoxLayout()
+            vbox.setContentsMargins(0, 0, 0, 0)
+            vbox.setSpacing(0)
+            for i, cb in enumerate(checks):
+                vbox.addWidget(cb)
+                if i < len(checks) - 1:
+                    vbox.addStretch(1)
+            return vbox
+
+        self._show_level_check = make_check("Show Level", checked=True)
+        self._show_rarity_check = make_check("Show Rarity", checked=True)
+        self._icon_padding_check = make_check("Icon Padding", checked=True)
+
+        tb_grid.addLayout(
+            make_v_col([make_check("equipment"), make_check("valuables"), make_check("miscellaneous")]),
+            1, 1, 3, 1
         )
-        classes_col.addWidget(level_hdr)
+        tb_grid.addLayout(
+            make_v_col([make_check("consumables"), make_check("magic"), make_check("quest")]),
+            1, 2, 3, 1
+        )
+        tb_grid.addLayout(
+            make_v_col([self._show_level_check, self._show_rarity_check, self._icon_padding_check]),
+            1, 3, 3, 1
+        )
+
+        # --- Content Row 2 (Level Header row) ---
+        # Row 2 Left: Level Header label
+        level_hdr = QLabel("LEVEL")
+        level_hdr.setStyleSheet("font-size: 11px; font-weight: bold; color: #8b949e; border: none;")
+        tb_grid.addWidget(level_hdr, 2, 0, Qt.AlignmentFlag.AlignTop)
+
+        # --- Content Row 3 (Level Slider row) ---
+        # Row 3 Left: Level Slider widget
         level_row_widget = QWidget()
         level_row_widget.setObjectName("TransparentContainer")
         level_row_layout = QHBoxLayout(level_row_widget)
@@ -556,6 +618,8 @@ class ItemCreatorWidget(QWidget):
         self._level_edit = QLineEdit()
         self._level_edit.setFixedWidth(42)
         self._level_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._level_edit.setFixedHeight(28)
+        self._level_edit.setStyleSheet("font-size: 12px; padding: 0px;")
         self._level_edit.setValidator(QIntValidator(1, 20, self))
         self._level_edit.setText(str(self._level_value))
         self._level_edit.textChanged.connect(self._on_level_text_changed)
@@ -566,6 +630,7 @@ class ItemCreatorWidget(QWidget):
         self._level_slider.setValue(self._level_value)
         self._level_slider.setTickInterval(1)
         self._level_slider.setSingleStep(1)
+        self._level_slider.setFixedHeight(28)
         self._level_slider.valueChanged.connect(
             lambda v: (
                 self._level_edit.setText(str(v)),
@@ -574,63 +639,8 @@ class ItemCreatorWidget(QWidget):
             )
         )
         level_row_layout.addWidget(self._level_slider, 1)
-        classes_col.addWidget(level_row_widget)
+        tb_grid.addWidget(level_row_widget, 3, 0, Qt.AlignmentFlag.AlignBottom)
 
-        tb_layout.addLayout(classes_col)
-
-        # --- Categories column ---
-        cats_col = QVBoxLayout()
-        cats_col.setSpacing(10)
-        cats_hdr = QLabel("CATEGORIES")
-        cats_hdr.setStyleSheet(
-            "font-size: 11px; font-weight: bold; color: #8b949e; border: none;"
-        )
-        cats_col.addWidget(cats_hdr)
-        cats_col.addStretch(1) # Align content to bottom
-
-        tags_grid_widget = QWidget()
-        tags_grid_widget.setObjectName("TransparentContainer")
-        tags_grid = QGridLayout(tags_grid_widget)
-        tags_grid.setContentsMargins(0, 0, 0, 0)
-        tags_grid.setHorizontalSpacing(4)
-        tags_grid.setVerticalSpacing(10)
-        self._category_names = [
-            "equipment", "consumables", "valuables", "magic", "miscellaneous", "quest",
-        ]
-        self._category_checks: Dict[str, QCheckBox] = {}
-        for i, name in enumerate(self._category_names):
-            label_text = name.capitalize()
-            cb = QCheckBox(label_text)
-            cb.setStyleSheet("font-size: 12px; opacity: 0.9;")
-            cb.stateChanged.connect(self._mark_dirty)
-            self._category_checks[name] = cb
-            tags_grid.addWidget(cb, i // 2, i % 2)
-        cats_col.addWidget(tags_grid_widget)
-        tb_layout.addLayout(cats_col)
-
-        # --- Display options column ---
-        disp_col = QVBoxLayout()
-        disp_col.setSpacing(10)
-        disp_hdr = QLabel("DISPLAY OPTIONS")
-        disp_hdr.setStyleSheet(
-            "font-size: 11px; font-weight: bold; color: #8b949e; border: none;"
-        )
-        disp_col.addWidget(disp_hdr)
-        disp_col.addStretch(1) # Align content to bottom
-        self._show_level_check = QCheckBox("Show Level")
-        self._show_level_check.setStyleSheet("font-size: 12px; opacity: 0.9;")
-        self._show_level_check.stateChanged.connect(self._mark_dirty)
-        self._show_rarity_check = QCheckBox("Show Rarity")
-        self._show_rarity_check.setChecked(True)
-        self._show_rarity_check.setStyleSheet("font-size: 12px; opacity: 0.9;")
-        self._show_rarity_check.stateChanged.connect(self._mark_dirty)
-        self._icon_padding_check = QCheckBox("Icon Padding")
-        self._icon_padding_check.setStyleSheet("font-size: 12px; opacity: 0.9;")
-        self._icon_padding_check.stateChanged.connect(self._mark_dirty)
-        disp_col.addWidget(self._show_level_check)
-        disp_col.addWidget(self._show_rarity_check)
-        disp_col.addWidget(self._icon_padding_check)
-        tb_layout.addLayout(disp_col)
         preview_layout.addWidget(top_bar)
 
         # ── Preview header ──
@@ -824,8 +834,14 @@ class ItemCreatorWidget(QWidget):
         """Insert a stat row with value, name, and inline remove button."""
         row = self.stats_table.rowCount()
         self.stats_table.insertRow(row)
-        self.stats_table.setItem(row, 0, QTableWidgetItem(value))
-        self.stats_table.setItem(row, 1, QTableWidgetItem(name))
+
+        val_item = QTableWidgetItem(value)
+        val_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.stats_table.setItem(row, 0, val_item)
+
+        name_item = QTableWidgetItem(name)
+        name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.stats_table.setItem(row, 1, name_item)
         
         # Center the remove button in a layout
         container = QWidget()
@@ -833,12 +849,13 @@ class ItemCreatorWidget(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        remove_btn = QToolButton()
-        remove_btn.setObjectName("DestructiveButton")
+        remove_btn = QToolButton(container)
+        remove_btn.setObjectName("SecondaryButton")
         remove_btn.setProperty("compact", "true")
-        remove_btn.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "minus.svg")))
-        remove_btn.setIconSize(QSize(12, 12))
+        remove_btn.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "trash.svg")))
+        remove_btn.setIconSize(QSize(14, 14))
         remove_btn.setFixedSize(24, 24)
+        remove_btn.setStyleSheet("padding: 0px; border-radius: 4px;")
         remove_btn.setToolTip("Remove Stat")
         remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         remove_btn.clicked.connect(lambda _=False, r=row: self._remove_stat_at(r))
