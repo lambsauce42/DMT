@@ -630,6 +630,7 @@ class LootAppletWidget(QWidget):
         self._preset_entries: List[PresetEntry] = []
         self._weight_sliders: Dict[str, QSlider] = {}
         self._weight_value_labels: Dict[str, QLabel] = {}
+        self._prob_value_labels: Dict[str, QLabel] = {}
         self._pool_value_labels: Dict[str, QLabel] = {}
         self._category_checks: Dict[str, QCheckBox] = {}
         self._category_labels: Dict[str, str] = {}
@@ -1009,13 +1010,15 @@ class LootAppletWidget(QWidget):
         header_labels: List[QLabel] = []
         label_widgets: List[QLabel] = []
         value_widgets: List[QLabel] = []
+        prob_widgets: List[QLabel] = []
         pool_widgets: List[QLabel] = []
 
         header_rarity = QLabel("Rarity")
         header_weight = QLabel("Weight")
+        header_prob = QLabel("Prob ≥ 1")
         header_pool = QLabel("Pool")
         header_adjust = QLabel("Adjust")
-        for header in (header_rarity, header_weight, header_pool, header_adjust):
+        for header in (header_rarity, header_weight, header_prob, header_pool, header_adjust):
             header.setObjectName("ColumnHeader")
             header_labels.append(header)
             header.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1027,10 +1030,13 @@ class LootAppletWidget(QWidget):
             self._wrap_table_cell(header_weight, False, False), 0, 1
         )
         weights_layout.addWidget(
-            self._wrap_table_cell(header_pool, False, False), 0, 2
+            self._wrap_table_cell(header_prob, False, False), 0, 2
         )
         weights_layout.addWidget(
-            self._wrap_table_cell(header_adjust, True, False), 0, 3
+            self._wrap_table_cell(header_pool, False, False), 0, 3
+        )
+        weights_layout.addWidget(
+            self._wrap_table_cell(header_adjust, True, False), 0, 4
         )
 
         for row, rarity in enumerate(RARITY_ORDER, start=1):
@@ -1045,14 +1051,18 @@ class LootAppletWidget(QWidget):
                 )
             )
             value_label = QLabel("0.0%")
+            prob_label = QLabel("0%")
             pool_label = QLabel("0")
             value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            prob_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pool_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._weight_sliders[rarity] = slider
             self._weight_value_labels[rarity] = value_label
+            self._prob_value_labels[rarity] = prob_label
             self._pool_value_labels[rarity] = pool_label
             label_widgets.append(label)
             value_widgets.append(value_label)
+            prob_widgets.append(prob_label)
             pool_widgets.append(pool_label)
 
             is_last_row = row == len(RARITY_ORDER)
@@ -1063,10 +1073,13 @@ class LootAppletWidget(QWidget):
                 self._wrap_table_cell(value_label, False, is_last_row), row, 1
             )
             weights_layout.addWidget(
-                self._wrap_table_cell(pool_label, False, is_last_row), row, 2
+                self._wrap_table_cell(prob_label, False, is_last_row), row, 2
             )
             weights_layout.addWidget(
-                self._wrap_table_cell(slider, True, is_last_row), row, 3
+                self._wrap_table_cell(pool_label, False, is_last_row), row, 3
+            )
+            weights_layout.addWidget(
+                self._wrap_table_cell(slider, True, is_last_row), row, 4
             )
 
         label_width = max(
@@ -1077,10 +1090,12 @@ class LootAppletWidget(QWidget):
             label.setFixedWidth(label_width)
         for value_label in value_widgets + [header_weight]:
             value_label.setFixedWidth(72)
+        for prob_label in prob_widgets + [header_prob]:
+            prob_label.setFixedWidth(72)
         for pool_label in pool_widgets + [header_pool]:
             pool_label.setFixedWidth(60)
 
-        weights_layout.setColumnStretch(3, 1)
+        weights_layout.setColumnStretch(4, 1)
 
         divider = QFrame()
         divider.setObjectName("LootTableDivider")
@@ -1091,7 +1106,7 @@ class LootAppletWidget(QWidget):
             len(RARITY_ORDER) + 1,
             0,
             1,
-            4,
+            5,
         )
 
         self._weights_reset_btn = self._make_reset_button("Reset to Luck")
@@ -1101,7 +1116,7 @@ class LootAppletWidget(QWidget):
             len(RARITY_ORDER) + 2,
             0,
             1,
-            4,
+            5,
             Qt.AlignmentFlag.AlignRight,
         )
 
@@ -2052,6 +2067,8 @@ class LootAppletWidget(QWidget):
             pool_counts[item.rarity] = pool_counts.get(item.rarity, 0) + 1
 
         rolls = self._calculate_rolls()
+        weights = self._calculate_weights()
+
         self._rolls_label.setText(f"Rolls: {rolls}")
         self._pool_label.setText(f"Pool: {len(self._filtered_pool)} items")
 
@@ -2060,6 +2077,15 @@ class LootAppletWidget(QWidget):
             pool_label = self._pool_value_labels.get(rarity)
             if pool_label:
                 pool_label.setText(str(pool_count))
+
+            prob_label = self._prob_value_labels.get(rarity)
+            if prob_label:
+                if pool_count > 0:
+                    p = weights.get(rarity, 0.0) / 100.0
+                    prob = 1.0 - (1.0 - p) ** rolls
+                    prob_label.setText(f"{prob * 100.0:.1f}%")
+                else:
+                    prob_label.setText("0.0%")
 
     def _shift_note(self) -> str:
         if self._custom_weights_enabled:
