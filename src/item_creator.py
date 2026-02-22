@@ -1375,6 +1375,7 @@ class ItemCreatorWidget(QWidget):
                 icon_bg_curve=self._icon_bg_curve,
                 panel_inner_glow=False,
                 outer_rarity_glow=False,
+                outside_alpha=0,
             )
             # Keep full export resolution to avoid double downscaling blur.
             rendered = render_item_card(spec, opts, downscale=False)

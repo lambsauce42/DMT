@@ -607,6 +607,7 @@ def _loot_item_from_path(path: Path) -> Optional[LootItem]:
     )
 
     item_id = str(path.resolve())
+    show_padding = bool(data.get("show_icon_padding", True))
     return LootItem(
         item_id=item_id,
         title=title,
@@ -617,6 +618,7 @@ def _loot_item_from_path(path: Path) -> Optional[LootItem]:
         tags=tags,
         icon_path=icon_path,
         path=str(path),
+        show_icon_padding=show_padding,
     )
 
 
@@ -670,9 +672,14 @@ def _fallback_inventory_icon_pixmap(
     if item and item.icon_path:
         icon = QPixmap(item.icon_path)
         if not icon.isNull():
+            if item.show_icon_padding:
+                inner_size = int(round(size * 0.75))
+            else:
+                inner_size = size
+            
             scaled = icon.scaled(
-                size - 10,
-                size - 10,
+                inner_size,
+                inner_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
@@ -724,7 +731,11 @@ def _inventory_icon_pixmap(item: Optional[LootItem]) -> QPixmap:
                     icon = _trim_black_bbox(icon)
                 except Exception:
                     pass
-            raw_icon_img_size = icon_box * INVENTORY_ICON_SCALE
+            effective_scale = 1.0
+            if item.show_icon_padding:
+                effective_scale = 0.75
+            
+            raw_icon_img_size = icon_box * effective_scale
             icon_img_size = max(1, min(icon_box, int(round(raw_icon_img_size))))
             # Keep icon/image parity aligned with the target box to avoid 1px centering drift.
             if (icon_img_size % 2) != (icon_box % 2):
@@ -738,7 +749,12 @@ def _inventory_icon_pixmap(item: Optional[LootItem]) -> QPixmap:
                         candidates,
                         key=lambda candidate: (abs(candidate - raw_icon_img_size), -candidate),
                     )
-            icon_sq = _icon_cover_resize(icon, icon_img_size)
+            
+            if item.show_icon_padding:
+                icon_sq = _icon_contain_resize(icon, icon_img_size, inner_pad=0)
+            else:
+                icon_sq = _icon_cover_resize(icon, icon_img_size)
+
             icon_img_x = frame + (icon_box - icon_img_size) // 2
             icon_img_y = frame + (icon_box - icon_img_size) // 2
             img.alpha_composite(icon_sq, (icon_img_x, icon_img_y))
@@ -787,7 +803,11 @@ def _equipment_item_icon_pixmap(item: Optional[LootItem]) -> QPixmap:
                 except Exception:
                     pass
                 icon = _trim_alpha_bbox(icon, threshold=8)
-            icon_img_size = max(1, int(round(icon_box * EQUIPMENT_ICON_SCALE)))
+            effective_scale = 1.0
+            if item.show_icon_padding:
+                effective_scale = 0.75
+            
+            icon_img_size = max(1, int(round(icon_box * effective_scale)))
             icon_sq = _icon_contain_resize(icon, icon_img_size, 0)
             icon_img_x = frame + (icon_box - icon_img_size) // 2
             icon_img_y = frame + (icon_box - icon_img_size) // 2
@@ -828,6 +848,7 @@ def _render_item_preview_pixmap(
             icon_bg_curve=PREVIEW_ICON_CURVE,
             panel_inner_glow=False,
             outer_rarity_glow=False,
+            outside_alpha=0,
         )
         rendered = render_item_card(spec, opts, downscale=False)
         image = _pil_to_qimage(rendered.image)

@@ -159,6 +159,7 @@ class RenderOptions:
 
     base_bg: tuple[int, int, int] = (12, 12, 16)
     outside_bg: tuple[int, int, int] = (0, 0, 0)
+    outside_alpha: int = 255
     panel_color: tuple[int, int, int] = (28, 28, 36)
     border_color: tuple[int, int, int] = (92, 92, 110)
     border_soft: tuple[int, int, int] = (60, 60, 74)
@@ -865,7 +866,7 @@ def render_item_card(
 
     rarity_rgb = RARITY_COLORS.get(layout["rarity_key"], RARITY_COLORS["common"])
 
-    img = Image.new("RGBA", (W, H), opts.outside_bg + (255,))
+    img = Image.new("RGBA", (W, H), opts.outside_bg + (opts.outside_alpha,))
     grad = _rarity_gradient(W, H, opts.base_bg, rarity_rgb)
 
     outer = [m, m, W - m, H - m]
@@ -1185,7 +1186,7 @@ def spec_from_dict(data: Dict[str, object]) -> ItemCardSpec:
         fused_stats_effects=bool(data.get("fused_stats_effects", False)),
         show_level=bool(data.get("show_level", True)),
         show_rarity=bool(data.get("show_rarity", True)),
-        show_icon_padding=bool(data.get("show_icon_padding", False)),
+        show_icon_padding=bool(data.get("show_icon_padding", True)),
     )
 
 

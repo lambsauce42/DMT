@@ -128,6 +128,7 @@ class LootItem:
     tags: Set[str]
     icon_path: Optional[str] = None
     path: Optional[str] = None
+    show_icon_padding: bool = True
 
 
 @dataclass
@@ -583,17 +584,16 @@ class LootResultRow(QFrame):
         if self._icon_label.width() != icon_size or self._icon_label.height() != icon_size:
             self._icon_label.setFixedSize(icon_size, icon_size)
         if self._icon_pixmap:
-            scaled = self._icon_pixmap.scaled(
-                icon_size,
-                icon_size,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            if scaled.width() > icon_size or scaled.height() > icon_size:
-                x = max(0, (scaled.width() - icon_size) // 2)
-                y = max(0, (scaled.height() - icon_size) // 2)
-                scaled = scaled.copy(x, y, icon_size, icon_size)
-            self._icon_label.setPixmap(scaled)
+            if self._icon_pixmap.width() == icon_size and self._icon_pixmap.height() == icon_size:
+                self._icon_label.setPixmap(self._icon_pixmap)
+            else:
+                scaled = self._icon_pixmap.scaled(
+                    icon_size,
+                    icon_size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._icon_label.setPixmap(scaled)
         else:
             self._icon_label.setText("•")
 
@@ -1404,6 +1404,7 @@ class LootAppletWidget(QWidget):
         )
 
         item_id = str(path.resolve())
+        show_padding = bool(data.get("show_icon_padding", True))
         return LootItem(
             item_id=item_id,
             title=title,
@@ -1414,6 +1415,7 @@ class LootAppletWidget(QWidget):
             tags=tags,
             icon_path=icon_path,
             path=str(path),
+            show_icon_padding=show_padding,
         )
 
     def _rarity_color_for_item(self, item: LootItem, alpha: float) -> QColor:
@@ -1450,9 +1452,14 @@ class LootAppletWidget(QWidget):
         if item.icon_path:
             icon = QPixmap(item.icon_path)
             if not icon.isNull():
+                if item.show_icon_padding:
+                    inner_size = int(round(size * 0.75))
+                else:
+                    inner_size = size
+                
                 scaled = icon.scaled(
-                    size - 10,
-                    size - 10,
+                    inner_size,
+                    inner_size,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -1525,14 +1532,7 @@ class LootAppletWidget(QWidget):
         icon_label.setFixedSize(ICON_SIZE, ICON_SIZE)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_pixmap = self._build_library_icon(item)
-        icon_label.setPixmap(
-            icon_pixmap.scaled(
-                ICON_SIZE - 6,
-                ICON_SIZE - 6,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
+        icon_label.setPixmap(icon_pixmap)
         layout.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         text_col = QVBoxLayout()
@@ -1877,6 +1877,7 @@ class LootAppletWidget(QWidget):
                 icon_bg_curve=PREVIEW_ICON_CURVE,
                 panel_inner_glow=False,
                 outer_rarity_glow=False,
+                outside_alpha=0,
             )
             rendered = render_item_card(spec, opts, downscale=False)
             image = _pil_to_qimage(rendered.image)
