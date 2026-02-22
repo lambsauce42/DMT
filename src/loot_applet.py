@@ -2069,6 +2069,13 @@ class LootAppletWidget(QWidget):
         rolls = self._calculate_rolls()
         weights = self._calculate_weights()
 
+        effective_weights = {r: 0.0 for r in RARITY_ORDER}
+        for rarity in RARITY_ORDER:
+            base_weight = weights.get(rarity, 0.0)
+            target = self._find_fallback_rarity(rarity, pool_counts)
+            if target:
+                effective_weights[target] += base_weight
+
         self._rolls_label.setText(f"Rolls: {rolls}")
         self._pool_label.setText(f"Pool: {len(self._filtered_pool)} items")
 
@@ -2081,11 +2088,25 @@ class LootAppletWidget(QWidget):
             prob_label = self._prob_value_labels.get(rarity)
             if prob_label:
                 if pool_count > 0:
-                    p = weights.get(rarity, 0.0) / 100.0
+                    p = effective_weights.get(rarity, 0.0) / 100.0
                     prob = 1.0 - (1.0 - p) ** rolls
                     prob_label.setText(f"{prob * 100.0:.1f}%")
                 else:
                     prob_label.setText("0.0%")
+
+    def _find_fallback_rarity(self, rarity: str, pool_counts: Dict[str, int]) -> Optional[str]:
+        if pool_counts.get(rarity, 0) > 0:
+            return rarity
+        
+        index = RARITY_ORDER.index(rarity)
+        for offset in range(1, len(RARITY_ORDER)):
+            lower = index - offset
+            upper = index + offset
+            if lower >= 0 and pool_counts.get(RARITY_ORDER[lower], 0) > 0:
+                return RARITY_ORDER[lower]
+            if upper < len(RARITY_ORDER) and pool_counts.get(RARITY_ORDER[upper], 0) > 0:
+                return RARITY_ORDER[upper]
+        return None
 
     def _shift_note(self) -> str:
         if self._custom_weights_enabled:

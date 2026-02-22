@@ -97,3 +97,36 @@ class TestLootProbabilityColumn(unittest.TestCase):
         self.widget._update_table()
         
         self.assertEqual(self.widget._prob_value_labels["legendary"].text(), "100.0%")
+
+    def test_prob_sums_to_100_with_fallback(self):
+        # Setup:
+        # Common: Has items. Weight 50%.
+        # Rare: Empty pool. Weight 50%.
+        # Others: Empty pool. Weight 0%.
+        
+        # Rare should fall back to Common (eventually).
+        # Rare (index 2).
+        # Offset 1: Uncommon (1), Very Rare (3). Both empty? 
+        # We need to ensure intermediate pools are empty too.
+        
+        # Clear library and set up just Common item.
+        self.widget._item_library = [self.common_item] # Only Common
+        self.widget._item_by_id = {item.item_id: item for item in self.widget._item_library}
+        self.widget._update_preview() # Refresh filtered pool
+        
+        self.widget._custom_weights_enabled = True
+        for r in RARITY_ORDER:
+            self.widget._weight_sliders[r].setValue(0)
+            
+        self.widget._weight_sliders["common"].setValue(500) # 50%
+        self.widget._weight_sliders["rare"].setValue(500)   # 50%
+        
+        self.widget._rolls_spin.setValue(1)
+        self.widget._update_table()
+        
+        # Rare is empty, so prob should be 0.0%
+        self.assertEqual(self.widget._prob_value_labels["rare"].text(), "0.0%")
+        
+        # Common should absorb Rare's weight -> 100%
+        # (Rare falls back to Uncommon -> Common)
+        self.assertEqual(self.widget._prob_value_labels["common"].text(), "100.0%")
