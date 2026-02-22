@@ -82,7 +82,17 @@ RARITY_COLORS = {
     "legendary": "#b58a2f",
     "artifact": "#c24b4b",
 }
-RARITY_CURVES = ["Linear", "Quadratic", "Poisson"]
+RARITY_CURVES = [
+    "Linear",
+    "Linear (Steep)",
+    "Quadratic",
+    "Quadratic (Steep)",
+    "Exponential",
+    "Poisson",
+    "Bell Curve",
+    "Flat",
+    "Inverted",
+]
 DEFAULT_LUCK = 50
 LEVEL_CAP = 20
 LEVEL_RANGE = 2
@@ -1988,15 +1998,30 @@ class LootAppletWidget(QWidget):
         luck = self._current_luck()
         luck_norm = (luck - LUCK_MIN) / (LUCK_MAX - LUCK_MIN)
         curve = self._curve_combo.currentText()
+        if curve == "Linear (Steep)":
+            return self._linear_weights(luck_norm, steep=True)
         if curve == "Quadratic":
-            return self._quadratic_weights(luck_norm)
+            return self._quadratic_weights(luck_norm, steep=False)
+        if curve == "Quadratic (Steep)":
+            return self._quadratic_weights(luck_norm, steep=True)
+        if curve == "Exponential":
+            return self._exponential_weights(luck_norm)
         if curve == "Poisson":
             return self._poisson_weights(luck_norm)
-        return self._linear_weights(luck_norm)
+        if curve == "Bell Curve":
+            return self._bell_curve_weights(luck_norm)
+        if curve == "Flat":
+            return self._flat_weights()
+        if curve == "Inverted":
+            return self._inverted_weights(luck_norm)
+        return self._linear_weights(luck_norm, steep=False)
 
-    def _linear_weights(self, luck_norm: float) -> Dict[str, float]:
+    def _linear_weights(self, luck_norm: float, steep: bool = False) -> Dict[str, float]:
         common_weight = 1.0
-        artifact_weight = 0.08 + 0.6 * luck_norm
+        if steep:
+            artifact_weight = 0.01 + 0.9 * luck_norm
+        else:
+            artifact_weight = 0.08 + 0.6 * luck_norm
         weights: Dict[str, float] = {}
         core = _core_rarities()
         tier_count = len(core) - 1
@@ -2006,15 +2031,61 @@ class LootAppletWidget(QWidget):
             weights[rarity] = weight
         return weights
 
-    def _quadratic_weights(self, luck_norm: float) -> Dict[str, float]:
+    def _quadratic_weights(self, luck_norm: float, steep: bool = False) -> Dict[str, float]:
         common_weight = 1.0
-        artifact_weight = 0.1 + 0.55 * luck_norm
+        if steep:
+            artifact_weight = 0.01 + 0.9 * luck_norm
+            power = 4
+        else:
+            artifact_weight = 0.1 + 0.55 * luck_norm
+            power = 2
         weights: Dict[str, float] = {}
         core = _core_rarities()
         tier_count = len(core) - 1
         for idx, rarity in enumerate(core):
             t = idx / tier_count if tier_count else 0.0
-            weight = artifact_weight + (common_weight - artifact_weight) * ((1 - t) ** 2)
+            weight = artifact_weight + (common_weight - artifact_weight) * ((1 - t) ** power)
+            weights[rarity] = weight
+        return weights
+
+    def _exponential_weights(self, luck_norm: float) -> Dict[str, float]:
+        target = 0.05 + 0.95 * luck_norm
+        weights: Dict[str, float] = {}
+        core = _core_rarities()
+        tier_count = len(core) - 1
+        for idx, rarity in enumerate(core):
+            t = idx / tier_count if tier_count else 0.0
+            weight = target ** t
+            weights[rarity] = weight
+        return weights
+
+    def _bell_curve_weights(self, luck_norm: float) -> Dict[str, float]:
+        peak_t = luck_norm
+        weights: Dict[str, float] = {}
+        core = _core_rarities()
+        tier_count = len(core) - 1
+        for idx, rarity in enumerate(core):
+            t = idx / tier_count if tier_count else 0.0
+            val = math.exp(-0.5 * ((t - peak_t) / 0.25) ** 2)
+            weights[rarity] = val
+        return weights
+
+    def _flat_weights(self) -> Dict[str, float]:
+        weights: Dict[str, float] = {}
+        core = _core_rarities()
+        for rarity in core:
+            weights[rarity] = 1.0
+        return weights
+
+    def _inverted_weights(self, luck_norm: float) -> Dict[str, float]:
+        legendary_weight = 1.0
+        common_weight = 0.05 + 0.5 * (1.0 - luck_norm)
+        weights: Dict[str, float] = {}
+        core = _core_rarities()
+        tier_count = len(core) - 1
+        for idx, rarity in enumerate(core):
+            t = idx / tier_count if tier_count else 0.0
+            weight = common_weight + (legendary_weight - common_weight) * t
             weights[rarity] = weight
         return weights
 
@@ -2113,12 +2184,31 @@ class LootAppletWidget(QWidget):
             return "Custom rarity weights active. Reset to Luck to return to the Luck curve."
         luck = self._current_luck()
         curve = self._curve_combo.currentText()
-        if curve == "Poisson":
+        
+        if curve == "Flat":
+            return "Flat distribution ignores Luck."
+            
+        if curve in ("Poisson", "Bell Curve"):
             if luck >= 80:
                 return "Luck pushes the peak toward Epic/Legendary."
             if luck <= 20:
                 return "Luck keeps the peak near Common."
             return "Luck sets the rarity peak."
+
+        if curve == "Inverted":
+            if luck >= 60:
+                return "Luck further reduces Common items."
+            if luck <= 40:
+                return "Lower Luck makes Common items more frequent."
+            return "High rarities are favored; Luck adjusts the slope."
+
+        # Monotonic curves (Linear, Quadratic, Exponential)
+        if "Steep" in curve:
+             if luck >= 75:
+                 return "High luck drastically favors higher rarities."
+             if luck <= 25:
+                 return "Low luck makes higher rarities extremely rare."
+        
         if luck >= 75:
             return "High luck favors Epic and Artifact items."
         if luck <= 25:
