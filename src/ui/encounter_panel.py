@@ -7,8 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, QSize
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtCore import QEvent, Qt, QTimer, QSize, QPoint
+from PyQt6.QtGui import QAction, QIcon, QPixmap, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -60,6 +60,46 @@ from ui.widgets.monster_card import MonsterCard
 from ui.widgets import PlusMinusSpinBox
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icons"))
+
+
+class IconPreviewLabel(QLabel):
+    def __init__(self, icon_path: str, parent=None) -> None:
+        super().__init__(parent)
+        self._icon_path = icon_path
+        self.setFixedSize(24, 24)
+        self.setScaledContents(True)
+        if os.path.exists(icon_path):
+            self.setPixmap(QPixmap(icon_path))
+        else:
+            self.setText("?")
+            self.setStyleSheet("color: #c9d1d9; font-weight: bold;")
+            self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._popup: Optional[QLabel] = None
+
+    def enterEvent(self, event) -> None:
+        if not self._popup:
+            self._popup = QLabel(self.window())
+            self._popup.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+            self._popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            if os.path.exists(self._icon_path):
+                pix = QPixmap(self._icon_path)
+                self._popup.setPixmap(pix.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                self._popup.setFixedSize(128, 128)
+                self._popup.setScaledContents(False)
+                self._popup.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._popup.setStyleSheet("background-color: #0d1117; border: 1px solid #30363d; border-radius: 4px;")
+            else:
+                self._popup.setText("Image not found")
+        
+        # Position slightly offset from cursor or label
+        global_pos = self.mapToGlobal(self.rect().bottomRight())
+        self._popup.move(global_pos + QPoint(10, 10))
+        self._popup.show()
+    
+    def leaveEvent(self, event) -> None:
+        if self._popup:
+            self._popup.hide()
 
 
 class SuggestDialog(QDialog):
@@ -300,7 +340,7 @@ class EncounterPanel(QWidget):
 
         self._target_factor_slider = QSlider(Qt.Orientation.Horizontal)
         self._target_factor_slider.setRange(10, 1000)
-        self._target_factor_slider.setSingleStep(5)
+        self._target_factor_slider.setSingleStep(1)
         self._target_factor_slider.setValue(int(round(self._target_factor * 100)))
         self._target_factor_slider.setMinimumHeight(self._PARTY_ROW_H)
         self._target_factor_slider.valueChanged.connect(
@@ -1013,21 +1053,25 @@ class EncounterPanel(QWidget):
             name_label.setToolTip(name)
             name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             name_layout.addWidget(name_label, 1)
-            set_icon_btn = QPushButton(
-                "Edit" if getattr(entry.monster, "icon_path", "") else "Set",
-                name_cell,
-            )
+
+            icon_path = getattr(entry.monster, "icon_path", "")
+            if icon_path:
+                preview = IconPreviewLabel(icon_path, name_cell)
+                name_layout.addWidget(preview)
+
+            set_icon_btn = QPushButton("Set Icon", name_cell)
             set_icon_btn.setObjectName("InlineResetButton")
             set_icon_btn.setFixedHeight(24)
-            set_icon_btn.setFixedWidth(42)
+            set_icon_btn.setFixedWidth(64)
             set_icon_btn.clicked.connect(
                 lambda checked=False, e=entry: self._set_entry_icon(e)
             )
-            clear_icon_btn = QPushButton("X", name_cell)
+            clear_icon_btn = QPushButton("", name_cell)
+            clear_icon_btn.setIcon(QIcon(os.path.join(ICON_DIR, "trash.svg")))
             clear_icon_btn.setObjectName("InlineResetButton")
             clear_icon_btn.setFixedHeight(24)
             clear_icon_btn.setFixedWidth(28)
-            clear_icon_btn.setEnabled(bool(getattr(entry.monster, "icon_path", "")))
+            clear_icon_btn.setEnabled(bool(icon_path))
             clear_icon_btn.clicked.connect(
                 lambda checked=False, e=entry: self._clear_entry_icon(e)
             )
