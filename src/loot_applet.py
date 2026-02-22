@@ -819,6 +819,15 @@ class LootAppletWidget(QWidget):
         filters = self._build_section("Filters")
         filters_layout = filters.layout()
 
+        tags_label = QLabel("Tags (comma separated)")
+        tags_label.setObjectName("ColumnHeader")
+        self._tags_edit = QLineEdit()
+        self._tags_edit.setPlaceholderText("e.g. potion, scroll, undead")
+        self._tags_edit.textChanged.connect(self._on_settings_changed)
+        filters_layout.addWidget(tags_label)
+        filters_layout.addWidget(self._tags_edit)
+        filters_layout.addSpacing(8)
+
         category_label = QLabel("Item Categories")
         category_label.setObjectName("ColumnHeader")
         self._category_container = QWidget()

@@ -181,8 +181,8 @@ except Exception:  # pragma: no cover - optional renderer dependency
     RENDERER_AVAILABLE = False
 
 ANY_LABEL = "Any"
-DEFAULT_PDF_NAME = "5E_CharacterSheet.pdf"
-DEFAULT_PDF_DIR_PARTS = ("assets", "pdfs")
+DEFAULT_PDF_NAME = "5e_CharacterSheet.pdf"
+DEFAULT_PDF_DIR_PARTS = ("data",)
 INVENTORY_ICON_BOX = 81
 INVENTORY_ICON_FRAME = 3
 INVENTORY_ICON_SCALE = 0.86
@@ -265,7 +265,7 @@ def _equipment_silhouette_pixmap() -> QPixmap:
 
 def default_sheet_pdf_path() -> Optional[str]:
     assets_dir = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", *DEFAULT_PDF_DIR_PARTS)
+        os.path.join(os.path.dirname(__file__), "..", *DEFAULT_PDF_DIR_PARTS)
     )
     if not os.path.isdir(assets_dir):
         return None

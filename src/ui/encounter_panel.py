@@ -1057,7 +1057,7 @@ class EncounterPanel(QWidget):
             icon_path = getattr(entry.monster, "icon_path", "")
             if icon_path:
                 preview = IconPreviewLabel(icon_path, name_cell)
-                name_layout.addWidget(preview)
+                name_layout.addWidget(preview, 0, Qt.AlignmentFlag.AlignVCenter)
 
             set_icon_btn = QPushButton("Set Icon", name_cell)
             set_icon_btn.setObjectName("InlineResetButton")
@@ -1075,8 +1075,8 @@ class EncounterPanel(QWidget):
             clear_icon_btn.clicked.connect(
                 lambda checked=False, e=entry: self._clear_entry_icon(e)
             )
-            name_layout.addWidget(set_icon_btn)
-            name_layout.addWidget(clear_icon_btn)
+            name_layout.addWidget(set_icon_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            name_layout.addWidget(clear_icon_btn, 0, Qt.AlignmentFlag.AlignVCenter)
             self._encounter_tree.setCellWidget(row, 1, name_cell)
             
             # XP each (Col 2) - Right aligned
