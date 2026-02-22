@@ -57,7 +57,7 @@ from save_paths import dnd_saves_dir
 from ui.encounter_edit_dialog import ModifyMonsterDialog
 from ui.widgets.encounter_progress import EncounterProgressBar
 from ui.widgets.monster_card import MonsterCard
-from ui.widgets import PlusMinusSpinBox
+from ui.widgets import PlusMinusSpinBox, SliderSpinBox
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icons"))
 
@@ -188,7 +188,7 @@ class EncounterPanel(QWidget):
         total = splitter.size().width()
         if total <= 0:
             return
-        ratios = [8, 10, 10]
+        ratios = [16, 27, 27]
         ratio_total = sum(ratios)
         sizes = [max(1, int(total * r / ratio_total)) for r in ratios]
         sizes[-1] = max(1, total - sum(sizes[:-1]))
@@ -214,9 +214,9 @@ class EncounterPanel(QWidget):
         splitter.addWidget(left_panel)
         splitter.addWidget(center_panel)
         splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 8)
-        splitter.setStretchFactor(1, 10)
-        splitter.setStretchFactor(2, 10)
+        splitter.setStretchFactor(0, 16)
+        splitter.setStretchFactor(1, 27)
+        splitter.setStretchFactor(2, 27)
         self._splitter = splitter
         splitter.splitterMoved.connect(
             lambda *_: QTimer.singleShot(0, self._sync_chip_widths)
@@ -339,9 +339,10 @@ class EncounterPanel(QWidget):
         cf_row.addSpacing(self._PARTY_GAP_LS)
 
         self._target_factor_slider = QSlider(Qt.Orientation.Horizontal)
-        self._target_factor_slider.setRange(10, 1000)
+        self._target_factor_slider.setRange(2, 200) # 0.10 to 10.00 with 0.05 steps
         self._target_factor_slider.setSingleStep(1)
-        self._target_factor_slider.setValue(int(round(self._target_factor * 100)))
+        self._target_factor_slider.setPageStep(5)
+        self._target_factor_slider.setValue(int(round(self._target_factor / 0.05)))
         self._target_factor_slider.setMinimumHeight(self._PARTY_ROW_H)
         self._target_factor_slider.valueChanged.connect(
             self._on_target_factor_slider
@@ -349,10 +350,22 @@ class EncounterPanel(QWidget):
         cf_row.addWidget(self._target_factor_slider, 1)
         cf_row.addSpacing(self._PARTY_GAP_SV)
 
-        self._target_factor_value = self._make_party_value_label(
-            f"{self._target_factor:.2f}"
+        self._target_factor_spin = QDoubleSpinBox()
+        self._target_factor_spin.setRange(0.10, 10.00)
+        self._target_factor_spin.setSingleStep(0.01)
+        self._target_factor_spin.setDecimals(2)
+        self._target_factor_spin.setValue(self._target_factor)
+        self._target_factor_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        self._target_factor_spin.setFixedSize(EncounterPanel._PARTY_VALUE_W, EncounterPanel._PARTY_VALUE_H)
+        self._target_factor_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._target_factor_spin.setStyleSheet(
+            "QDoubleSpinBox { background-color: #0d1117; border: 1px solid #2e3a4c;"
+            " border-radius: 4px; color: #c9d1d9; selection-background-color: #1f6feb; }"
+            "QDoubleSpinBox::up-button { width: 0px; }"
+            "QDoubleSpinBox::down-button { width: 0px; }"
         )
-        cf_row.addWidget(self._target_factor_value)
+        self._target_factor_spin.valueChanged.connect(self._on_target_factor_spin)
+        cf_row.addWidget(self._target_factor_spin)
         layout.addLayout(cf_row)
 
         # ── Player levels header ──────────────────────────────────────
@@ -407,12 +420,6 @@ class EncounterPanel(QWidget):
         header_row = QHBoxLayout()
         header_row.addWidget(title)
         header_row.addStretch(1)
-
-        self._sort_combo = QComboBox()
-        self._sort_combo.addItems(["XP: None", "XP: Low → High", "XP: High → Low"])
-        self._sort_combo.setCurrentIndex(self._sort_index_from_mode(self._sort_mode))
-        self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
-        header_row.addWidget(self._sort_combo)
         layout.addLayout(header_row)
 
         self._search = QLineEdit()
@@ -424,25 +431,53 @@ class EncounterPanel(QWidget):
         self._search.textChanged.connect(self._debounce_filters)
 
         filters_row = QHBoxLayout()
-        self._xp_min = PlusMinusSpinBox()
-        self._xp_min.setRange(0, 500000)
-        self._xp_min.setPrefix("Min XP ")
+        filters_row.setSpacing(10)
+
+        # Min XP col
+        min_xp_col = QVBoxLayout()
+        min_xp_col.setSpacing(2)
+        from_label = QLabel("from")
+        from_label.setStyleSheet("font-size: 11px; color: #8b949e; margin-left: 2px;")
+        self._xp_min = SliderSpinBox()
+        self._xp_min.setRange(0, 200000)
         self._xp_min.valueChanged.connect(self._apply_filters)
-        self._xp_max = PlusMinusSpinBox()
-        self._xp_max.setRange(0, 500000)
-        self._xp_max.setPrefix("Max XP ")
+        min_xp_col.addWidget(from_label)
+        min_xp_col.addWidget(self._xp_min)
+
+        # Max XP col
+        max_xp_col = QVBoxLayout()
+        max_xp_col.setSpacing(2)
+        to_label = QLabel("to")
+        to_label.setStyleSheet("font-size: 11px; color: #8b949e; margin-left: 2px;")
+        self._xp_max = SliderSpinBox()
+        self._xp_max.setRange(0, 200000)
         self._xp_max.valueChanged.connect(self._apply_filters)
+        max_xp_col.addWidget(to_label)
+        max_xp_col.addWidget(self._xp_max)
+
+        # CR col
+        cr_col = QVBoxLayout()
+        cr_col.setSpacing(2)
+        cr_label = QLabel(" ") # for alignment
+        cr_label.setStyleSheet("font-size: 11px;")
         self._cr_combo = QComboBox()
         self._cr_combo.addItem("Any CR")
         for cr in self._sorted_cr_values():
             self._cr_combo.addItem(cr)
         self._cr_combo.currentTextChanged.connect(self._apply_filters)
+        cr_col.addWidget(cr_label)
+        cr_col.addWidget(self._cr_combo)
 
-        filters_row.addWidget(self._xp_min)
-        filters_row.addWidget(self._xp_max)
-        filters_row.addWidget(self._cr_combo)
+        filters_row.addLayout(min_xp_col, 2)
+        filters_row.addLayout(max_xp_col, 2)
+        filters_row.addLayout(cr_col, 1)
 
         layout.addWidget(self._search)
+        
+        xp_cr_label = QLabel("XP/CR:")
+        xp_cr_label.setStyleSheet("font-weight: 600; margin-top: 4px;")
+        layout.addWidget(xp_cr_label)
+
         layout.addLayout(filters_row)
 
         tags_group = QGroupBox("Tags")
@@ -454,7 +489,19 @@ class EncounterPanel(QWidget):
         self._match_all_tags = QCheckBox("Match all tags")
         self._match_all_tags.stateChanged.connect(self._apply_filters)
         tags_layout.addWidget(self._tags_input)
-        tags_layout.addWidget(self._match_all_tags)
+
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(self._match_all_tags)
+        sort_row.addStretch(1)
+        sort_row.addWidget(QLabel("Sort:"))
+
+        self._sort_combo = QComboBox()
+        self._sort_combo.addItems(["XP: None", "XP: Low → High", "XP: High → Low"])
+        self._sort_combo.setCurrentIndex(self._sort_index_from_mode(self._sort_mode))
+        self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+        sort_row.addWidget(self._sort_combo)
+
+        tags_layout.addLayout(sort_row)
         layout.addWidget(tags_group)
 
         self._scroll = QScrollArea()
@@ -480,7 +527,7 @@ class EncounterPanel(QWidget):
         title.setObjectName("PanelTitle")
         layout.addWidget(title)
 
-        self._encounter_headers = ["Count", "Name", "XP each", "Total XP", "Remove"]
+        self._encounter_headers = ["Count", "Name", "XP each", "Total XP", "Modify"]
         self._encounter_tree = QTableWidget(0, 5)
         self._encounter_tree.verticalHeader().setVisible(False)
         self._encounter_tree.horizontalHeader().setVisible(False)
@@ -554,7 +601,7 @@ class EncounterPanel(QWidget):
         totals_layout = QVBoxLayout(totals_group)
         self._raw_label = QLabel("Raw XP: 0")
         self._mult_label = QLabel("Multiplier: 1.0")
-        self._adj_label = QLabel("Adjusted XP: 0")
+        self._adj_label = QLabel("Real Total XP: 0")
         totals_layout.addWidget(self._raw_label)
         totals_layout.addWidget(self._mult_label)
         totals_layout.addWidget(self._adj_label)
@@ -836,17 +883,19 @@ class EncounterPanel(QWidget):
         return float(self._settings.get("target_factor", 1.0))
 
     def _on_target_factor_slider(self, value: int) -> None:
-        factor = value / 100.0
-        if hasattr(self, "_target_factor_value"):
-            self._target_factor_value.setText(f"{factor:.2f}")
+        factor = round(value * 0.05, 2)
+        if hasattr(self, "_target_factor_spin"):
+            self._target_factor_spin.blockSignals(True)
+            self._target_factor_spin.setValue(factor)
+            self._target_factor_spin.blockSignals(False)
         self._update_target_factor(factor)
 
     def _on_target_factor_spin(self, value: float) -> None:
-        # kept for API compat; slider drives value now
-        slider_value = int(round(value * 100))
-        self._target_factor_slider.blockSignals(True)
-        self._target_factor_slider.setValue(slider_value)
-        self._target_factor_slider.blockSignals(False)
+        slider_value = int(round(value / 0.05))
+        if hasattr(self, "_target_factor_slider"):
+            self._target_factor_slider.blockSignals(True)
+            self._target_factor_slider.setValue(slider_value)
+            self._target_factor_slider.blockSignals(False)
         self._update_target_factor(value)
 
     def _update_target_factor(self, factor: float) -> None:
@@ -966,10 +1015,13 @@ class EncounterPanel(QWidget):
         self._add_monster(new_monster, dialog.result_count())
 
     def _refresh_encounter(self) -> None:
-        self._render_encounter_tree()
-        self._recompute_totals()
+        raw_xp, multiplier, adjusted_xp = compute_adjusted_xp(
+            self._encounter_entries, self._party_size_slider.value()
+        )
+        self._render_encounter_tree(multiplier)
+        self._recompute_totals(raw_xp, multiplier, adjusted_xp)
 
-    def _render_encounter_tree(self) -> None:
+    def _render_encounter_tree(self, multiplier: float = 1.0) -> None:
         self._encounter_tree.clearContents()
         total_rows = len(self._encounter_entries) + 1
         self._encounter_tree.setRowCount(total_rows)
@@ -996,6 +1048,7 @@ class EncounterPanel(QWidget):
             layout.setAlignment(alignment)
             label = QLabel(text, cell)
             label.setObjectName("EncounterCellLabel")
+            label.setTextFormat(Qt.TextFormat.RichText)
             label.setAlignment(alignment | Qt.AlignmentFlag.AlignVCenter)
             label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             if tooltip is not None:
@@ -1027,7 +1080,7 @@ class EncounterPanel(QWidget):
             )
             count_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             count_spin = PlusMinusSpinBox()
-            count_spin.setRange(1, 99)
+            count_spin.setRange(0, 99)
             count_spin.setValue(entry.count)
             count_spin.setFixedWidth(self._count_spin_width)
             count_spin.valueChanged.connect(
@@ -1080,37 +1133,63 @@ class EncounterPanel(QWidget):
             self._encounter_tree.setCellWidget(row, 1, name_cell)
             
             # XP each (Col 2) - Right aligned
+            adjusted_each = int(entry.monster.xp * multiplier + 0.5)
+            xp_each_text = f"{adjusted_each} <span style='color: #8b949e;'>({entry.monster.xp})</span>"
             xp_each = make_text_cell(
-                str(entry.monster.xp), Qt.AlignmentFlag.AlignRight
+                xp_each_text, Qt.AlignmentFlag.AlignRight
             )
+            # Use a label inside make_text_cell that supports rich text? 
+            # make_text_cell creates a QLabel. QLabel supports simple HTML.
+            # But make_text_cell sets the text directly.
+            # Let's verify make_text_cell implementation. It uses QLabel(text).
             self._encounter_tree.setCellWidget(row, 2, xp_each)
             
             # Total XP (Col 3) - Right aligned
+            total_adjusted = int(adjusted_each * entry.count)
             total_xp = make_text_cell(
-                str(entry.monster.xp * entry.count), Qt.AlignmentFlag.AlignRight
+                str(total_adjusted), Qt.AlignmentFlag.AlignRight
             )
             self._encounter_tree.setCellWidget(row, 3, total_xp)
 
-            # Remove (Col 4) - Center aligned
-            remove_container = QFrame(self._encounter_tree)
-            remove_container.setObjectName("EncounterCell")
-            remove_container.setFixedHeight(self._encounter_row_height)
-            remove_layout = QHBoxLayout(remove_container)
-            remove_layout.setContentsMargins(
+            # Modify (Col 4) - Center aligned
+            modify_container = QFrame(self._encounter_tree)
+            modify_container.setObjectName("EncounterCell")
+            modify_container.setFixedHeight(self._encounter_row_height)
+            modify_layout = QHBoxLayout(modify_container)
+            modify_layout.setContentsMargins(
                 self._remove_cell_margin, 0, self._remove_cell_margin, 0
             )
-            remove_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            remove_btn = QPushButton("Remove")
-            remove_btn.setObjectName("InlineResetButton")
-            remove_btn.clicked.connect(lambda checked=False, e=entry: self._remove_entry(e))
-            remove_layout.addWidget(remove_btn)
-            self._encounter_tree.setCellWidget(row, 4, remove_container)
+            modify_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            modify_btn = QPushButton("Modify")
+            modify_btn.setObjectName("InlineResetButton")
+            modify_btn.clicked.connect(lambda checked=False, e=entry: self._modify_entry(e))
+            modify_layout.addWidget(modify_btn)
+            self._encounter_tree.setCellWidget(row, 4, modify_container)
 
         self._sync_encounter_cell_sizes()
 
     def _update_count(self, entry: EncounterEntry, value: int) -> None:
-        entry.count = max(1, value)
-        self._refresh_encounter()
+        if value <= 0:
+            self._remove_entry(entry)
+        else:
+            entry.count = value
+            self._refresh_encounter()
+
+    def _modify_entry(self, entry: EncounterEntry) -> None:
+        dialog = ModifyMonsterDialog(entry.monster, entry.count, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_monster = dialog.result_monster()
+        if not new_monster:
+            return
+        
+        new_count = dialog.result_count()
+        if new_count <= 0:
+            self._remove_entry(entry)
+        else:
+            entry.monster = new_monster
+            entry.count = new_count
+            self._refresh_encounter()
 
     def _remove_entry(self, entry: EncounterEntry) -> None:
         self._encounter_entries = [e for e in self._encounter_entries if e is not entry]
@@ -1156,19 +1235,26 @@ class EncounterPanel(QWidget):
                 QTimer.singleShot(0, self._sync_chip_widths)
         return super().eventFilter(obj, event)
 
-    def _recompute_totals(self) -> None:
+    def _recompute_totals(
+        self,
+        raw_xp: Optional[int] = None,
+        multiplier: Optional[float] = None,
+        adjusted_xp: Optional[int] = None,
+    ) -> None:
         levels = self._current_levels()
         difficulty = self._difficulty_key()
         target_xp = self._compute_target_xp(levels, difficulty)
         self._target_label.setText(f"Target XP: {target_xp}")
         self._target_label.setToolTip(self._breakdown_tooltip(levels, difficulty))
 
-        raw_xp, multiplier, adjusted_xp = compute_adjusted_xp(
-            self._encounter_entries, self._party_size_slider.value()
-        )
+        if raw_xp is None or multiplier is None or adjusted_xp is None:
+            raw_xp, multiplier, adjusted_xp = compute_adjusted_xp(
+                self._encounter_entries, self._party_size_slider.value()
+            )
+
         self._raw_label.setText(f"Raw XP: {raw_xp}")
         self._mult_label.setText(f"Multiplier: {multiplier:.2f}")
-        self._adj_label.setText(f"Adjusted XP: {adjusted_xp}")
+        self._adj_label.setText(f"Real Total XP: {adjusted_xp}")
 
         if target_xp > 0:
             progress = (adjusted_xp / target_xp) * 100

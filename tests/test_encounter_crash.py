@@ -39,7 +39,8 @@ def test_click_toolbar_buttons(encounter_panel, qtbot):
 
 def test_add_and_remove_entry(encounter_panel, qtbot):
     """
-    Manually add an entry, then find the 'Remove' button in the tree and click it.
+    Manually add an entry, then find the 'Modify' button in the tree.
+    Also test removal by setting count to 0.
     """
     # Create a dummy monster
     monster = Monster(
@@ -55,15 +56,19 @@ def test_add_and_remove_entry(encounter_panel, qtbot):
     tree = encounter_panel._encounter_tree
     assert tree.rowCount() == 2
     
-    # Find the Remove button in the tree item
-    widget = tree.cellWidget(1, 4) # Column 4 is Remove
+    # Find the Modify button in the tree item
+    widget = tree.cellWidget(1, 4) # Column 4 is Modify
     assert isinstance(widget, QWidget)
-    remove_btn = widget.findChild(QPushButton)
-    assert isinstance(remove_btn, QPushButton)
-    assert remove_btn.text() == "Remove"
+    modify_btn = widget.findChild(QPushButton)
+    assert isinstance(modify_btn, QPushButton)
+    assert modify_btn.text() == "Modify"
     
-    # Click it
-    qtbot.mouseClick(remove_btn, Qt.MouseButton.LeftButton)
+    # Test removal by setting count to 0
+    # First get the spinbox
+    count_widget = tree.cellWidget(1, 0)
+    # The PlusMinusSpinBox might not be a direct QSpinBox, let's just call _update_count
+    entry = encounter_panel._encounter_entries[0]
+    encounter_panel._update_count(entry, 0)
     
     # Verify removal
     assert tree.rowCount() == 1
