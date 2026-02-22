@@ -2395,7 +2395,7 @@ class LootAppletWidget(QWidget):
             return None
         available = [item for item in candidates if item.item_id not in used_ids]
         if not available:
-            return None
+            available = candidates
         return self._weighted_item_choice(available, rng)
 
 

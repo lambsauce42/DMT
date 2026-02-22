@@ -93,5 +93,28 @@ class TestLootRelativeWeights(unittest.TestCase):
             
         self.assertAlmostEqual(total_prob, 100.0, delta=0.5)
 
+    def test_duplicates_allowed_when_exhausted(self):
+        # Setup: Pool has 1 Common item.
+        # Rolls: 2.
+        # Expectation: 2 items generated (both the same Common item).
+        
+        self.widget._item_library = [self.common_item]
+        self.widget._item_by_id = {item.item_id: item for item in self.widget._item_library}
+        self.widget._update_preview()
+        
+        self.widget._rolls_spin.setValue(2)
+        
+        # Ensure Common has 100% weight
+        self.widget._custom_weights_enabled = True
+        for r in RARITY_ORDER:
+            self.widget._weight_sliders[r].setValue(0)
+        self.widget._weight_sliders["common"].setValue(1000)
+        
+        self.widget._generate_loot(preserve_locked=False)
+        
+        self.assertEqual(len(self.widget._results), 2)
+        self.assertEqual(self.widget._results[0].item.item_id, self.common_item.item_id)
+        self.assertEqual(self.widget._results[1].item.item_id, self.common_item.item_id)
+
 if __name__ == "__main__":
     unittest.main()
