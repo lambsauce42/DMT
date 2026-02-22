@@ -2145,13 +2145,7 @@ class LootAppletWidget(QWidget):
 
         rolls = self._calculate_rolls()
         weights = self._calculate_weights()
-
-        effective_weights = {r: 0.0 for r in RARITY_ORDER}
-        for rarity in RARITY_ORDER:
-            base_weight = weights.get(rarity, 0.0)
-            target = self._find_fallback_rarity(rarity, pool_counts)
-            if target:
-                effective_weights[target] += base_weight
+        effective_weights = self._get_effective_weights(weights, pool_counts)
 
         self._rolls_label.setText(f"Rolls: {rolls}")
         self._pool_label.setText(f"Pool: {len(self._filtered_pool)} items")
@@ -2171,19 +2165,27 @@ class LootAppletWidget(QWidget):
                 else:
                     prob_label.setText("0.0%")
 
-    def _find_fallback_rarity(self, rarity: str, pool_counts: Dict[str, int]) -> Optional[str]:
-        if pool_counts.get(rarity, 0) > 0:
-            return rarity
+    def _get_effective_weights(self, base_weights: Dict[str, float], pool_counts: Dict[str, int]) -> Dict[str, float]:
+        """
+        Calculates effective weights by filtering for available rarities and re-normalizing.
+        This ensures that if a rarity is missing, its probability mass is distributed
+        proportionally among the available rarities, preserving relative ratios.
+        """
+        available_weights = {}
+        total_weight = 0.0
+        for rarity, count in pool_counts.items():
+            if count > 0:
+                weight = base_weights.get(rarity, 0.0)
+                available_weights[rarity] = weight
+                total_weight += weight
         
-        index = RARITY_ORDER.index(rarity)
-        for offset in range(1, len(RARITY_ORDER)):
-            lower = index - offset
-            upper = index + offset
-            if lower >= 0 and pool_counts.get(RARITY_ORDER[lower], 0) > 0:
-                return RARITY_ORDER[lower]
-            if upper < len(RARITY_ORDER) and pool_counts.get(RARITY_ORDER[upper], 0) > 0:
-                return RARITY_ORDER[upper]
-        return None
+        if total_weight <= 0.0:
+            return {r: 0.0 for r in RARITY_ORDER}
+            
+        return {
+            r: (available_weights.get(r, 0.0) / total_weight) * 100.0
+            for r in RARITY_ORDER
+        }
 
     def _shift_note(self) -> str:
         if self._custom_weights_enabled:
@@ -2256,6 +2258,8 @@ class LootAppletWidget(QWidget):
 
     def _weighted_choice(self, weights: Dict[str, float], rng: random.Random) -> str:
         total = sum(weights.values())
+        if total <= 0.0:
+             return RARITY_ORDER[0] # Default fallback
         roll = rng.random() * total
         current = 0.0
         for rarity in RARITY_ORDER:
@@ -2295,12 +2299,17 @@ class LootAppletWidget(QWidget):
                 return
 
         self._flash_generate_button()
-        weights = self._calculate_weights()
+        base_weights = self._calculate_weights()
         rolls = self._calculate_rolls()
         rng = self._rng
+        
         pool_by_rarity = {rarity: [] for rarity in RARITY_ORDER}
+        pool_counts = {rarity: 0 for rarity in RARITY_ORDER}
         for item in pool:
             pool_by_rarity.setdefault(item.rarity, []).append(item)
+            pool_counts[item.rarity] += 1
+            
+        weights = self._get_effective_weights(base_weights, pool_counts)
 
         results: List[LootResultItem] = []
         used_ids: Set[str] = set()
@@ -2328,8 +2337,40 @@ class LootAppletWidget(QWidget):
 
         slots = max(0, rolls - len(locked_results))
         for _ in range(slots):
+            # Recalculate weights if we are exhausting pools?
+            # For simplicity/performance, assume relative weights hold unless pool exhausted.
+            # If pool exhaustion is common, we should check availability.
+            
             rarity = self._weighted_choice(weights, rng)
             item = self._pick_item(rarity, pool_by_rarity, pool, used_ids, rng)
+            
+            # If pick_item failed (exhausted or empty), try again with adjusted weights?
+            # _pick_item handles empty/exhausted by returning None or (previously) fallback.
+            # With fallback removed, we need to handle exhaustion.
+            # If item is None, it means the chosen rarity is fully used.
+            # We should temporarily set its weight to 0 and re-roll rarity.
+            
+            attempts = 0
+            while item is None and attempts < 10:
+                # Temporarily mask this rarity
+                temp_weights = dict(weights)
+                temp_weights[rarity] = 0.0
+                # Re-normalize? _weighted_choice handles unnormalized sum.
+                # Just loop to pick another rarity.
+                
+                # If all exhausted, break
+                if sum(temp_weights.values()) <= 0.0:
+                    break
+                    
+                rarity = self._weighted_choice(temp_weights, rng)
+                item = self._pick_item(rarity, pool_by_rarity, pool, used_ids, rng)
+                attempts += 1
+                
+                # Persist the zeroing for this slot?
+                # Actually, if it's exhausted, we should update 'weights' for subsequent slots too.
+                if item is None:
+                     weights[rarity] = 0.0
+
             if not item:
                 break
             results.append(
@@ -2351,32 +2392,13 @@ class LootAppletWidget(QWidget):
     ) -> Optional[LootItem]:
         candidates = pool_by_rarity.get(rarity) or []
         if not candidates:
-            candidates = self._fallback_rarity_pool(pool_by_rarity, rarity)
-        if not candidates:
-            candidates = pool
-        if not candidates:
             return None
         available = [item for item in candidates if item.item_id not in used_ids]
         if not available:
-            available = candidates
+            return None
         return self._weighted_item_choice(available, rng)
 
-    def _fallback_rarity_pool(
-        self,
-        pool_by_rarity: Dict[str, List[LootItem]],
-        rarity: str,
-    ) -> List[LootItem]:
-        if rarity not in RARITY_ORDER:
-            return []
-        index = RARITY_ORDER.index(rarity)
-        for offset in range(1, len(RARITY_ORDER)):
-            lower = index - offset
-            upper = index + offset
-            if lower >= 0 and pool_by_rarity.get(RARITY_ORDER[lower]):
-                return pool_by_rarity[RARITY_ORDER[lower]]
-            if upper < len(RARITY_ORDER) and pool_by_rarity.get(RARITY_ORDER[upper]):
-                return pool_by_rarity[RARITY_ORDER[upper]]
-        return []
+
 
     def _weighted_item_choice(
         self,
@@ -2467,13 +2489,17 @@ class LootAppletWidget(QWidget):
         self._render_results()
 
     def _reroll_single(self, result_id: int) -> None:
-        weights = self._calculate_weights()
+        base_weights = self._calculate_weights()
         pool = self._filtered_pool
         if not pool:
             return
         pool_by_rarity = {rarity: [] for rarity in RARITY_ORDER}
+        pool_counts = {rarity: 0 for rarity in RARITY_ORDER}
         for item in pool:
             pool_by_rarity.setdefault(item.rarity, []).append(item)
+            pool_counts[item.rarity] += 1
+            
+        weights = self._get_effective_weights(base_weights, pool_counts)
 
         used_ids = {result.item.item_id for result in self._results}
         for result in self._results:
@@ -2482,8 +2508,21 @@ class LootAppletWidget(QWidget):
             if result.locked or result.guaranteed:
                 return
             used_ids.discard(result.item.item_id)
-            rarity = self._weighted_choice(weights, self._rng)
-            item = self._pick_item(rarity, pool_by_rarity, pool, used_ids, self._rng)
+            
+            # Use same exhaustion logic as _generate_loot
+            item = None
+            attempts = 0
+            current_weights = dict(weights)
+            
+            while item is None and attempts < 10:
+                if sum(current_weights.values()) <= 0.0:
+                    break
+                rarity = self._weighted_choice(current_weights, self._rng)
+                item = self._pick_item(rarity, pool_by_rarity, pool, used_ids, self._rng)
+                attempts += 1
+                if item is None:
+                    current_weights[rarity] = 0.0
+
             if item:
                 result.item = item
             break
