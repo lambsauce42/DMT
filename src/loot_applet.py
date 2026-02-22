@@ -105,6 +105,7 @@ CATEGORY_LABELS = {
     "consumables": "Consumables",
     "valuables": "Valuables",
     "magic": "Magic",
+    "quest": "Quest",
     "miscellaneous": "Miscellaneous",
 }
 PREVIEW_WIDTH = 350
@@ -657,20 +658,18 @@ class LootAppletWidget(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
-        settings_scroll = QScrollArea()
-        settings_scroll.setWidgetResizable(True)
-        settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        settings_scroll.setWidget(self._build_settings_panel())
-        
-        layout.addWidget(settings_scroll, 1)
-        layout.addWidget(self._build_center_panel(), 2)
-        layout.addWidget(self._build_preview_panel(), 1)
+        config_scroll = QScrollArea()
+        config_scroll.setWidgetResizable(True)
+        config_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        config_scroll.setWidget(self._build_config_panel())
 
-    def _build_settings_panel(self) -> QWidget:
+        layout.addWidget(config_scroll, 3)
+        layout.addWidget(self._build_center_panel(), 2)
+
+    def _build_config_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("Panel")
-        panel.setMinimumWidth(320)
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(10, 10, 10, 10)
         panel_layout.setSpacing(10)
@@ -679,6 +678,53 @@ class LootAppletWidget(QWidget):
         title.setObjectName("PanelTitle")
         panel_layout.addWidget(title)
 
+        cols_container = QWidget()
+        cols_layout = QHBoxLayout(cols_container)
+        cols_layout.setContentsMargins(0, 0, 0, 0)
+        cols_layout.setSpacing(10)
+
+        # Left Column: Settings
+        left_col = QVBoxLayout()
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.setSpacing(10)
+        
+        left_col.addWidget(self._build_core_inputs_section())
+        left_col.addWidget(self._build_filters_section())
+        
+        guaranteed_section = self._build_guaranteed_section()
+        guaranteed_section.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        left_col.addWidget(guaranteed_section)
+
+        # Right Column: Preview & Controls
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(10)
+        
+        limited_section = self._build_limited_pool_section()
+        limited_section.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        right_col.addWidget(limited_section)
+        
+        right_col.addWidget(self._build_controls_section())
+        
+        presets_section = self._build_presets_panel()
+        presets_section.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        right_col.addWidget(presets_section)
+
+        cols_layout.addLayout(left_col, 1)
+        cols_layout.addLayout(right_col, 1)
+        
+        panel_layout.addWidget(cols_container, 1)
+
+        self._generate_button = QPushButton(self._generate_button_default_text)
+        self._generate_button.setObjectName("PrimaryButton")
+        self._generate_button.clicked.connect(
+            lambda checked=False: self._generate_loot(preserve_locked=False)
+        )
+        panel_layout.addWidget(self._generate_button)
+        
+        return panel
+
+    def _build_core_inputs_section(self) -> QFrame:
         core = self._build_section("Core Inputs")
         core_layout = core.layout()
 
@@ -754,32 +800,24 @@ class LootAppletWidget(QWidget):
         core_layout.addWidget(luck_label)
         core_layout.addLayout(luck_row)
         core_layout.addWidget(luck_help)
+        return core
 
-        panel_layout.addWidget(core)
-
+    def _build_filters_section(self) -> QFrame:
         filters = self._build_section("Filters")
         filters_layout = filters.layout()
-
-        tag_label = QLabel("Encounter Tags")
-        tag_label.setObjectName("ColumnHeader")
-        self._tags_edit = QLineEdit()
-        self._tags_edit.setPlaceholderText("undead, dungeon, wilderness")
-        self._tags_edit.textChanged.connect(self._on_settings_changed)
 
         category_label = QLabel("Item Categories")
         category_label.setObjectName("ColumnHeader")
         self._category_container = QWidget()
-        self._category_layout = QHBoxLayout(self._category_container)
+        self._category_layout = QGridLayout(self._category_container)
         self._category_layout.setContentsMargins(0, 0, 0, 0)
         self._category_layout.setSpacing(8)
 
-        filters_layout.addWidget(tag_label)
-        filters_layout.addWidget(self._tags_edit)
         filters_layout.addWidget(category_label)
         filters_layout.addWidget(self._category_container)
+        return filters
 
-        panel_layout.addWidget(filters)
-
+    def _build_guaranteed_section(self) -> QFrame:
         guaranteed = self._build_section("Guaranteed Items")
         guaranteed_layout = guaranteed.layout()
         header_item = guaranteed_layout.takeAt(0)
@@ -829,7 +867,7 @@ class LootAppletWidget(QWidget):
             QAbstractItemView.ScrollMode.ScrollPerPixel
         )
         self._guaranteed_list.verticalScrollBar().setSingleStep(4)
-        self._guaranteed_list.setMinimumHeight(240)
+        self._guaranteed_list.setMinimumHeight(216)
         self._guaranteed_list.itemEntered.connect(self._on_library_item_hover)
         self._guaranteed_list.viewport().installEventFilter(self)
         self._guaranteed_list.itemChanged.connect(self._on_guaranteed_item_changed)
@@ -849,9 +887,9 @@ class LootAppletWidget(QWidget):
 
         guaranteed_layout.addLayout(guaranteed_row)
         guaranteed_layout.addWidget(self._guaranteed_list)
+        return guaranteed
 
-        panel_layout.addWidget(guaranteed)
-
+    def _build_limited_pool_section(self) -> QFrame:
         limited = self._build_section("Limited Pool")
         limited_layout = limited.layout()
         limited_header_item = limited_layout.takeAt(0)
@@ -902,7 +940,7 @@ class LootAppletWidget(QWidget):
             QAbstractItemView.ScrollMode.ScrollPerPixel
         )
         self._limited_list.verticalScrollBar().setSingleStep(4)
-        self._limited_list.setMinimumHeight(240)
+        self._limited_list.setMinimumHeight(216)
         self._limited_list.itemEntered.connect(self._on_library_item_hover)
         self._limited_list.viewport().installEventFilter(self)
         self._limited_list.itemChanged.connect(self._on_limited_pool_item_changed)
@@ -917,18 +955,7 @@ class LootAppletWidget(QWidget):
 
         limited_layout.addLayout(limited_row)
         limited_layout.addWidget(self._limited_list)
-
-        panel_layout.addWidget(limited)
-
-        self._generate_button = QPushButton(self._generate_button_default_text)
-        self._generate_button.setObjectName("PrimaryButton")
-        self._generate_button.clicked.connect(
-            lambda checked=False: self._generate_loot(preserve_locked=False)
-        )
-        panel_layout.addStretch(1)
-        panel_layout.addWidget(self._generate_button)
-
-        return panel
+        return limited
 
     def _build_center_panel(self) -> QWidget:
         panel = QFrame()
@@ -1133,30 +1160,7 @@ class LootAppletWidget(QWidget):
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         return btn
 
-    def _build_preview_panel(self) -> QWidget:
-        panel = QFrame()
-        panel.setObjectName("Panel")
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(10, 10, 10, 10)
-        panel_layout.setSpacing(10)
-
-        title = QLabel("Preview & Controls")
-        title.setObjectName("PanelTitle")
-        panel_layout.addWidget(title)
-
-        hint = QLabel("Live preview updates as you tweak filters and weights.")
-        hint.setObjectName("Subheader")
-        panel_layout.addWidget(hint)
-
-        self._preview_text = QTextEdit()
-        self._preview_text.setObjectName("InfoBox")
-        self._preview_text.setReadOnly(True)
-        self._preview_text.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._preview_text.setPlaceholderText(
-            "Adjust filters, categories, and weights to see the expected distribution."
-        )
-        panel_layout.addWidget(self._preview_text)
-
+    def _build_controls_section(self) -> QFrame:
         controls = self._build_section("Controls")
         controls_layout = controls.layout()
 
@@ -1173,36 +1177,9 @@ class LootAppletWidget(QWidget):
             lambda checked=False: self._generate_loot(preserve_locked=True)
         )
 
-        seed_row = QHBoxLayout()
-        seed_label = QLabel("Seed (optional)")
-        self._seed_spin = PlusMinusSpinBox()
-        self._seed_spin.setRange(0, 999999999)
-        self._seed_apply = QPushButton("Apply")
-        self._seed_apply.setObjectName("SecondaryButton")
-        self._seed_apply.setProperty("compact", "true")
-        self._seed_apply.setToolTip("Apply the current seed for repeatable results.")
-        self._seed_apply.clicked.connect(self._apply_seed)
-        self._seed_random = QPushButton("Random")
-        self._seed_random.setObjectName("SecondaryButton")
-        self._seed_random.setProperty("compact", "true")
-        self._seed_random.setToolTip("Generate a fresh seed.")
-        self._seed_random.clicked.connect(self._randomize_seed)
-        seed_row.addWidget(seed_label)
-        seed_row.addWidget(self._seed_spin, 1)
-        seed_row.addWidget(self._seed_apply)
-        seed_row.addWidget(self._seed_random)
-
         controls_layout.addWidget(self._reroll_all_btn)
         controls_layout.addWidget(self._reroll_unlocked_btn)
-        controls_layout.addLayout(seed_row)
-
-        panel_layout.addWidget(controls)
-
-        presets = self._build_presets_panel()
-        panel_layout.addWidget(presets)
-
-        panel_layout.addStretch(1)
-        return panel
+        return controls
 
     def _build_presets_panel(self) -> QFrame:
         presets = self._build_section("Presets")
@@ -1934,7 +1911,14 @@ class LootAppletWidget(QWidget):
             if child.widget():
                 child.widget().deleteLater()
         self._category_checks.clear()
-        for key in sorted(self._category_labels, key=lambda k: self._category_labels[k].lower()):
+        
+        # Sort by predefined order to ensure consistent 2x3 grid
+        predefined_order = ["equipment", "consumables", "valuables", "magic", "quest", "miscellaneous"]
+        keys = predefined_order + [k for k in sorted(self._category_labels) if k not in predefined_order]
+        
+        for idx, key in enumerate(keys):
+            if key not in self._category_labels:
+                continue
             label = self._category_labels[key]
             cb = QCheckBox(label)
             cb_font = cb.font()
@@ -1943,11 +1927,12 @@ class LootAppletWidget(QWidget):
             cb.setChecked(key in selected)
             cb.stateChanged.connect(self._on_settings_changed)
             self._category_checks[key] = cb
-            self._category_layout.addWidget(cb)
-        self._category_layout.addStretch(1)
+            
+            row = idx // 3
+            col = idx % 3
+            self._category_layout.addWidget(cb, row, col)
 
     def _apply_filters(self, ignore_limited: bool = False) -> List[LootItem]:
-        tags = _parse_tag_list(self._tags_edit.text())
         categories = {
             key for key, cb in self._category_checks.items() if cb.isChecked()
         }
@@ -1956,8 +1941,6 @@ class LootAppletWidget(QWidget):
 
         def matches(item: LootItem) -> bool:
             if item.level > max_level:
-                return False
-            if tags and not tags.intersection(item.tags):
                 return False
             if categories and not categories.issubset(item.categories):
                 return False
@@ -2046,7 +2029,6 @@ class LootAppletWidget(QWidget):
         if not self._custom_weights_enabled:
             self._sync_weight_sliders(self._calculate_weights())
         self._update_table()
-        self._update_preview_text()
         self._weights_reset_btn.setEnabled(self._custom_weights_enabled)
         self._refresh_weight_labels(self._calculate_weights())
         self._generate_button.setEnabled(
@@ -2077,27 +2059,6 @@ class LootAppletWidget(QWidget):
             pool_label = self._pool_value_labels.get(rarity)
             if pool_label:
                 pool_label.setText(str(pool_count))
-
-    def _update_preview_text(self) -> None:
-        weights = self._calculate_weights()
-        rolls = self._calculate_rolls()
-        group_level = self._group_level_spin.value()
-        max_level = min(LEVEL_CAP, group_level + LEVEL_RANGE)
-        lines = ["Distribution"]
-        parts: List[str] = []
-        for rarity in RARITY_ORDER:
-            weight = weights.get(rarity, 0.0)
-            expected = rolls * weight / 100.0
-            label = _rarity_label(rarity)
-            parts.append(f"{label} {weight:.1f}% (~{expected:.1f})")
-        for idx in range(0, len(parts), 4):
-            lines.append(" | ".join(parts[idx : idx + 4]))
-
-        lines.append(
-            f"Levels: 1-{max_level} (bias L{group_level})"
-        )
-
-        self._preview_text.setPlainText("\n".join(lines))
 
     def _shift_note(self) -> str:
         if self._custom_weights_enabled:
@@ -2392,7 +2353,6 @@ class LootAppletWidget(QWidget):
         return {
             "version": 1,
             "created_at": _utc_timestamp(),
-            "seed": self._seed_spin.value(),
             "results": rows,
         }
 
@@ -2472,14 +2432,6 @@ class LootAppletWidget(QWidget):
                 )
             )
             next_result_id += 1
-        seed_value = payload.get("seed")
-        if seed_value is not None:
-            try:
-                seed_int = max(0, min(999999999, int(seed_value)))
-                self._seed_spin.setValue(seed_int)
-                self._rng.seed(seed_int)
-            except (TypeError, ValueError):
-                pass
         self._results = loaded
         self._next_result_id = max(1, next_result_id)
         self._render_results()
@@ -2619,15 +2571,6 @@ class LootAppletWidget(QWidget):
 
     def _flash_generate_button(self) -> None:
         self._generate_button.setText(self._generate_button_default_text)
-
-    def _apply_seed(self) -> None:
-        value = self._seed_spin.value()
-        self._rng.seed(value)
-
-    def _randomize_seed(self) -> None:
-        value = random.randint(0, 999999999)
-        self._seed_spin.setValue(value)
-        self._rng.seed(value)
 
     def _load_presets(self) -> None:
         self._preset_entries = []

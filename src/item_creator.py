@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QEvent
 from PyQt6.QtGui import (
     QColor,
     QFontMetrics,
@@ -305,11 +305,19 @@ class ItemCreatorWidget(QWidget):
         rarity_col.addWidget(rarity_label)
         self.rarity_combo = QComboBox(basic_group)
         self.rarity_combo.setFixedHeight(INPUT_H)
-        self.rarity_combo.setFixedWidth(106)
+        self.rarity_combo.setFixedWidth(160)
+        self.rarity_combo.setEditable(True)
+        self.rarity_combo.lineEdit().setReadOnly(True)
+        self.rarity_combo.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 20px left padding balances the ~20px wide dropdown arrow. 
+        # 4px bottom padding ensures characters like 'y' or 'g' aren't cutoff.
+        self.rarity_combo.lineEdit().setStyleSheet(
+            "background: transparent; border: none; padding: 0px 0px 4px 20px; selection-background-color: #3a5a7a;"
+        )
+        self.rarity_combo.lineEdit().installEventFilter(self)
         self.rarity_combo.addItems(
             ["common", "uncommon", "rare", "epic", "legendary", "artifact"]
         )
-        self.rarity_combo.setFixedWidth(160)
         rarity_col.addWidget(self.rarity_combo)
         basic_layout.addLayout(rarity_col)
 
@@ -342,6 +350,14 @@ class ItemCreatorWidget(QWidget):
         self.icon_category_combo = QComboBox(icon_group)
         self.icon_category_combo.setFixedHeight(INPUT_H)
         self.icon_category_combo.setFixedWidth(160)
+        self.icon_category_combo.setEditable(True)
+        self.icon_category_combo.lineEdit().setReadOnly(True)
+        self.icon_category_combo.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 20px left padding balances the dropdown arrow. 4px bottom padding prevents clipping.
+        self.icon_category_combo.lineEdit().setStyleSheet(
+            "background: transparent; border: none; padding: 0px 0px 4px 20px; selection-background-color: #3a5a7a;"
+        )
+        self.icon_category_combo.lineEdit().installEventFilter(self)
         self.icon_category_combo.currentTextChanged.connect(self._on_icon_category_changed)
 
         search_row = QHBoxLayout()
@@ -413,7 +429,7 @@ class ItemCreatorWidget(QWidget):
             icon_grid.addWidget(empty_label, 0, 0)
 
         icon_scroll.setWidget(icon_container)
-        icon_scroll.setMinimumHeight(220)
+        icon_scroll.setMinimumHeight(208)
         icon_layout.addWidget(icon_scroll)
         form_layout.addWidget(icon_group)
 
@@ -437,7 +453,7 @@ class ItemCreatorWidget(QWidget):
         self.stats_table.verticalHeader().setVisible(False)
         self.stats_table.verticalHeader().setDefaultSectionSize(40)
         self.stats_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.stats_table.setMinimumHeight(200)
+        self.stats_table.setMinimumHeight(160)
         self.stats_table.setShowGrid(False)
         self.stats_table.setAlternatingRowColors(True)
         self.stats_table.setCornerButtonEnabled(False)
@@ -506,35 +522,31 @@ class ItemCreatorWidget(QWidget):
         effects_group = QGroupBox("Effects", self)
         effects_group.setObjectName("TransparentContainer")
         effects_layout = QVBoxLayout(effects_group)
+        effects_layout.setContentsMargins(12, 12, 12, 12)
         self.effects_edit = QPlainTextEdit(effects_group)
         self.effects_edit.setPlaceholderText("One effect per line")
         self.effects_edit.setPlainText(
             "Gain resistance to necrotic damage.\n"
             "Once per rest, reroll a failed saving throw."
         )
-        self.effects_edit.setMinimumHeight(120)
+        self.effects_edit.setMinimumHeight(80)
         effects_layout.addWidget(self.effects_edit)
 
-        self.fuse_stats_check = QCheckBox("Fuse Stats and Effects", effects_group)
-        self.fuse_stats_check.setToolTip("Combine stats and effects boxes. Only available when no stats are set.")
-        self.fuse_stats_check.stateChanged.connect(self._on_fuse_stats_changed)
-        effects_layout.addWidget(self.fuse_stats_check)
         se_layout.addWidget(effects_group, 1)
 
-        form_layout.addWidget(stats_effects_row)
+        form_layout.addWidget(stats_effects_row, 1)
 
         flavor_group = QGroupBox("Flavor Text", self)
         flavor_group.setObjectName("TransparentContainer")
         flavor_layout = QVBoxLayout(flavor_group)
+        flavor_layout.setContentsMargins(12, 12, 12, 12)
         self.flavor_edit = QPlainTextEdit(flavor_group)
         self.flavor_edit.setPlaceholderText("Short italic flavor text")
         self.flavor_edit.setPlainText(
             "A quiet glow pools in the seams of the metal."
         )
         flavor_layout.addWidget(self.flavor_edit)
-        form_layout.addWidget(flavor_group)
-
-        form_layout.addStretch(1)
+        form_layout.addWidget(flavor_group, 1)
 
         preview_panel = QWidget(self)
         preview_layout = QVBoxLayout(preview_panel)
@@ -971,7 +983,7 @@ class ItemCreatorWidget(QWidget):
             icon_path=self.icon_edit.text().strip() or None,
             tags=tags,
             level=level,
-            fused_stats_effects=self.fuse_stats_check.isChecked(),
+            fused_stats_effects=False,
             show_level=self._show_level_check.isChecked(),
             show_rarity=self._show_rarity_check.isChecked(),
             show_icon_padding=self._icon_padding_check.isChecked(),
@@ -989,7 +1001,6 @@ class ItemCreatorWidget(QWidget):
         self.effects_edit.blockSignals(True)
         self.flavor_edit.blockSignals(True)
         self.stats_table.blockSignals(True)
-        self.fuse_stats_check.blockSignals(True)
         self._show_level_check.blockSignals(True)
         self._show_rarity_check.blockSignals(True)
         self._icon_padding_check.blockSignals(True)
@@ -1025,7 +1036,6 @@ class ItemCreatorWidget(QWidget):
         for value, name in spec.stats:
             self._insert_stat_row(value, name)
 
-        self.fuse_stats_check.setChecked(spec.fused_stats_effects)
         self._show_level_check.setChecked(spec.show_level)
         self._show_rarity_check.setChecked(spec.show_rarity)
         self._icon_padding_check.setChecked(spec.show_icon_padding)
@@ -1041,12 +1051,10 @@ class ItemCreatorWidget(QWidget):
         self.effects_edit.blockSignals(False)
         self.flavor_edit.blockSignals(False)
         self.stats_table.blockSignals(False)
-        self.fuse_stats_check.blockSignals(False)
         self._show_level_check.blockSignals(False)
         self._show_rarity_check.blockSignals(False)
         self._icon_padding_check.blockSignals(False)
         self._sync_icon_selection()
-        self._update_ui_states()
         self.update_preview()
         self._set_dirty(False)
 
@@ -1260,26 +1268,6 @@ class ItemCreatorWidget(QWidget):
         self._level_edit.setText(str(self._level_value))
         self._level_edit.blockSignals(False)
 
-    def _on_fuse_stats_changed(self, state: int) -> None:
-        self._update_ui_states()
-        self._mark_dirty()
-
-    def _update_ui_states(self) -> None:
-        stats = self._collect_stats()
-        has_stats = len(stats) > 0
-        
-        if has_stats:
-            self.fuse_stats_check.setEnabled(False)
-            self.fuse_stats_check.blockSignals(True)
-            self.fuse_stats_check.setChecked(False)
-            self.fuse_stats_check.blockSignals(False)
-        else:
-            self.fuse_stats_check.setEnabled(True)
-
-        fused = self.fuse_stats_check.isChecked()
-        self.stats_table.setEnabled(not fused)
-        self.add_stat_btn.setEnabled(not fused)
-
     def _update_dirty_indicator(self) -> None:
         if self._dirty:
             self._preview_header.setText("Preview*")
@@ -1293,7 +1281,6 @@ class ItemCreatorWidget(QWidget):
         self._update_dirty_indicator()
 
     def _mark_dirty(self) -> None:
-        self._update_ui_states()
         self._set_dirty(True)
         self.update_preview()
 
@@ -1327,12 +1314,22 @@ class ItemCreatorWidget(QWidget):
             self._preview_status.setText(f"Preview error: {str(exc)[:40]}...")
             return
 
+    def eventFilter(self, obj, event) -> bool:
+        """Handle mouse clicks on read-only line edits within editable combo boxes."""
+        if event.type() == QEvent.Type.MouseButtonPress:
+            # Check if this is one of our combo box line edits
+            if (hasattr(self, 'rarity_combo') and obj is self.rarity_combo.lineEdit()) or \
+               (hasattr(self, 'icon_category_combo') and obj is self.icon_category_combo.lineEdit()):
+                obj.parent().showPopup()
+                return True
+        return super().eventFilter(obj, event)
+
     def _focus_from_hitbox(self, key: str) -> None:
         mapping = {
             "icon": self.icon_edit,
             "title": self.title_edit,
             "rarity": self.rarity_combo,
-            "classes": self.all_classes_check,
+            "classes": self._classes_edit,
             "stats": self.stats_table,
             "effects": self.effects_edit,
             "flavor": self.flavor_edit,

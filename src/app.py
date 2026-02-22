@@ -1030,7 +1030,7 @@ APPLET_DEFINITIONS: List[Dict[str, object]] = [
     },
     {
         "key": "item_creator",
-        "tab": "Items",
+        "tab": "Item Creator",
         "title": "Item Creator",
         "subtitle": "Create item PDFs",
         "icon": "itemcreator.png",

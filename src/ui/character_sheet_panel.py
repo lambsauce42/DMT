@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal, QSize
+from PyQt6.QtGui import QKeySequence, QShortcut, QIcon
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -21,6 +21,9 @@ from PyQt6.QtWidgets import (
 
 from ui.widgets import PlusMinusSpinBox
 from viewer.pdfium_viewer_widget import PdfiumViewerWidget
+
+
+ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icons"))
 
 
 class PageSpinBox(QSpinBox):
@@ -105,8 +108,14 @@ class CharacterSheetPanel(QWidget):
         self._center_title.setMinimumWidth(0)
         self._center_title.setVisible(False)
 
-        self._zoom_out_button = QPushButton("−")
-        self._zoom_in_button = QPushButton("+")
+        self._zoom_out_button = QPushButton()
+        self._zoom_out_button.setIcon(QIcon(os.path.join(ICON_DIR, "zoom_out.svg")))
+        self._zoom_out_button.setIconSize(QSize(16, 16))
+        self._zoom_out_button.setToolTip("Zoom Out")
+        self._zoom_in_button = QPushButton()
+        self._zoom_in_button.setIcon(QIcon(os.path.join(ICON_DIR, "zoom_in.svg")))
+        self._zoom_in_button.setIconSize(QSize(16, 16))
+        self._zoom_in_button.setToolTip("Zoom In")
         self._fit_button = QPushButton("Fit Width")
         self._fit_page_button = QPushButton("Fit Page")
         self._zoom_label = QLabel("100%")

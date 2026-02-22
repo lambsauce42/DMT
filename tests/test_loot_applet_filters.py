@@ -49,7 +49,6 @@ class LootAppletFilterTests(unittest.TestCase):
                 "valuables": "Valuables",
             }
             widget._rebuild_category_filters({"equipment", "magic"})
-            widget._tags_edit.setText("")
             widget._group_level_spin.setValue(5)
 
             filtered = widget._apply_filters()

@@ -40,7 +40,6 @@ class TestLootAppletResultsIO:
         widget = loot_applet.LootAppletWidget()
         try:
             item = self._item("sword_1", "Longsword", str(tmp_path / "longsword.json"))
-            widget._seed_spin.setValue(31415)
             widget._results = [
                 loot_applet.LootResultItem(
                     result_id=1,
@@ -67,7 +66,6 @@ class TestLootAppletResultsIO:
             assert saved_path.exists()
             payload = json.loads(saved_path.read_text(encoding="utf-8"))
             assert payload["version"] == 1
-            assert payload["seed"] == 31415
             assert len(payload["results"]) == 1
             row = payload["results"][0]
             assert row["item_id"] == "sword_1"
@@ -96,7 +94,6 @@ class TestLootAppletResultsIO:
                 json.dumps(
                     {
                         "version": 1,
-                        "seed": 777,
                         "created_at": "2026-02-09T00:00:00+00:00",
                         "results": [
                             {
@@ -138,7 +135,6 @@ class TestLootAppletResultsIO:
 
             widget._load_generated_results()
 
-            assert widget._seed_spin.value() == 777
             assert len(widget._results) == 1
             loaded = widget._results[0]
             assert loaded.item.item_id == "known_1"

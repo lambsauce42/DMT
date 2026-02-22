@@ -741,16 +741,12 @@ def _layout_measure(spec: ItemCardSpec, opts: RenderOptions, s: float):
     content_x1 = card_x1 - inset
 
     # Stats panel
-    if spec.fused_stats_effects and not spec.stats:
+    if not spec.stats:
         stat_lines = []
         stats_box_h = 0
         stat_line_gap = 0
     else:
-        stat_lines = (
-            [f"{val} {name}".strip() for (val, name) in spec.stats]
-            if spec.stats
-            else ["-"]
-        )
+        stat_lines = [f"{val} {name}".strip() for (val, name) in spec.stats]
         _, sh = _text_size(d, "Ag", stats_font)
         stat_line_gap = max(1, int(round(8 * s * body_scale * font_base)))
         stat_line_h = sh + stat_line_gap
@@ -853,7 +849,9 @@ def render_item_card(
     panel_gap = _px(14 * s)
 
     # Calculate total height
-    cursor_y = layout["header_bottom"] + panel_gap + layout["stats_box_h"]
+    cursor_y = layout["header_bottom"]
+    if layout["stats_box_h"] > 0:
+        cursor_y += panel_gap + layout["stats_box_h"]
     if layout["eff_box_h"] > 0:
         cursor_y += panel_gap + layout["eff_box_h"]
     if layout["fl_box_h"] > 0:

@@ -1,6 +1,10 @@
+import os
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QLineEdit, QSizePolicy
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QLocale
-from PyQt6.QtGui import QIntValidator, QDoubleValidator
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QLocale, QSize
+from PyQt6.QtGui import QIntValidator, QDoubleValidator, QIcon
+
+
+ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "icons"))
 
 class PlusMinusSpinBox(QWidget):
     # Emit object to support both int and float
@@ -39,7 +43,9 @@ class PlusMinusSpinBox(QWidget):
         layout.addWidget(self.line_edit)
 
         # Minus Button
-        self.minus_btn = QPushButton("-")
+        self.minus_btn = QPushButton()
+        self.minus_btn.setIcon(QIcon(os.path.join(ICON_DIR, "minus.svg")))
+        self.minus_btn.setIconSize(QSize(14, 14))
         self.minus_btn.setObjectName("SpinBoxButton")
         self.minus_btn.setFixedSize(32, 32)
         self.minus_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -50,7 +56,9 @@ class PlusMinusSpinBox(QWidget):
         layout.addWidget(self.minus_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Plus Button
-        self.plus_btn = QPushButton("+")
+        self.plus_btn = QPushButton()
+        self.plus_btn.setIcon(QIcon(os.path.join(ICON_DIR, "plus.svg")))
+        self.plus_btn.setIconSize(QSize(14, 14))
         self.plus_btn.setObjectName("SpinBoxButton")
         self.plus_btn.setFixedSize(32, 32)
         self.plus_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
