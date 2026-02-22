@@ -77,5 +77,30 @@ class TestLootCurves(unittest.TestCase):
         # So Legendary weight in Steep should be lower than Normal Linear
         self.assertLess(w_steep["legendary"], w_linear["legendary"])
 
+    def test_bell_curve_variants(self):
+        # Luck = 50% (Norm 0.5) -> Peak at Rare (index 2)
+        self.widget._luck_slider.setValue(50 * loot_applet.LUCK_SLIDER_SCALE)
+        
+        self.widget._curve_combo.setCurrentText("Bell Curve (Narrow)")
+        w_narrow = self.widget._calculate_weights()
+        
+        self.widget._curve_combo.setCurrentText("Bell Curve (Wide)")
+        w_wide = self.widget._calculate_weights()
+        
+        # At peak (rare), Narrow should have higher relative weight (after normalization) 
+        # But wait, weights are normalized to sum to 100.
+        # Narrow: Peak is high, tails are near zero. Sum is dominated by peak.
+        # Wide: Peak is high, tails are high. Sum is larger.
+        # Normalized:
+        # Narrow: Rare % should be higher.
+        # Wide: Rare % should be lower (more spread to others).
+        
+        self.assertGreater(w_narrow["rare"], w_wide["rare"])
+        
+        # Check tails (Common)
+        # Narrow: Common should be very low.
+        # Wide: Common should be higher.
+        self.assertLess(w_narrow["common"], w_wide["common"])
+
 if __name__ == "__main__":
     unittest.main()

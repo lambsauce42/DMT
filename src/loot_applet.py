@@ -89,7 +89,9 @@ RARITY_CURVES = [
     "Quadratic (Steep)",
     "Exponential",
     "Poisson",
+    "Bell Curve (Narrow)",
     "Bell Curve",
+    "Bell Curve (Wide)",
     "Flat",
     "Inverted",
 ]
@@ -2009,7 +2011,11 @@ class LootAppletWidget(QWidget):
         if curve == "Poisson":
             return self._poisson_weights(luck_norm)
         if curve == "Bell Curve":
-            return self._bell_curve_weights(luck_norm)
+            return self._bell_curve_weights(luck_norm, sigma=0.25)
+        if curve == "Bell Curve (Narrow)":
+            return self._bell_curve_weights(luck_norm, sigma=0.15)
+        if curve == "Bell Curve (Wide)":
+            return self._bell_curve_weights(luck_norm, sigma=0.45)
         if curve == "Flat":
             return self._flat_weights()
         if curve == "Inverted":
@@ -2059,14 +2065,14 @@ class LootAppletWidget(QWidget):
             weights[rarity] = weight
         return weights
 
-    def _bell_curve_weights(self, luck_norm: float) -> Dict[str, float]:
+    def _bell_curve_weights(self, luck_norm: float, sigma: float = 0.25) -> Dict[str, float]:
         peak_t = luck_norm
         weights: Dict[str, float] = {}
         core = _core_rarities()
         tier_count = len(core) - 1
         for idx, rarity in enumerate(core):
             t = idx / tier_count if tier_count else 0.0
-            val = math.exp(-0.5 * ((t - peak_t) / 0.25) ** 2)
+            val = math.exp(-0.5 * ((t - peak_t) / sigma) ** 2)
             weights[rarity] = val
         return weights
 
@@ -2188,7 +2194,21 @@ class LootAppletWidget(QWidget):
         if curve == "Flat":
             return "Flat distribution ignores Luck."
             
-        if curve in ("Poisson", "Bell Curve"):
+        if "Bell Curve" in curve:
+            if "Narrow" in curve:
+                spread = "High precision:"
+            elif "Wide" in curve:
+                spread = "Wide spread:"
+            else:
+                spread = "Balanced spread:"
+                
+            if luck >= 80:
+                return f"{spread} Luck focuses strongly on Epic/Legendary."
+            if luck <= 20:
+                return f"{spread} Luck focuses strongly on Common."
+            return f"{spread} Luck sets the rarity peak."
+
+        if curve == "Poisson":
             if luck >= 80:
                 return "Luck pushes the peak toward Epic/Legendary."
             if luck <= 20:
