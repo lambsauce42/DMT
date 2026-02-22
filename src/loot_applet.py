@@ -664,8 +664,8 @@ class LootAppletWidget(QWidget):
         config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         config_scroll.setWidget(self._build_config_panel())
 
-        layout.addWidget(config_scroll, 3)
-        layout.addWidget(self._build_center_panel(), 2)
+        layout.addWidget(config_scroll, 12)
+        layout.addWidget(self._build_center_panel(), 13)
 
     def _build_config_panel(self) -> QWidget:
         panel = QFrame()
@@ -704,11 +704,11 @@ class LootAppletWidget(QWidget):
         limited_section.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         right_col.addWidget(limited_section)
         
-        right_col.addWidget(self._build_controls_section())
-        
         presets_section = self._build_presets_panel()
         presets_section.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         right_col.addWidget(presets_section)
+
+        right_col.addWidget(self._build_controls_section())
 
         cols_layout.addLayout(left_col, 1)
         cols_layout.addLayout(right_col, 1)

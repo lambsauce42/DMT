@@ -1204,3 +1204,20 @@ def save_item_card_pdf(
         resolution=pdf_resolution,
     )
     return rendered
+
+
+def save_item_card_png(
+    spec: ItemCardSpec,
+    png_path: str,
+    opts: Optional[RenderOptions] = None,
+    png_resolution: int = 288,
+    downscale: bool = False,
+) -> RenderedCard:
+    render_opts = opts or RenderOptions()
+    rendered = render_item_card(spec, render_opts, downscale=downscale)
+    rendered.image.save(
+        png_path,
+        "PNG",
+        dpi=(png_resolution, png_resolution),
+    )
+    return rendered

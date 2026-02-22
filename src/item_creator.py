@@ -72,6 +72,7 @@ try:
         RenderOptions,
         render_item_card,
         save_item_card_pdf,
+        save_item_card_png,
         spec_from_dict,
         spec_to_dict,
     )
@@ -256,6 +257,11 @@ class ItemCreatorWidget(QWidget):
         self.export_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "file_pdf.svg")))
         self.export_button.setToolTip("Export PDF")
 
+        self.export_png_button = QToolButton(self)
+        self.export_png_button.setObjectName("SecondaryButton")
+        self.export_png_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "image.svg")))
+        self.export_png_button.setToolTip("Export PNG")
+
         top_action_button_style = (
             "QToolButton#SecondaryButton {"
             "padding: 4px;"
@@ -266,7 +272,7 @@ class ItemCreatorWidget(QWidget):
             "border-radius: 6px;"
             "}"
         )
-        for btn in (self.load_button, self.save_button, self.save_to_button, self.export_button):
+        for btn in (self.load_button, self.save_button, self.save_to_button, self.export_button, self.export_png_button):
             btn.setProperty("compact", True)
             btn.setIconSize(QSize(20, 20))
             btn.setFixedSize(36, 36)
@@ -555,8 +561,8 @@ class ItemCreatorWidget(QWidget):
         # ── Top bar: Classes | Categories+Level | Display Options ──
         top_bar = QFrame(preview_panel)
         top_bar.setStyleSheet(
-            "QFrame#ItemTopBar { background-color: #161b22;"
-            " border: 1px solid #30363d; border-radius: 8px; }"
+            "QFrame#ItemTopBar { background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #161b22, stop:1 #0d1117);"
+            " border: 1px solid #30363d; border-top: 1px solid #3d444d; border-radius: 8px; }"
         )
         top_bar.setObjectName("ItemTopBar")
         
@@ -718,6 +724,7 @@ class ItemCreatorWidget(QWidget):
         self.save_button.clicked.connect(self._save_item)
         self.save_to_button.clicked.connect(self._save_item_as)
         self.export_button.clicked.connect(self._export_pdf)
+        self.export_png_button.clicked.connect(self._export_png)
 
         self.title_edit.textChanged.connect(self._mark_dirty)
         self.rarity_combo.currentTextChanged.connect(self._mark_dirty)
@@ -1165,11 +1172,11 @@ class ItemCreatorWidget(QWidget):
             )
             if not pdf_path:
                 return
-            base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-            if not base_name:
-                base_name = self._default_base_name()
-            base_path = os.path.join(self._base_save_dir, base_name)
-            pdf_path = base_path + ".pdf"
+            
+            # Ensure extension
+            if not pdf_path.lower().endswith(".pdf"):
+                pdf_path += ".pdf"
+            
             if os.path.exists(pdf_path):
                 dialog = QMessageBox(self)
                 dialog.setIcon(QMessageBox.Icon.Warning)
@@ -1191,7 +1198,9 @@ class ItemCreatorWidget(QWidget):
 
         spec = self._current_spec()
         try:
-            os.makedirs(self._base_save_dir, exist_ok=True)
+            export_dir = os.path.dirname(pdf_path)
+            if export_dir:
+                os.makedirs(export_dir, exist_ok=True)
             save_item_card_pdf(
                 spec,
                 pdf_path,
@@ -1204,6 +1213,68 @@ class ItemCreatorWidget(QWidget):
                     icon_bg_curve=self._icon_bg_curve,
                 ),
                 pdf_resolution=EXPORT_DPI,
+                downscale=False,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def _export_png(self) -> None:
+        if not RENDERER_AVAILABLE:
+            QMessageBox.warning(
+                self, "Renderer Unavailable", f"Cannot export: {RENDERER_ERROR}"
+            )
+            return
+
+        default_name = self._default_base_name() + ".png"
+        default_path = os.path.join(self._base_save_dir, default_name)
+
+        while True:
+            png_path, _ = QFileDialog.getSaveFileName(
+                self, "Export PNG", default_path, "PNG (*.png)"
+            )
+            if not png_path:
+                return
+            
+            # Ensure extension
+            if not png_path.lower().endswith(".png"):
+                png_path += ".png"
+            
+            if os.path.exists(png_path):
+                dialog = QMessageBox(self)
+                dialog.setIcon(QMessageBox.Icon.Warning)
+                dialog.setWindowTitle("File Exists")
+                dialog.setText("A PNG with this name already exists.")
+                dialog.setInformativeText("Rename the file or overwrite the existing PNG.")
+                rename_btn = dialog.addButton("Rename", QMessageBox.ButtonRole.ActionRole)
+                overwrite_btn = dialog.addButton(
+                    "Overwrite", QMessageBox.ButtonRole.DestructiveRole
+                )
+                dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                dialog.exec()
+                if dialog.clickedButton() == rename_btn:
+                    default_path = png_path
+                    continue
+                if dialog.clickedButton() != overwrite_btn:
+                    return
+            break
+
+        spec = self._current_spec()
+        try:
+            export_dir = os.path.dirname(png_path)
+            if export_dir:
+                os.makedirs(export_dir, exist_ok=True)
+            save_item_card_png(
+                spec,
+                png_path,
+                RenderOptions(
+                    width=EXPORT_WIDTH,
+                    scale=EXPORT_SCALE,
+                    title_scale=self._title_scale,
+                    body_scale=self._body_scale,
+                    label_scale=self._label_scale,
+                    icon_bg_curve=self._icon_bg_curve,
+                ),
+                png_resolution=EXPORT_DPI,
                 downscale=False,
             )
         except Exception as exc:
