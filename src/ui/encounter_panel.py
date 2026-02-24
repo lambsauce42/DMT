@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -304,7 +305,7 @@ class EncounterPanel(QWidget):
         ps_row.addSpacing(self._PARTY_GAP_LS)
 
         self._party_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self._party_size_slider.setRange(1, 8)
+        self._party_size_slider.setRange(1, 10)
         self._party_size_slider.setValue(4)
         self._party_size_slider.setTickInterval(1)
         self._party_size_slider.setSingleStep(1)
@@ -1429,8 +1430,8 @@ class EncounterPanel(QWidget):
         if not path.exists():
             QMessageBox.warning(self, "Encounter", "Encounter file not found.")
             return
-        data = read_dmt_package_info(path)
-        if not isinstance(data, dict) or str(data.get("format") or "") != ENCOUNTER_FILE_FORMAT:
+        data = self._read_encounter_payload(path)
+        if not isinstance(data, dict):
             QMessageBox.warning(self, "Encounter", "Encounter file is invalid.")
             return
         self._encounter_id = str(data.get("object_id") or "").strip()
@@ -1474,6 +1475,29 @@ class EncounterPanel(QWidget):
             count = int(entry_data.get("count", 1))
             self._encounter_entries.append(EncounterEntry(monster=monster, count=count))
         self._refresh_encounter()
+
+    def _read_encounter_payload(self, path: Path) -> Optional[dict]:
+        data = read_dmt_package_info(path)
+        if isinstance(data, dict) and str(data.get("format") or "") == ENCOUNTER_FILE_FORMAT:
+            return data
+        try:
+            raw_data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(raw_data, dict):
+            return None
+        raw_format = str(raw_data.get("format") or "").strip()
+        if raw_format and raw_format != ENCOUNTER_FILE_FORMAT:
+            return None
+        if not isinstance(raw_data.get("monsters"), list):
+            return None
+        print(
+            f"[WARN] Loading legacy plain JSON encounter file '{path}'. Prefer '{ENCOUNTER_FILE_EXTENSION}' packages.",
+            file=sys.stderr,
+        )
+        if not raw_format:
+            raw_data["format"] = ENCOUNTER_FILE_FORMAT
+        return raw_data
 
     def export_encounter(self, path: Path) -> None:
         if path.suffix.lower() != ENCOUNTER_FILE_EXTENSION:

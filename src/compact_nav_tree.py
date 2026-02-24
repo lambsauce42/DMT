@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -113,21 +114,71 @@ def _navigation_base_dir() -> Path:
     return Path(NAVIGATION_PATH).expanduser().resolve().parent
 
 
+def _load_navigation_legacy_file(path: Path) -> list[dict] | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[WARN] Failed to read legacy navigation file '{path}': {exc}", file=sys.stderr)
+        return None
+    if isinstance(payload, list):
+        return payload
+    print(f"[WARN] Ignoring non-list legacy navigation payload in '{path}'", file=sys.stderr)
+    return None
+
+
+def _write_navigation_legacy_file(path: Path, data: list) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(data if isinstance(data, list) else [], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to write legacy navigation file '{path}': {exc}", file=sys.stderr)
+
+
 def load_navigation_data() -> list:
     """Load navigation data from persistent storage."""
+    base_dir = _navigation_base_dir()
+    legacy_path = Path(NAVIGATION_PATH).expanduser().resolve()
+    packaged: list | None = None
     try:
-        data = load_navigation_world_data(base_dir=_navigation_base_dir())
-        return data if isinstance(data, list) else WORLD_DATA
-    except Exception:
-        return WORLD_DATA
+        data = load_navigation_world_data(base_dir=base_dir)
+        packaged = data if isinstance(data, list) else None
+    except Exception as exc:
+        print(f"[WARN] Failed to load package navigation data from '{base_dir}': {exc}", file=sys.stderr)
+    if packaged:
+        return packaged
+    legacy = _load_navigation_legacy_file(legacy_path)
+    if legacy is not None:
+        if packaged == [] and legacy:
+            print(
+                f"[INFO] Loaded legacy navigation data from '{legacy_path}', migrating to package storage.",
+                file=sys.stderr,
+            )
+            try:
+                save_navigation_world_data(legacy, base_dir=base_dir)
+            except Exception as exc:
+                print(
+                    f"[WARN] Failed to migrate legacy navigation data to '{base_dir}': {exc}",
+                    file=sys.stderr,
+                )
+        return legacy
+    return packaged if isinstance(packaged, list) else WORLD_DATA
 
 
 def save_navigation_data(data: list) -> None:
     """Save navigation data to persistent storage."""
+    base_dir = _navigation_base_dir()
+    legacy_path = Path(NAVIGATION_PATH).expanduser().resolve()
     try:
-        save_navigation_world_data(data if isinstance(data, list) else [], base_dir=_navigation_base_dir())
-    except Exception:
-        pass
+        save_navigation_world_data(data if isinstance(data, list) else [], base_dir=base_dir)
+    except Exception as exc:
+        print(f"[WARN] Failed to save package navigation data in '{base_dir}': {exc}", file=sys.stderr)
+    if legacy_path.exists() and legacy_path.is_file():
+        _write_navigation_legacy_file(legacy_path, data)
 
 
 def load_trash() -> list[dict]:
@@ -176,8 +227,15 @@ class NameIconDialog(QDialog):
         name_label = QLabel(label)
         layout.addWidget(name_label)
         self._name_input = QLineEdit()
+        self._name_input.setObjectName("NameInputField")
         self._name_input.setText(default_name)
+        self._name_input.textChanged.connect(self._clear_name_warning)
         layout.addWidget(self._name_input)
+        self._name_warning = QLabel("Please enter a name or cancel.")
+        self._name_warning.setObjectName("NameValidationError")
+        self._name_warning.setStyleSheet("color: #e5534b;")
+        self._name_warning.setVisible(False)
+        layout.addWidget(self._name_warning)
         
         # Icon selection
         icon_label = QLabel("Icon:")
@@ -206,9 +264,20 @@ class NameIconDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _clear_name_warning(self) -> None:
+        if self._name_warning.isVisible():
+            self._name_warning.setVisible(False)
+
+    def _on_accept(self) -> None:
+        if not self._name_input.text().strip():
+            self._name_warning.setVisible(True)
+            self._name_input.setFocus()
+            return
+        self.accept()
     
     def _on_icon_clicked(self, item: QListWidgetItem) -> None:
         self._selected_icon = item.data(Qt.ItemDataRole.UserRole)
@@ -484,6 +553,24 @@ class CompactNavTree(QWidget):
             # Restore world expansion
             if world["name"] in expanded_worlds:
                 world_item.setExpanded(True)
+
+    def _expand_world_campaign_path(
+        self, world_idx: int, campaign_idx: Optional[int] = None
+    ) -> None:
+        if world_idx < 0:
+            return
+        world_item = self._tree.topLevelItem(world_idx)
+        if world_item is None:
+            return
+        world_item.setExpanded(True)
+        if campaign_idx is None:
+            return
+        if campaign_idx < 0 or campaign_idx >= world_item.childCount():
+            return
+        campaign_item = world_item.child(campaign_idx)
+        if campaign_item is None:
+            return
+        campaign_item.setExpanded(True)
     
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         """Handle item click - toggle expansion for world/campaign."""
@@ -715,8 +802,10 @@ class CompactNavTree(QWidget):
             "icon": icon or self._default_campaign_icon,
             "groups": [],
         })
+        campaign_idx = len(world["campaigns"]) - 1
         self._save_data()
         self._rebuild_tree()
+        self._expand_world_campaign_path(world_idx, campaign_idx)
     
     def _edit_campaign(self, world_idx: int, old_name: str) -> None:
         """Edit an existing campaign."""
@@ -813,6 +902,7 @@ class CompactNavTree(QWidget):
         })
         self._save_data()
         self._rebuild_tree()
+        self._expand_world_campaign_path(world_idx, campaign_idx)
     
     def _edit_group(self, world_idx: int, campaign_idx: int, old_name: str) -> None:
         """Edit an existing group."""

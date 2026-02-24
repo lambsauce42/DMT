@@ -102,6 +102,40 @@ def test_client_can_supply_persistent_player_id_for_handshake(qtbot):
         server.stop()
 
 
+def test_persistent_player_id_cannot_take_over_connected_identity(qtbot):
+    port = _free_tcp_port()
+    server = OnlineSessionServer()
+    ok, err = server.start(port)
+    assert ok, err
+
+    first = OnlineSessionClient()
+    second = OnlineSessionClient()
+    first_logs = []
+    second_logs = []
+    first.log_line.connect(first_logs.append)
+    second.log_line.connect(second_logs.append)
+    persistent_id = "player_fixed_security_probe_1"
+    try:
+        first.connect_to_host("127.0.0.1", port, "Alice", persistent_player_id=persistent_id)
+        qtbot.waitUntil(lambda: first.player_id is not None, timeout=4000)
+        first_id = str(first.player_id)
+        assert first_id == persistent_id
+        assert first.is_connected()
+
+        second.connect_to_host("127.0.0.1", port, "Mallory", persistent_player_id=persistent_id)
+        qtbot.wait(250)
+
+        assert first.is_connected()
+        assert str(first.player_id) == first_id
+        assert second.player_id is None
+        assert any("[ERROR]" in line for line in second_logs)
+        assert server.players.get(persistent_id) == "Alice"
+    finally:
+        first.disconnect()
+        second.disconnect()
+        server.stop()
+
+
 def test_client_controller_clears_presence_when_disconnected(qtbot):
     port = _free_tcp_port()
     server = OnlineSessionServer()

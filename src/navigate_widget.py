@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -93,22 +94,72 @@ def _navigation_base_dir() -> str:
     return str(Path(NAVIGATION_PATH).expanduser().resolve().parent)
 
 
+def _load_navigation_legacy_file(path: Path) -> list[dict] | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[WARN] Failed to read legacy navigation file '{path}': {exc}", file=sys.stderr)
+        return None
+    if isinstance(payload, list):
+        return payload
+    print(f"[WARN] Ignoring non-list legacy navigation payload in '{path}'", file=sys.stderr)
+    return None
+
+
+def _write_navigation_legacy_file(path: Path, data: list) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(data if isinstance(data, list) else [], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to write legacy navigation file '{path}': {exc}", file=sys.stderr)
+
+
 def save_navigation_data(data: list) -> None:
+    base_dir = Path(_navigation_base_dir())
+    legacy_path = Path(NAVIGATION_PATH).expanduser().resolve()
     try:
         save_navigation_world_data(
             data if isinstance(data, list) else [],
-            base_dir=Path(_navigation_base_dir()),
+            base_dir=base_dir,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[WARN] Failed to save package navigation data in '{base_dir}': {exc}", file=sys.stderr)
+    if legacy_path.exists() and legacy_path.is_file():
+        _write_navigation_legacy_file(legacy_path, data)
 
 
 def load_navigation_data() -> list:
+    base_dir = Path(_navigation_base_dir())
+    legacy_path = Path(NAVIGATION_PATH).expanduser().resolve()
+    packaged: list | None = None
     try:
-        data = load_navigation_world_data(base_dir=Path(_navigation_base_dir()))
-        return data if isinstance(data, list) else WORLD_DATA
-    except Exception:
-        return WORLD_DATA
+        data = load_navigation_world_data(base_dir=base_dir)
+        packaged = data if isinstance(data, list) else None
+    except Exception as exc:
+        print(f"[WARN] Failed to load package navigation data from '{base_dir}': {exc}", file=sys.stderr)
+    if packaged:
+        return packaged
+    legacy = _load_navigation_legacy_file(legacy_path)
+    if legacy is not None:
+        if packaged == [] and legacy:
+            print(
+                f"[INFO] Loaded legacy navigation data from '{legacy_path}', migrating to package storage.",
+                file=sys.stderr,
+            )
+            try:
+                save_navigation_world_data(legacy, base_dir=base_dir)
+            except Exception as exc:
+                print(
+                    f"[WARN] Failed to migrate legacy navigation data to '{base_dir}': {exc}",
+                    file=sys.stderr,
+                )
+        return legacy
+    return packaged if isinstance(packaged, list) else WORLD_DATA
 
 
 def move_to_trash(
@@ -230,7 +281,15 @@ class NameIconDialog(QDialog):
         layout.addWidget(label_widget)
 
         self._name_input = QLineEdit(default_name)
+        self._name_input.setObjectName("NameInputField")
+        self._name_input.textChanged.connect(self._clear_name_warning)
         layout.addWidget(self._name_input)
+
+        self._name_warning = QLabel("Please enter a name or cancel.")
+        self._name_warning.setObjectName("NameValidationError")
+        self._name_warning.setStyleSheet("color: #e5534b;")
+        self._name_warning.setVisible(False)
+        layout.addWidget(self._name_warning)
 
         icon_label = QLabel("Icon")
         icon_label.setObjectName("Subheader")
@@ -275,9 +334,20 @@ class NameIconDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _clear_name_warning(self) -> None:
+        if self._name_warning.isVisible():
+            self._name_warning.setVisible(False)
+
+    def _on_accept(self) -> None:
+        if not self._name_input.text().strip():
+            self._name_warning.setVisible(True)
+            self._name_input.setFocus()
+            return
+        self.accept()
 
     def _on_icon_clicked(self, item: QListWidgetItem) -> None:
         self._selected_icon = item.data(Qt.ItemDataRole.UserRole)
@@ -726,6 +796,8 @@ class NavigateContentWidget(QWidget):
 
     def remove_world(self, name: Optional[str] = None) -> None:
         if not self._data:
+            if name is not None:
+                return
             QMessageBox.information(self, "No Worlds", "There are no worlds to remove.")
             return
         if name is None:
@@ -879,6 +951,7 @@ class NavigateContentWidget(QWidget):
         expansion_state["worlds"][world["name"]] = True
         expansion_state["campaigns"][(world["name"], name)] = True
         world["campaigns"].append({"name": name, "icon": icon, "groups": []})
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _remove_campaign(self, world_index: int, name: Optional[str] = None) -> None:
@@ -907,6 +980,7 @@ class NavigateContentWidget(QWidget):
             )
         world["campaigns"] = [camp for camp in campaigns if camp["name"] != name]
         expansion_state.get("campaigns", {}).pop((world["name"], name), None)
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _edit_campaign(
@@ -958,6 +1032,7 @@ class NavigateContentWidget(QWidget):
             was_expanded = expansion_state.get("campaigns", {}).pop(key_old, None)
             if was_expanded is not None:
                 expansion_state["campaigns"][key_new] = was_expanded
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _disintegrate_campaign(self, world_index: int, name: Optional[str] = None) -> None:
@@ -984,6 +1059,7 @@ class NavigateContentWidget(QWidget):
         expansion_state = self._capture_expansion_state()
         world["campaigns"] = [camp for camp in campaigns if camp["name"] != name]
         expansion_state.get("campaigns", {}).pop((world["name"], name), None)
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _revive_campaign(self, world_index: int, name: Optional[str] = None) -> None:
@@ -1025,6 +1101,7 @@ class NavigateContentWidget(QWidget):
         world["campaigns"].append(payload)
         self._trash.remove(entry)
         self._save_trash()
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _add_group(
@@ -1054,6 +1131,7 @@ class NavigateContentWidget(QWidget):
             expansion_state["worlds"][world["name"]] = True
             expansion_state["campaigns"][(world["name"], campaign["name"])] = True
         campaign["groups"].append({"name": name, "icon": icon})
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _remove_group(
@@ -1087,6 +1165,7 @@ class NavigateContentWidget(QWidget):
                 parent={"world": world["name"], "campaign": campaign["name"]},
             )
         campaign["groups"] = [group for group in groups if group["name"] != name]
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _edit_group(
@@ -1133,6 +1212,7 @@ class NavigateContentWidget(QWidget):
                 group["icon"] = icon or group.get("icon") or self._default_group_icon
                 break
         expansion_state = self._capture_expansion_state()
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _disintegrate_group(
@@ -1163,6 +1243,7 @@ class NavigateContentWidget(QWidget):
             return
         expansion_state = self._capture_expansion_state()
         campaign["groups"] = [group for group in groups if group["name"] != name]
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _revive_group(
@@ -1213,6 +1294,7 @@ class NavigateContentWidget(QWidget):
         campaign["groups"].append(payload)
         self._trash.remove(entry)
         self._save_trash()
+        save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
     def _prompt_name_icon(
@@ -1307,6 +1389,8 @@ class NavigateContentWidget(QWidget):
             deleted_at = entry.get("deleted_at")
             try:
                 deleted_time = datetime.fromisoformat(str(deleted_at))
+                if deleted_time.tzinfo is not None:
+                    deleted_time = deleted_time.replace(tzinfo=None)
             except Exception:
                 deleted_time = None
             if deleted_time and deleted_time < cutoff:

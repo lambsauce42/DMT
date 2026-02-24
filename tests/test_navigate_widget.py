@@ -12,7 +12,7 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QDialogButtonBox, QLabel, QLineEdit
 
 import navigate_widget
 from navigate_widget import NavigateContentWidget, NavigateWidget
@@ -85,6 +85,26 @@ class NavigateWidgetTests(unittest.TestCase):
         self.assertTrue(any(group["name"] == "Test Group" for group in groups))
         widget.close()
 
+    def test_add_campaign_and_group_persist_after_reload(self) -> None:
+        widget = NavigateContentWidget(show_worlds_header=False)
+        widget._add_campaign(0, name="Persistent Campaign")
+        campaigns = widget._data[0]["campaigns"]
+        campaign_index = next(
+            idx for idx, camp in enumerate(campaigns) if camp["name"] == "Persistent Campaign"
+        )
+        widget._add_group(0, campaign_index, name="Persistent Group")
+        widget.close()
+
+        reloaded = NavigateContentWidget(show_worlds_header=False)
+        reloaded_campaigns = reloaded._data[0]["campaigns"]
+        self.assertTrue(any(c["name"] == "Persistent Campaign" for c in reloaded_campaigns))
+        reloaded_campaign_index = next(
+            idx for idx, camp in enumerate(reloaded_campaigns) if camp["name"] == "Persistent Campaign"
+        )
+        reloaded_groups = reloaded_campaigns[reloaded_campaign_index]["groups"]
+        self.assertTrue(any(group["name"] == "Persistent Group" for group in reloaded_groups))
+        reloaded.close()
+
     def test_edit_world_campaign_group(self) -> None:
         widget = NavigateContentWidget(show_worlds_header=False)
         original_world = widget._data[0]["name"]
@@ -144,6 +164,40 @@ class NavigateWidgetTests(unittest.TestCase):
         widget.revive_world(name=target_name)
         self.assertTrue(any(world["name"] == target_name for world in widget._data))
         widget.close()
+
+    def test_name_dialog_requires_name_with_inline_warning(self) -> None:
+        dialog = navigate_widget.NameIconDialog(
+            "New World",
+            "World name:",
+            [],
+            default_name="",
+        )
+        dialog.show()
+        self._app.processEvents()
+
+        buttons = dialog.findChild(QDialogButtonBox)
+        self.assertIsNotNone(buttons)
+        assert buttons is not None
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.assertIsNotNone(ok_button)
+        assert ok_button is not None
+        ok_button.click()
+        self._app.processEvents()
+
+        self.assertTrue(dialog.isVisible())
+        warning = dialog.findChild(QLabel, "NameValidationError")
+        self.assertIsNotNone(warning)
+
+        name_field = dialog.findChild(QLineEdit, "NameInputField")
+        self.assertIsNotNone(name_field)
+        assert name_field is not None
+        name_field.setText("Valid Name")
+        self._app.processEvents()
+        ok_button.click()
+        self._app.processEvents()
+        self.assertFalse(dialog.isVisible())
+        self.assertEqual(dialog.result(), int(dialog.DialogCode.Accepted))
+        dialog.close()
 
 
 if __name__ == "__main__":

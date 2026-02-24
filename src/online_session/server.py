@@ -226,9 +226,25 @@ class OnlineSessionServer(QObject):
             existing_id = self._persistent_to_identity.get(persistent_player_id)
             if existing_id:
                 persistent_identity = self._identities.get(existing_id)
-                if persistent_identity is not None:
+                if (
+                    persistent_identity is not None
+                    and (not persistent_identity.connected)
+                    and persistent_identity.normalized_name == normalized
+                ):
                     identity = persistent_identity
                     resumed = True
+
+        # Never allow a new socket to claim an existing persistent id that did not
+        # pass the safe resume rules above.
+        if identity is None and persistent_player_id:
+            existing_id = self._persistent_to_identity.get(persistent_player_id)
+            if existing_id:
+                self._send_socket_message(
+                    state.socket,
+                    {"type": "error", "message": "persistent id already in use"},
+                )
+                state.socket.disconnectFromHost()
+                return
 
         if identity is None:
             by_name_id = self._name_to_identity.get(normalized)
@@ -265,8 +281,10 @@ class OnlineSessionServer(QObject):
             identity.name = name
             identity.normalized_name = normalized
             identity.last_seen_monotonic = time.monotonic()
-            if persistent_player_id:
-                identity.persistent_player_id = persistent_player_id
+            if persistent_player_id and persistent_player_id != identity.persistent_player_id:
+                self.log_line.emit(
+                    "[WARN] Ignored mismatched persistent id for existing identity"
+                )
 
         if identity.connected:
             existing_socket = self._find_socket_for_player(identity.player_id)

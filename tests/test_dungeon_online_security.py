@@ -1,3 +1,4 @@
+import base64
 import os
 import sys
 from pathlib import Path
@@ -363,3 +364,173 @@ def test_close_event_removes_global_app_event_filter(dungeon_widget):
     dungeon_widget.close()
 
     assert dungeon_widget._app is None
+
+
+def test_player_state_update_cannot_set_arbitrary_icon_path(dungeon_widget, tmp_path):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.assets = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_icon_asset(self, **kwargs):
+            self.assets.append(dict(kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(dict(snapshot))
+
+        @property
+        def players(self):
+            return {}
+
+        def stop(self):
+            return None
+
+    host = _HostStub()
+    dungeon_widget._host_controller = host
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dm = dungeon_widget._create_dungeon_entry("DM", state={"items": [], "fog": {"path": []}})
+    players = dungeon_widget._create_dungeon_entry(
+        "Players",
+        state={
+            "items": [
+                {
+                    "type": "entity",
+                    "entity_id": "entity-1",
+                    "owner_player_id": "player-1",
+                    "icon_path": "",
+                    "pos": [0.0, 0.0],
+                }
+            ],
+            "fog": {"path": []},
+        },
+    )
+    dungeon_widget._dungeons = [dm, players]
+    dungeon_widget._active_dungeon_id = dm["id"]
+    dungeon_widget._players_dungeon_id = players["id"]
+
+    secret_file = tmp_path / "host_secret.txt"
+    secret_file.write_text("host-data-that-must-not-leak", encoding="utf-8")
+    original_icon = str(players["state"]["items"][0].get("icon_path") or "")
+
+    dungeon_widget._on_host_command_received(
+        "player-1",
+        {
+            "action": "state_update",
+            "request_id": "req-icon-path",
+            "payload": {
+                "dungeon_id": players["id"],
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-1",
+                            "icon_path": str(secret_file),
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            },
+        },
+    )
+
+    result = host.results[-1][1]
+    assert result["ok"] is True
+    assert players["state"]["items"][0].get("icon_path") == original_icon
+    assert host.assets == []
+
+
+def test_player_upload_icon_cannot_claim_unowned_entity(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.assets = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_icon_asset(self, **kwargs):
+            self.assets.append(dict(kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(dict(snapshot))
+
+        @property
+        def players(self):
+            return {}
+
+        def stop(self):
+            return None
+
+    host = _HostStub()
+    dungeon_widget._host_controller = host
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dm = dungeon_widget._create_dungeon_entry("DM", state={"items": [], "fog": {"path": []}})
+    players = dungeon_widget._create_dungeon_entry(
+        "Players",
+        state={
+            "items": [
+                {
+                    "type": "entity",
+                    "entity_id": "entity-unowned",
+                    "owner_player_id": "",
+                    "icon_path": "",
+                    "pos": [0.0, 0.0],
+                }
+            ],
+            "fog": {"path": []},
+        },
+    )
+    dungeon_widget._dungeons = [dm, players]
+    dungeon_widget._active_dungeon_id = dm["id"]
+    dungeon_widget._players_dungeon_id = players["id"]
+
+    dungeon_widget._on_host_command_received(
+        "player-1",
+        {
+            "action": "upload_icon",
+            "request_id": "req-upload-claim",
+            "payload": {
+                "entity_id": "entity-unowned",
+                "filename": "token.png",
+                "content_b64": base64.b64encode(b"player-icon").decode("ascii"),
+                "owner_player_id": "player-1",
+                "dungeon_id": players["id"],
+            },
+        },
+    )
+
+    result = host.results[-1][1]
+    assert result["ok"] is False
+    assert "owner" in str(result.get("message") or "").lower()
+    assert players["state"]["items"][0].get("owner_player_id") == ""
+    assert host.assets == []
+
+
+def test_player_disconnect_releases_loot_claim_reservations(dungeon_widget):
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._connected_players = {"player-1": "Alice"}
+    dungeon_widget._session_loot_pool = [
+        {"entry_id": "loot-1", "type": "item", "item_id": "item-a", "title": "Item A"}
+    ]
+    dungeon_widget._loot_claim_reservations = {
+        "claim-1": {
+            "claim_id": "claim-1",
+            "player_id": "player-1",
+            "sheet_id": "sheet-1",
+            "claimed_entries": [{"entry_id": "loot-1"}],
+            "entry_ids": ["loot-1"],
+            "created_monotonic": 0.0,
+        }
+    }
+    dungeon_widget._loot_claim_entry_reservations = {"loot-1": "claim-1"}
+
+    dungeon_widget._update_connected_players({})
+
+    assert dungeon_widget._loot_claim_reservations == {}
+    assert dungeon_widget._loot_claim_entry_reservations == {}

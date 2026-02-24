@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -67,3 +68,53 @@ def test_load_navigation_data_tolerates_missing_campaigns_key(qtbot, monkeypatch
     assert len(widget._data) == 1
     assert widget._data[0]["name"] == "World Only"
     assert widget._data[0]["campaigns"] == []
+
+
+def test_load_navigation_data_reads_legacy_json_file(monkeypatch, tmp_path):
+    nav_path = tmp_path / "nav.json"
+    nav_path.write_text(
+        json.dumps([{"name": "Legacy World", "campaigns": []}], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(navigate_widget, "NAVIGATION_PATH", str(nav_path))
+
+    data = navigate_widget.load_navigation_data()
+
+    assert len(data) == 1
+    assert data[0]["name"] == "Legacy World"
+
+
+def test_widget_init_handles_timezone_aware_trash(qtbot, monkeypatch, tmp_path):
+    nav_path = tmp_path / "nav.json"
+    trash_path = tmp_path / "trash.json"
+    _write_nav(nav_path, [{"name": "World A", "campaigns": []}])
+    trash_path.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "world",
+                    "name": "Old World",
+                    "payload": {"name": "Old World"},
+                    "deleted_at": (datetime.now(timezone.utc) - timedelta(days=31)).isoformat(),
+                },
+                {
+                    "type": "world",
+                    "name": "Recent World",
+                    "payload": {"name": "Recent World"},
+                    "deleted_at": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(),
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(navigate_widget, "NAVIGATION_PATH", str(nav_path))
+    monkeypatch.setattr(navigate_widget, "TRASH_PATH", str(trash_path))
+
+    widget = NavigateContentWidget(show_worlds_header=False)
+    qtbot.addWidget(widget)
+
+    assert [entry.get("name") for entry in widget._trash] == ["Recent World"]

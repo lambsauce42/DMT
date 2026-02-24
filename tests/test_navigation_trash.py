@@ -15,7 +15,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from PyQt6.QtCore import QPoint
-from PyQt6.QtWidgets import QAbstractItemView, QApplication
+from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QLabel, QLineEdit
 
 import compact_nav_tree
 
@@ -24,6 +24,22 @@ class NavigationTrashTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
+
+    def test_load_navigation_data_reads_legacy_json_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nav_path = Path(tmpdir) / "navigation.json"
+            nav_path.write_text(
+                json.dumps([{"name": "Legacy World", "campaigns": []}], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            original_path = compact_nav_tree.NAVIGATION_PATH
+            try:
+                compact_nav_tree.NAVIGATION_PATH = str(nav_path)
+                loaded = compact_nav_tree.load_navigation_data()
+            finally:
+                compact_nav_tree.NAVIGATION_PATH = original_path
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].get("name"), "Legacy World")
 
     def test_trash_purges_old_entries(self) -> None:
         """Test that old trash entries are purged on widget initialization."""
@@ -173,6 +189,63 @@ class NavigationTrashTests(unittest.TestCase):
                 self.assertTrue(world_item.isExpanded())
                 self.assertEqual(len(widget._tree.selectedItems()), 0)
                 widget.close()
+
+    def test_add_campaign_expands_world_so_new_item_is_visible(self) -> None:
+        nav_data = [{"name": "World A", "campaigns": []}]
+
+        with patch.object(compact_nav_tree, "load_navigation_data", return_value=nav_data.copy()):
+            with patch.object(compact_nav_tree, "load_trash", return_value=[]):
+                widget = compact_nav_tree.CompactNavTree()
+                world_item = widget._tree.topLevelItem(0)
+                self.assertIsNotNone(world_item)
+                self.assertFalse(world_item.isExpanded())
+                with patch.object(
+                    widget,
+                    "_prompt_name_icon",
+                    return_value=("Campaign A", widget._default_campaign_icon),
+                ):
+                    widget._add_campaign(0)
+
+                world_item = widget._tree.topLevelItem(0)
+                self.assertIsNotNone(world_item)
+                self.assertTrue(world_item.isExpanded())
+                self.assertEqual(world_item.childCount(), 1)
+                self.assertEqual(world_item.child(0).text(0), "Campaign A")
+                widget.close()
+
+    def test_name_dialog_requires_name_with_inline_warning(self) -> None:
+        dialog = compact_nav_tree.NameIconDialog(
+            "New World",
+            "World name:",
+            [],
+            default_name="",
+        )
+        dialog.show()
+        self._app.processEvents()
+
+        buttons = dialog.findChild(QDialogButtonBox)
+        self.assertIsNotNone(buttons)
+        assert buttons is not None
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.assertIsNotNone(ok_button)
+        assert ok_button is not None
+        ok_button.click()
+        self._app.processEvents()
+
+        self.assertTrue(dialog.isVisible())
+        warning = dialog.findChild(QLabel, "NameValidationError")
+        self.assertIsNotNone(warning)
+
+        name_field = dialog.findChild(QLineEdit, "NameInputField")
+        self.assertIsNotNone(name_field)
+        assert name_field is not None
+        name_field.setText("Valid Name")
+        self._app.processEvents()
+        ok_button.click()
+        self._app.processEvents()
+        self.assertFalse(dialog.isVisible())
+        self.assertEqual(dialog.result(), int(dialog.DialogCode.Accepted))
+        dialog.close()
 
 
 if __name__ == "__main__":

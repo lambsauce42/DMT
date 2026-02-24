@@ -7101,6 +7101,12 @@ class DungeonAppletWidget(QWidget):
         self._server_log_panel.append_log(line)
 
     def _update_connected_players(self, players: dict[str, str]) -> None:
+        previous_players = {str(player_id) for player_id in self._connected_players.keys()}
+        next_players = {str(player_id) for player_id in players.keys()}
+        removed_players = previous_players - next_players
+        if self._online_mode == ONLINE_MODE_DM_HOST and removed_players:
+            for player_id in removed_players:
+                self._release_loot_claim_reservations_for_player(player_id)
         self._connected_players = dict(players)
         registry_changed = False
         for player_id, player_name in self._connected_players.items():
@@ -7132,6 +7138,8 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
         if not was_ready:
+            if self._client_controller is not None:
+                self._client_controller.disconnect()
             self._append_server_log("[WARN] Unable to join host. Returned to local mode.")
             self._append_chat_message(
                 "System",
@@ -7149,6 +7157,10 @@ class DungeonAppletWidget(QWidget):
         self._apply_online_permissions()
 
     def _on_client_hello_ack(self, player_id: str) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            if self._client_controller is not None:
+                self._client_controller.disconnect()
+            return
         self._local_player_id = player_id
         self._player_connection_ready = True
         self._pending_join_character_override_sync = True
@@ -7542,7 +7554,8 @@ class DungeonAppletWidget(QWidget):
             "size_w_cells",
             "size_h_cells",
         }
-        str_fields = {"color", "actions", "description", "icon_path", "label", "layer"}
+        # Player state updates must not overwrite host-side icon file paths.
+        str_fields = {"color", "actions", "description", "label", "layer"}
         bool_fields = {"lock_square"}
         float_fields = {"z"}
 
@@ -8438,6 +8451,18 @@ class DungeonAppletWidget(QWidget):
         for claim_id in stale_claim_ids:
             self._release_loot_claim_reservation(claim_id)
 
+    def _release_loot_claim_reservations_for_player(self, player_id: str) -> None:
+        clean_player_id = str(player_id or "").strip()
+        if not clean_player_id:
+            return
+        claim_ids = [
+            str(claim_id)
+            for claim_id, claim in self._loot_claim_reservations.items()
+            if str(claim.get("player_id") or "").strip() == clean_player_id
+        ]
+        for claim_id in claim_ids:
+            self._release_loot_claim_reservation(claim_id)
+
     def _drop_invalid_loot_claim_reservations(self) -> None:
         current_entry_ids = {
             str(entry.get("entry_id") or "").strip()
@@ -8699,7 +8724,6 @@ class DungeonAppletWidget(QWidget):
         entity_id = str(payload.get("entity_id") or "")
         filename = str(payload.get("filename") or "icon.png")
         content_b64 = str(payload.get("content_b64") or "")
-        owner_hint = str(payload.get("owner_player_id") or "")
         dungeon_id = str(payload.get("dungeon_id") or self._players_dungeon_id or self._active_dungeon_id or "")
         target_dungeon, target_entity_state = self._find_entity_state_entry(entity_id, dungeon_id)
         if target_dungeon is None:
@@ -8716,14 +8740,6 @@ class DungeonAppletWidget(QWidget):
             owner_id = str(target_entity.data(ROLE_OWNER_PLAYER_ID) or "")
         if not owner_id and isinstance(target_entity_state, dict):
             owner_id = str(target_entity_state.get("owner_player_id") or "")
-        # Allow recovery from stale owner state: when host has empty owner but the
-        # requesting client proves its own player id as owner hint, bind ownership.
-        if not owner_id and owner_hint and owner_hint == player_id:
-            if isinstance(target_entity_state, dict):
-                target_entity_state["owner_player_id"] = player_id
-            if target_entity is not None:
-                target_entity.setData(ROLE_OWNER_PLAYER_ID, player_id)
-            owner_id = player_id
         decision = authorize_command(
             role=OnlineRole.PLAYER,
             action="upload_icon",
@@ -9133,7 +9149,13 @@ class DungeonAppletWidget(QWidget):
         return sent_count
 
     def _on_client_snapshot_received(self, snapshot: dict) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return
+
+        conflicts_detected = False
+
         def _sync_owned_sheet_inventories_from_snapshot() -> None:
+            nonlocal conflicts_detected
             if self._online_mode != ONLINE_MODE_PLAYER:
                 return
             local_player_id = str(self._local_player_id or "").strip()
@@ -9160,6 +9182,7 @@ class DungeonAppletWidget(QWidget):
                     if not sheet_id:
                         continue
                     if self._local_character_sheet_exists(sheet_id):
+                        conflicts_detected = True
                         entity_id = str(item_data.get("entity_id") or "").strip()
                         conflict_key = self._linked_character_conflict_key(dungeon_id, entity_id, sheet_id)
                         if conflict_key not in conflicts_by_key:
@@ -9198,8 +9221,18 @@ class DungeonAppletWidget(QWidget):
                     self._append_server_log(f"[WARN] {message}")
 
         def _run_post_snapshot_character_sync() -> None:
+            should_push_overrides = bool(self._pending_join_character_override_sync)
             self._pending_join_character_override_sync = False
             _sync_owned_sheet_inventories_from_snapshot()
+            if should_push_overrides and not conflicts_detected:
+                try:
+                    sent_count = int(self._push_local_character_overrides_to_host())
+                except Exception as exc:
+                    self._append_server_log(
+                        f"[WARN] Failed to push local character overrides after join: {exc}"
+                    )
+                    return
+                self._debug_log("client_join_override_sync_sent", count=sent_count)
 
         initiative_state_raw = snapshot.get("initiative_state")
         player_entry_count = 0
