@@ -19,6 +19,7 @@ Item = _MODELS.Item
 MapAsset = _MODELS.MapAsset
 NPC = _MODELS.NPC
 Session = _MODELS.Session
+SessionAttachment = _MODELS.SessionAttachment
 SessionLogEntry = _MODELS.SessionLogEntry
 World = _MODELS.World
 
@@ -46,6 +47,17 @@ class TestModelsUnit(unittest.TestCase):
         self.assertEqual(session.name, "Episode 1")
         self.assertEqual(session.logs, [])
         self.assertEqual(session.group_ids, [])
+        self.assertEqual(session.attachments, [])
+
+    def test_session_attachment_instantiation(self):
+        attachment = SessionAttachment(
+            id="att_1",
+            name="notes.txt",
+            asset_path="assets/files/att_1/notes.txt",
+        )
+        self.assertEqual(attachment.mime, "application/octet-stream")
+        self.assertEqual(attachment.size_bytes, 0)
+        self.assertFalse(attachment.is_text)
 
     def test_map_asset_defaults(self):
         map_asset = MapAsset(id="m1", name="Town", image_path="town.png")

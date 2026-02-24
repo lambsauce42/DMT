@@ -2,6 +2,8 @@ import os
 import sys
 from pathlib import Path
 
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtTest import QTest
 from PyQt6.QtGui import QImage
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -12,6 +14,7 @@ if SRC not in sys.path:
 from maps_applet import (
     MapAsset,
     MapDialog,
+    MapViewPanel,
     MapsWidget,
     map_image_trash_path,
     map_thumb_trash_path,
@@ -99,3 +102,65 @@ def test_map_trash_paths_use_stable_id_not_name():
 
     assert map_image_trash_path(first, first.image_path) != map_image_trash_path(second, second.image_path)
     assert map_thumb_trash_path(first) != map_thumb_trash_path(second)
+
+
+def test_map_view_panel_uses_infinite_padding_and_no_scrollbars(qtbot, tmp_path):
+    source = tmp_path / "pad.png"
+    _write_png(source)
+
+    view = MapViewPanel()
+    qtbot.addWidget(view)
+    view.resize(600, 400)
+    view.show()
+    view.load_image(str(source))
+
+    assert view.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert view.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    rect = view.sceneRect()
+    pixmap_rect = view._pixmap_item.boundingRect()
+    assert int(rect.width()) == int(pixmap_rect.width()) + 100000
+    assert int(rect.height()) == int(pixmap_rect.height()) + 100000
+
+
+def test_map_view_panel_pan_is_stable_without_vertical_jitter(qtbot, tmp_path):
+    source = tmp_path / "pan_stable.png"
+    _write_png(source)
+
+    view = MapViewPanel()
+    qtbot.addWidget(view)
+    view.resize(800, 600)
+    view.show()
+    view.load_image(str(source))
+    view.set_zoom(3.0)
+
+    viewport = view.viewport()
+    start = viewport.rect().center()
+    samples: list[tuple[int, float, float]] = []
+
+    QTest.mousePress(
+        viewport,
+        Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier,
+        start,
+    )
+    for dx in range(0, 101, 5):
+        pos = start + QPoint(dx, 0)
+        QTest.mouseMove(viewport, pos)
+        center = view.mapToScene(viewport.rect().center())
+        samples.append((dx, float(center.x()), float(center.y())))
+    QTest.mouseRelease(
+        viewport,
+        Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier,
+        start + QPoint(100, 0),
+    )
+
+    debug_root = Path(ROOT) / "debug"
+    debug_root.mkdir(parents=True, exist_ok=True)
+    debug_log = debug_root / "map_view_pan_stability.log"
+    lines = [f"dx={dx} center=({cx:.6f},{cy:.6f})" for dx, cx, cy in samples]
+    debug_log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    y_values = [entry[2] for entry in samples]
+    y_jitter = max(y_values) - min(y_values)
+    assert y_jitter < 0.05

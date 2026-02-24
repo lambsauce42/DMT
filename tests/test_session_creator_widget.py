@@ -2,7 +2,6 @@ import os
 import sys
 import tempfile
 import unittest
-import json
 import copy
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QTextListFormat
 from PyQt6.QtWidgets import QApplication
 
+from dmt_package import read_dmt_package_info, write_dmt_package
 import session_creator
 from session_creator import SessionCreatorWidget
 
@@ -55,16 +55,37 @@ class SessionCreatorWidgetTests(unittest.TestCase):
     def _saved_sessions_in_dir(storage_root: Path) -> list[dict]:
         sessions: list[dict] = []
         for path in sorted(storage_root.glob("*.dmtsession")):
-            sessions.append(json.loads(path.read_text(encoding="utf-8")))
+            info = read_dmt_package_info(path)
+            if not isinstance(info, dict):
+                continue
+            payload = info.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            normalized = dict(payload)
+            normalized["attachments"] = list(info.get("attachments") or [])
+            sessions.append(normalized)
         return sessions
 
     @staticmethod
     def _write_sessions_to_dir(storage_root: Path, sessions: list[dict]) -> None:
         storage_root.mkdir(parents=True, exist_ok=True)
         for session_payload in sessions:
-            session_id = str(session_payload.get("id") or "session")
+            normalized = dict(session_payload)
+            session_id = str(normalized.get("id") or "session")
+            attachments = list(normalized.pop("attachments", []))
             path = storage_root / f"{session_id}.dmtsession"
-            path.write_text(json.dumps(session_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_dmt_package(
+                path,
+                info={
+                    "format": session_creator.SESSION_FILE_FORMAT,
+                    "object_type": "session",
+                    "object_id": session_id,
+                    "updated_at": "2026-01-01T00:00:00",
+                    "payload": normalized,
+                    "attachments": attachments,
+                },
+                assets={},
+            )
 
     def test_new_session_inline_name_edit(self) -> None:
         widget = SessionCreatorWidget()
@@ -88,6 +109,7 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
         tab_names = [widget.ref_tabs.tabText(i) for i in range(widget.ref_tabs.count())]
         self.assertIn("Plan", tab_names)
+        self.assertIn("Files", tab_names)
         self.assertNotIn("Maps", tab_names)
         self.assertFalse(widget.load_plan_btn.icon().isNull())
         self.assertEqual(

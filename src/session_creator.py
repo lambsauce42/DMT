@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
+import hashlib
+import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import QEasingCurve, QPointF, Qt, QTimer, QSize, QVariantAnimation
 from PyQt6.QtGui import (
     QAction,
     QIcon,
     QColor,
-    QPixmap,
     QDesktopServices,
     QKeySequence,
     QShortcut,
@@ -20,6 +22,9 @@ from PyQt6.QtGui import (
     QTextBlockFormat,
     QTextListFormat,
     QFont,
+    QPainter,
+    QPainterPath,
+    QPen,
 )
 from PyQt6.QtCore import QUrl
 from PyQt6.QtWidgets import (
@@ -37,23 +42,27 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QToolButton,
-    QScrollArea,
     QSplitter,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QPlainTextEdit,
     QTextEdit,
+    QStyle,
+    QStyleOptionButton,
     QVBoxLayout,
     QWidget,
     QSizePolicy,
     QGroupBox,
     QFileDialog,
     QMenu,
+    QPushButton,
     QSpinBox,
 )
 
-from models import Session, SessionLogEntry
+from dmt_package import read_dmt_package_asset, read_dmt_package_info, write_dmt_package
+from models import Session, SessionAttachment, SessionLogEntry
 from save_paths import default_dnd_save_dir
 from navigate_widget import WORLD_DATA
 from player_sheets import (
@@ -68,8 +77,10 @@ from player_sheets import (
     _combo_optional_value,
     _populate_combo,
 )
+from maps_applet import MapViewPanel
 from ui.widgets import TerminalWidget
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
+from unique_ids import generate_probabilistic_unique_id
 
 
 # Attempt to import PDF Viewer
@@ -83,7 +94,27 @@ except Exception:
 SESSION_DIR_NAME = "sessions"
 SESSION_STORAGE_MARKER_NAME = "sessions.dmtindex"
 SESSION_FILE_EXTENSION = ".dmtsession"
+SESSION_FILE_FORMAT = "dmtsession.v2"
+MAX_ATTACHMENT_FILE_BYTES = 25 * 1024 * 1024
+MAX_TOTAL_ATTACHMENT_BYTES = 150 * 1024 * 1024
+FILES_COLLAPSED_STRIP_WIDTH = 0
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+TEXT_FILE_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".csv",
+    ".log",
+    ".ini",
+    ".py",
+    ".js",
+    ".ts",
+}
+IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+PDF_FILE_EXTENSIONS = {".pdf"}
 
 
 def session_storage_dir() -> Path:
@@ -109,24 +140,109 @@ def sanitize_filename(name: str) -> str:
     return cleaned or "session"
 
 
+def _is_test_env() -> bool:
+    if os.environ.get("DMT_TEST_MODE") == "1":
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    return "pytest" in sys.modules
+
+
+def _detect_mime(name: str) -> str:
+    mime, _ = mimetypes.guess_type(str(name or ""))
+    return str(mime or "application/octet-stream")
+
+
+def _is_text_extension(name: str, mime: str = "") -> bool:
+    suffix = Path(str(name or "")).suffix.lower()
+    normalized_mime = str(mime or "").strip().lower()
+    if suffix in TEXT_FILE_EXTENSIONS:
+        return True
+    if normalized_mime.startswith("text/"):
+        return True
+    return normalized_mime in {
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "application/x-yaml",
+        "application/yaml",
+    }
+
+
+def _safe_attachment_filename(name: str) -> str:
+    base_name = Path(str(name or "")).name or "file"
+    stem = sanitize_filename(Path(base_name).stem) or "file"
+    suffix = "".join(
+        ch for ch in Path(base_name).suffix.lower() if ch.isalnum() or ch == "."
+    )
+    if suffix and not suffix.startswith("."):
+        suffix = f".{suffix}"
+    return f"{stem}{suffix}"
+
+
+def _attachment_asset_name(attachment_id: str, name: str) -> str:
+    safe_attachment_id = sanitize_filename(attachment_id) or "attachment"
+    safe_name = _safe_attachment_filename(name)
+    return f"assets/files/{safe_attachment_id}/{safe_name}"
+
+
+def _hash_bytes(raw: bytes) -> str:
+    return hashlib.sha256(bytes(raw)).hexdigest()
+
+
+def _format_size(size_bytes: int) -> str:
+    size = max(0, int(size_bytes))
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{size} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
 class SessionManager:
     def __init__(self) -> None:
         self.sessions: List[Session] = []
         self.last_error: str = ""
+        self._attachment_assets: dict[str, dict[str, bytes]] = {}
         self.load()
 
     def load(self) -> None:
         self.last_error = ""
         self.sessions = []
+        self._attachment_assets = {}
         storage_root = session_storage_path().parent
 
         if storage_root.exists():
             session_files = sorted(storage_root.glob(f"*{SESSION_FILE_EXTENSION}"))
             for file_path in session_files:
                 try:
-                    payload = json.loads(file_path.read_text(encoding="utf-8"))
-                    if isinstance(payload, dict):
-                        self.sessions.append(self._dict_to_session(payload))
+                    info = read_dmt_package_info(file_path)
+                    if not isinstance(info, dict):
+                        raise ValueError("Missing or invalid package info.")
+                    if str(info.get("format") or "") != SESSION_FILE_FORMAT:
+                        raise ValueError(
+                            f"Unsupported session format '{info.get('format')}'."
+                        )
+                    payload = info.get("payload")
+                    if not isinstance(payload, dict):
+                        raise ValueError("Missing session payload.")
+                    session = self._dict_to_session(payload)
+                    attachments = self._attachments_from_payload(info.get("attachments"))
+                    session_assets: dict[str, bytes] = {}
+                    for attachment in attachments:
+                        asset_bytes = read_dmt_package_asset(file_path, attachment.asset_path)
+                        if asset_bytes is None:
+                            continue
+                        attachment.size_bytes = len(asset_bytes)
+                        attachment.sha256 = _hash_bytes(asset_bytes)
+                        session_assets[attachment.id] = bytes(asset_bytes)
+                    session.attachments = [
+                        attachment for attachment in attachments if attachment.id in session_assets
+                    ]
+                    self._attachment_assets[session.id] = session_assets
+                    self.sessions.append(session)
                 except Exception as exc:
                     self.last_error = f"Unable to load session from '{file_path}': {exc}"
 
@@ -139,9 +255,37 @@ class SessionManager:
             file_path = session_file_path(session.id, storage_root)
             expected_files.add(file_path.resolve())
             payload = self._session_to_dict(session)
-            file_path.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+            attachment_assets = self._attachment_assets.setdefault(session.id, {})
+            serialized_attachments: list[dict] = []
+            package_assets: dict[str, bytes] = {}
+            for attachment in session.attachments:
+                attachment_bytes = attachment_assets.get(attachment.id)
+                if attachment_bytes is None:
+                    continue
+                attachment.asset_path = (
+                    str(attachment.asset_path).strip()
+                    or _attachment_asset_name(attachment.id, attachment.name)
+                )
+                attachment.mime = str(attachment.mime or _detect_mime(attachment.name))
+                attachment.is_text = bool(
+                    attachment.is_text
+                    or _is_text_extension(attachment.name, attachment.mime)
+                )
+                attachment.size_bytes = len(attachment_bytes)
+                attachment.sha256 = _hash_bytes(attachment_bytes)
+                package_assets[attachment.asset_path] = bytes(attachment_bytes)
+                serialized_attachments.append(asdict(attachment))
+            write_dmt_package(
+                file_path,
+                info={
+                    "format": SESSION_FILE_FORMAT,
+                    "object_type": "session",
+                    "object_id": str(session.id),
+                    "updated_at": _now_timestamp(),
+                    "payload": payload,
+                    "attachments": serialized_attachments,
+                },
+                assets=package_assets,
             )
 
         for existing in storage_root.glob(f"*{SESSION_FILE_EXTENSION}"):
@@ -155,8 +299,43 @@ class SessionManager:
                 except Exception:
                     continue
 
+    def _attachments_from_payload(self, raw_payload) -> list[SessionAttachment]:
+        if not isinstance(raw_payload, list):
+            return []
+        attachments: list[SessionAttachment] = []
+        for index, payload in enumerate(raw_payload):
+            if not isinstance(payload, dict):
+                continue
+            attachment_id = str(payload.get("id") or "").strip()
+            attachment_name = str(payload.get("name") or "").strip()
+            attachment_asset_path = str(payload.get("asset_path") or "").strip()
+            if not attachment_id:
+                attachment_id = generate_probabilistic_unique_id("att")
+            if not attachment_name or not attachment_asset_path:
+                continue
+            attachment_mime = str(payload.get("mime") or _detect_mime(attachment_name))
+            is_text = bool(
+                payload.get("is_text", _is_text_extension(attachment_name, attachment_mime))
+            )
+            attachments.append(
+                SessionAttachment(
+                    id=attachment_id,
+                    name=attachment_name,
+                    asset_path=attachment_asset_path,
+                    mime=attachment_mime,
+                    size_bytes=max(0, int(payload.get("size_bytes") or 0)),
+                    sha256=str(payload.get("sha256") or ""),
+                    source_name=str(payload.get("source_name") or attachment_name),
+                    source_path=str(payload.get("source_path") or ""),
+                    added_at=str(payload.get("added_at") or ""),
+                    updated_at=str(payload.get("updated_at") or ""),
+                    is_text=is_text,
+                )
+            )
+        return attachments
+
     def _dict_to_session(self, d: dict) -> Session:
-        logs = [SessionLogEntry(**l) for l in d.get("logs", [])]
+        logs = [SessionLogEntry(**l) for l in d.get("logs", []) if isinstance(l, dict)]
         return Session(
             id=d.get("id", sanitize_filename(d["name"])),
             name=d["name"],
@@ -168,6 +347,7 @@ class SessionManager:
             document_path=d.get("document_path"),
             plan_text=d.get("plan_text", ""),
             group_ids=d.get("group_ids", []),
+            attachments=[],
         )
 
     def _session_to_dict(self, s: Session) -> dict:
@@ -184,7 +364,27 @@ class SessionManager:
             "group_ids": s.group_ids,
         }
 
+    def get_attachment_bytes(self, session_id: str, attachment_id: str) -> Optional[bytes]:
+        session_assets = self._attachment_assets.get(str(session_id), {})
+        payload = session_assets.get(str(attachment_id))
+        if payload is None:
+            return None
+        return bytes(payload)
+
+    def set_attachment_bytes(self, session_id: str, attachment_id: str, payload: bytes) -> None:
+        session_key = str(session_id)
+        attachment_key = str(attachment_id)
+        if not session_key or not attachment_key:
+            return
+        session_assets = self._attachment_assets.setdefault(session_key, {})
+        session_assets[attachment_key] = bytes(payload)
+
+    def remove_attachment_bytes(self, session_id: str, attachment_id: str) -> None:
+        session_assets = self._attachment_assets.get(str(session_id), {})
+        session_assets.pop(str(attachment_id), None)
+
     def add_session(self, session: Session) -> None:
+        self._attachment_assets.setdefault(session.id, {})
         self.sessions.append(session)
         self.save()
 
@@ -197,7 +397,65 @@ class SessionManager:
 
     def delete_session(self, session_id: str) -> None:
         self.sessions = [s for s in self.sessions if s.id != session_id]
+        self._attachment_assets.pop(str(session_id), None)
         self.save()
+
+
+class FilePoolEdgeToggleButton(QPushButton):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._collapsed = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setObjectName("SecondaryButton")
+        self.setProperty("compact", True)
+        self.setFixedSize(32, 64)
+        self.set_collapsed(False)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._collapsed = bool(collapsed)
+        self.setText(">" if self._collapsed else "<")
+        self.setToolTip("Expand file list" if self._collapsed else "Collapse file list")
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def paintEvent(self, event) -> None:
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = ""
+        option.icon = QIcon()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton, option, painter, self)
+
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        center_x = float(rect.center().x()) + 0.5
+        center_y = float(rect.center().y()) + 0.5
+
+        vertical_half = min(20.0, rect.height() * 0.36)
+        horizontal_half = min(8.2, rect.width() * 0.26)
+        if self._collapsed:
+            top = QPointF(center_x - horizontal_half, center_y - vertical_half)
+            mid = QPointF(center_x + horizontal_half, center_y)
+            bottom = QPointF(center_x - horizontal_half, center_y + vertical_half)
+        else:
+            top = QPointF(center_x + horizontal_half, center_y - vertical_half)
+            mid = QPointF(center_x - horizontal_half, center_y)
+            bottom = QPointF(center_x + horizontal_half, center_y + vertical_half)
+
+        caret_color = QColor(236, 241, 247, 248 if self.underMouse() else 230)
+        caret_pen = QPen(caret_color, 2.6)
+        caret_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        caret_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(caret_pen)
+
+        caret_path = QPainterPath()
+        caret_path.moveTo(top)
+        caret_path.lineTo(mid)
+        caret_path.lineTo(bottom)
+        painter.drawPath(caret_path)
 
 
 class SessionCreatorWidget(QWidget):
@@ -207,6 +465,10 @@ class SessionCreatorWidget(QWidget):
         self._current_session: Optional[Session] = None
         self._current_session_dirty = False
         self._loading_plan_text = False
+        self._loading_attachment_text = False
+        self._active_text_attachment_id: Optional[str] = None
+        self._files_list_collapsed = False
+        self._files_last_expanded_width = 320
         
         self._world_data = WORLD_DATA
         
@@ -225,18 +487,25 @@ class SessionCreatorWidget(QWidget):
         self._init_ui()
         self._refresh_session_list()
         if self.manager.last_error:
-            QTimer.singleShot(
-                0,
-                lambda msg=self.manager.last_error: QMessageBox.warning(
-                    self,
-                    "Session Load Failed",
-                    msg,
-                ),
-            )
+            if _is_test_env():
+                print(f"Session Load Failed: {self.manager.last_error}")
+            else:
+                QTimer.singleShot(
+                    0,
+                    lambda msg=self.manager.last_error: QMessageBox.warning(
+                        self,
+                        "Session Load Failed",
+                        msg,
+                    ),
+                )
 
     def closeEvent(self, event) -> None:
         self.auto_save_timer.stop()
         super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_files_edge_toggle()
 
     def _current_context_restrictions(self) -> tuple[str, str, str]:
         world = _combo_optional_value(self.world_combo) if hasattr(self, "world_combo") else ""
@@ -521,6 +790,8 @@ class SessionCreatorWidget(QWidget):
         plan_layout.addWidget(self.plan_editor, 1)
 
         self.ref_tabs.addTab(plan_tab, "Plan")
+        self.ref_tabs.addTab(self._build_files_tab(), "Files")
+        self.ref_tabs.currentChanged.connect(self._on_reference_tab_changed)
         
         ref_layout.addWidget(self.ref_tabs)
         self.main_splitter.addWidget(self.reference_pane)
@@ -657,10 +928,235 @@ class SessionCreatorWidget(QWidget):
         layout.addWidget(self.main_splitter)
 
         self._set_plan_controls_enabled(False)
+        self._set_file_controls_enabled(False)
 
         # Initialize Combo Boxes
         _populate_combo(self.world_combo, self._world_options())
         self._on_world_changed() # Trigger cascade
+
+    def _build_files_tab(self) -> QWidget:
+        files_tab = QWidget(self)
+        files_layout = QVBoxLayout(files_tab)
+        files_layout.setContentsMargins(8, 8, 8, 8)
+        files_layout.setSpacing(8)
+
+        files_splitter = QSplitter(Qt.Orientation.Horizontal, files_tab)
+        files_splitter.setHandleWidth(10)
+        self.files_splitter = files_splitter
+
+        list_panel = QFrame(files_tab)
+        list_panel.setObjectName("PanelTransparent")
+        self.files_list_panel = list_panel
+        list_layout = QVBoxLayout(list_panel)
+        list_layout.setContentsMargins(8, 8, 8, 8)
+        list_layout.setSpacing(8)
+        self.files_list_content = QWidget(list_panel)
+        self.files_list_content.setObjectName("TransparentContainer")
+        list_content_layout = QVBoxLayout(self.files_list_content)
+        list_content_layout.setContentsMargins(0, 0, 0, 0)
+        list_content_layout.setSpacing(8)
+
+        self.files_table = QTableWidget(0, 4, self.files_list_content)
+        self.files_table.setHorizontalHeaderLabels(["Name", "Type", "Size", "Updated"])
+        self.files_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.files_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.files_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.files_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.files_table.setAlternatingRowColors(True)
+        self.files_table.setShowGrid(False)
+        self.files_table.setFrameShape(QFrame.Shape.NoFrame)
+        self.files_table.setViewportMargins(0, 0, 0, 0)
+        self.files_table.setContentsMargins(0, 0, 0, 0)
+        self.files_table.horizontalHeader().setSectionsMovable(False)
+        self.files_table.horizontalHeader().setStretchLastSection(False)
+        self.files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.files_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.files_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.files_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.files_table.verticalHeader().setVisible(False)
+        self.files_table.setStyleSheet(
+            """
+            QTableWidget {
+                padding: 0px;
+                margin: 0px;
+                border: 0px;
+                background-clip: border;
+            }
+            QTableView::item {
+                margin: 0px;
+                padding: 4px 6px;
+                border: 0px;
+            }
+            QHeaderView {
+                margin: 0px;
+                padding: 0px;
+            }
+            QHeaderView::section {
+                margin: 0px;
+                padding: 4px 6px;
+            }
+            """
+        )
+        self.files_table.itemSelectionChanged.connect(self._on_selected_file_changed)
+        list_content_layout.addWidget(self.files_table, 1)
+
+        controls = QWidget(self.files_list_content)
+        controls.setObjectName("TransparentContainer")
+        controls.setMinimumHeight(58)
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 6, 0, 6)
+        controls_layout.setSpacing(6)
+
+        self.add_file_btn = QPushButton("Add", controls)
+        self.add_file_btn.setObjectName("PrimaryButton")
+        self.add_file_btn.clicked.connect(self._attach_files_to_session)
+
+        self.remove_file_btn = QPushButton("Remove", controls)
+        self.remove_file_btn.setObjectName("DestructiveButton")
+        self.remove_file_btn.clicked.connect(self._remove_selected_file)
+
+        self.open_file_external_btn = QPushButton("Open", controls)
+        self.open_file_external_btn.setObjectName("PrimaryButton")
+        self.open_file_external_btn.clicked.connect(self._open_selected_file_externally)
+
+        for button in (self.add_file_btn, self.remove_file_btn, self.open_file_external_btn):
+            button.setProperty("compact", True)
+            button.setMinimumHeight(46)
+            button.setMaximumHeight(46)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            controls_layout.addWidget(button)
+        list_content_layout.addWidget(controls)
+        list_layout.addWidget(self.files_list_content, 1)
+
+        preview_panel = QFrame(files_tab)
+        preview_panel.setObjectName("PanelTransparent")
+        self.files_preview_panel = preview_panel
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_layout.setContentsMargins(8, 8, 8, 8)
+        preview_layout.setSpacing(8)
+
+        preview_header = QWidget(preview_panel)
+        preview_header_layout = QHBoxLayout(preview_header)
+        preview_header_layout.setContentsMargins(0, 0, 0, 0)
+        preview_header_layout.setSpacing(6)
+
+        self.files_preview_title = QLabel("Select an attached file")
+        self.files_preview_title.setObjectName("Subheader")
+        preview_header_layout.addWidget(self.files_preview_title, 1)
+
+        self.files_zoom_label = QLabel("100%")
+        self.files_zoom_label.setObjectName("Subheader")
+        preview_header_layout.addWidget(self.files_zoom_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.files_zoom_out_button = QToolButton(preview_header)
+        self.files_zoom_out_button.setObjectName("SecondaryButton")
+        self.files_zoom_out_button.setIcon(QIcon(os.path.join(ICON_DIR, "minus.svg")))
+        self.files_zoom_out_button.setToolTip("Zoom Out")
+        self.files_zoom_out_button.setProperty("compact", True)
+        self.files_zoom_out_button.setFixedSize(36, 36)
+        self.files_zoom_out_button.setIconSize(QSize(20, 20))
+        self.files_zoom_out_button.setStyleSheet(
+            "padding: 0px; border-radius: 6px; min-width: 36px; max-width: 36px; min-height: 36px; max-height: 36px;"
+        )
+        self.files_zoom_out_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        preview_header_layout.addWidget(self.files_zoom_out_button)
+
+        self.files_zoom_in_button = QToolButton(preview_header)
+        self.files_zoom_in_button.setObjectName("SecondaryButton")
+        self.files_zoom_in_button.setIcon(QIcon(os.path.join(ICON_DIR, "plus.svg")))
+        self.files_zoom_in_button.setToolTip("Zoom In")
+        self.files_zoom_in_button.setProperty("compact", True)
+        self.files_zoom_in_button.setFixedSize(36, 36)
+        self.files_zoom_in_button.setIconSize(QSize(20, 20))
+        self.files_zoom_in_button.setStyleSheet(
+            "padding: 0px; border-radius: 6px; min-width: 36px; max-width: 36px; min-height: 36px; max-height: 36px;"
+        )
+        self.files_zoom_in_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        preview_header_layout.addWidget(self.files_zoom_in_button)
+
+        preview_layout.addWidget(preview_header)
+
+        self.files_preview_stack = QStackedWidget(preview_panel)
+        preview_layout.addWidget(self.files_preview_stack, 1)
+
+        self.files_empty_page = QLabel("No file selected.")
+        self.files_empty_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.files_empty_page.setObjectName("Subheader")
+        self.files_preview_stack.addWidget(self.files_empty_page)
+
+        image_page = QWidget(preview_panel)
+        image_layout = QVBoxLayout(image_page)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        image_layout.setSpacing(6)
+        self.files_image_view = MapViewPanel(image_page, placeholder="No image selected.")
+        image_layout.addWidget(self.files_image_view, 1)
+        self.files_preview_stack.addWidget(image_page)
+        self.files_image_page = image_page
+        self.files_zoom_out_button.clicked.connect(self.files_image_view.zoom_out)
+        self.files_zoom_in_button.clicked.connect(self.files_image_view.zoom_in)
+        self.files_image_view.zoomChanged.connect(
+            lambda value: self.files_zoom_label.setText(f"{int(value)}%")
+        )
+
+        text_page = QWidget(preview_panel)
+        text_layout = QVBoxLayout(text_page)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(6)
+        self.files_text_status = QLabel("Text attachment")
+        self.files_text_status.setStyleSheet("color: #8b949e;")
+        text_layout.addWidget(self.files_text_status)
+        self.files_text_editor = QPlainTextEdit(text_page)
+        self.files_text_editor.setPlaceholderText("Select a text-based attachment to edit.")
+        self.files_text_editor.textChanged.connect(self._on_file_text_changed)
+        text_layout.addWidget(self.files_text_editor, 1)
+        self.files_preview_stack.addWidget(text_page)
+        self.files_text_page = text_page
+
+        self.files_pdf_page = QWidget(preview_panel)
+        pdf_layout = QVBoxLayout(self.files_pdf_page)
+        pdf_layout.setContentsMargins(0, 0, 0, 0)
+        pdf_layout.setSpacing(0)
+        if PDFIUM_VIEW_AVAILABLE:
+            self.files_pdf_viewer = CharacterSheetPanel(self.files_pdf_page)
+            self.files_pdf_viewer.set_autosave_enabled(False)
+            pdf_layout.addWidget(self.files_pdf_viewer, 1)
+            self.files_pdf_unavailable = None
+        else:
+            self.files_pdf_viewer = None
+            self.files_pdf_unavailable = QLabel(
+                "PDF preview requires pypdfium2. Use Open to view externally.",
+                self.files_pdf_page,
+            )
+            self.files_pdf_unavailable.setWordWrap(True)
+            self.files_pdf_unavailable.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pdf_layout.addWidget(self.files_pdf_unavailable, 1)
+        self.files_preview_stack.addWidget(self.files_pdf_page)
+
+        self.files_unsupported_page = QLabel(
+            "Preview unavailable for this file type. Use Open to launch externally.",
+            preview_panel,
+        )
+        self.files_unsupported_page.setWordWrap(True)
+        self.files_unsupported_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.files_preview_stack.addWidget(self.files_unsupported_page)
+
+        files_splitter.addWidget(list_panel)
+        files_splitter.addWidget(preview_panel)
+        files_splitter.setSizes([320, 520])
+        files_layout.addWidget(files_splitter, 1)
+
+        self.files_edge_toggle_btn = FilePoolEdgeToggleButton(preview_panel)
+        self.files_edge_toggle_btn.clicked.connect(self._toggle_files_list_panel)
+
+        self._files_splitter_animation = QVariantAnimation(self)
+        self._files_splitter_animation.setDuration(220)
+        self._files_splitter_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._files_splitter_animation.valueChanged.connect(self._on_files_splitter_anim_step)
+        self._files_splitter_animation.finished.connect(self._on_files_splitter_anim_finished)
+        self.files_splitter.splitterMoved.connect(self._on_files_splitter_moved)
+        QTimer.singleShot(0, self._position_files_edge_toggle)
+        return files_tab
 
     def _trigger_auto_save(self) -> None:
         if self._current_session:
@@ -826,14 +1322,19 @@ class SessionCreatorWidget(QWidget):
         self.scratchpad.clear()
         self._load_plan_text_file(None)
         self._set_plan_controls_enabled(False)
+        self._set_file_controls_enabled(False)
+        self._refresh_file_table()
+        self._show_empty_file_preview("No file selected.")
 
     def _load_session_to_ui(self, session: Session, *, apply_context: bool) -> None:
         self._set_current_session_dirty(False)
         self._set_plan_controls_enabled(True)
+        self._set_file_controls_enabled(True)
         self.scratchpad.blockSignals(True)
         self.scratchpad.setHtml(session.notes)
         self.scratchpad.blockSignals(False)
         self._load_plan_text_file(session.document_path, fallback_text=session.plan_text)
+        self._refresh_file_table()
 
         if apply_context:
             # Loading a session should apply its linked context as active restrictions.
@@ -1098,4 +1599,409 @@ class SessionCreatorWidget(QWidget):
     def _on_plan_text_changed(self) -> None:
         if self._loading_plan_text:
             return
+        self._trigger_auto_save()
+
+    def _set_file_controls_enabled(self, enabled: bool) -> None:
+        self.files_table.setEnabled(enabled)
+        self.add_file_btn.setEnabled(enabled)
+        self.files_text_editor.setReadOnly(not enabled)
+        self.files_zoom_in_button.setEnabled(enabled)
+        self.files_zoom_out_button.setEnabled(enabled)
+        self.files_edge_toggle_btn.setEnabled(enabled)
+        self._update_file_action_states()
+
+    def _update_file_action_states(self) -> None:
+        enabled = bool(self._current_session and self.files_table.isEnabled())
+        has_selection = self._current_attachment() is not None
+        self.remove_file_btn.setEnabled(enabled and has_selection)
+        self.open_file_external_btn.setEnabled(enabled and has_selection)
+        is_image_preview = self.files_preview_stack.currentWidget() is self.files_image_page
+        self.files_zoom_label.setVisible(is_image_preview)
+        self.files_zoom_in_button.setVisible(is_image_preview)
+        self.files_zoom_out_button.setVisible(is_image_preview)
+        self.files_zoom_in_button.setEnabled(enabled and is_image_preview)
+        self.files_zoom_out_button.setEnabled(enabled and is_image_preview)
+
+    def _toggle_files_list_panel(self) -> None:
+        if not hasattr(self, "files_splitter"):
+            return
+        current_left = self.files_splitter.sizes()[0] if self.files_splitter.sizes() else 0
+        if self._files_splitter_animation.state() == QVariantAnimation.State.Running:
+            self._files_splitter_animation.stop()
+        target_collapsed = not self._files_list_collapsed
+        self.files_edge_toggle_btn.set_collapsed(target_collapsed)
+        if self._files_list_collapsed:
+            self.files_splitter.setHandleWidth(10)
+            self.files_list_panel.setVisible(True)
+            self.files_list_content.setVisible(True)
+            target_left = max(220, int(self._files_last_expanded_width))
+        else:
+            self._files_last_expanded_width = max(220, int(current_left))
+            self.files_list_content.setVisible(False)
+            target_left = max(FILES_COLLAPSED_STRIP_WIDTH, 0)
+        self._files_splitter_animation.setStartValue(int(current_left))
+        self._files_splitter_animation.setEndValue(int(target_left))
+        self._files_splitter_animation.start()
+
+    def _on_files_splitter_anim_step(self, value) -> None:
+        if not hasattr(self, "files_splitter"):
+            return
+        try:
+            left_width = int(value)
+        except Exception:
+            left_width = 0
+        self._set_files_splitter_left_width(left_width)
+
+    def _set_files_splitter_left_width(self, left_width: int) -> None:
+        total = sum(self.files_splitter.sizes())
+        if total <= 0:
+            total = max(1, self.files_splitter.width())
+        clamped_left = max(0, min(total, int(left_width)))
+        right_width = max(0, total - clamped_left)
+        self.files_splitter.setSizes([clamped_left, right_width])
+        self._position_files_edge_toggle()
+
+    def _on_files_splitter_anim_finished(self) -> None:
+        left_width = self.files_splitter.sizes()[0] if self.files_splitter.sizes() else 0
+        self._files_list_collapsed = left_width <= (FILES_COLLAPSED_STRIP_WIDTH + 2)
+        if not self._files_list_collapsed:
+            self._files_last_expanded_width = max(220, int(left_width))
+            self.files_splitter.setHandleWidth(10)
+        else:
+            self.files_splitter.setHandleWidth(0)
+        self.files_list_panel.setVisible(True)
+        self.files_list_content.setVisible(not self._files_list_collapsed)
+        self.files_edge_toggle_btn.set_collapsed(self._files_list_collapsed)
+        self._position_files_edge_toggle()
+
+    def _on_files_splitter_moved(self, pos: int, index: int) -> None:
+        if self._files_splitter_animation.state() == QVariantAnimation.State.Running:
+            return
+        left_width = self.files_splitter.sizes()[0] if self.files_splitter.sizes() else 0
+        self._files_list_collapsed = left_width <= (FILES_COLLAPSED_STRIP_WIDTH + 2)
+        if not self._files_list_collapsed:
+            self._files_last_expanded_width = max(220, int(left_width))
+            self.files_splitter.setHandleWidth(10)
+        else:
+            self.files_splitter.setHandleWidth(0)
+        self.files_list_panel.setVisible(True)
+        self.files_list_content.setVisible(not self._files_list_collapsed)
+        self.files_edge_toggle_btn.set_collapsed(self._files_list_collapsed)
+        self._position_files_edge_toggle()
+
+    def _position_files_edge_toggle(self) -> None:
+        if (
+            not hasattr(self, "files_splitter")
+            or not hasattr(self, "files_edge_toggle_btn")
+            or not hasattr(self, "files_preview_panel")
+        ):
+            return
+        preview_panel = self.files_preview_panel
+        if preview_panel.width() <= 0 or preview_panel.height() <= 0:
+            return
+        btn = self.files_edge_toggle_btn
+        x = 4
+        y = max(0, (preview_panel.height() - btn.height()) // 2)
+        btn.move(x, y)
+        btn.raise_()
+        btn.show()
+
+    def _on_reference_tab_changed(self, index: int) -> None:
+        if not hasattr(self, "ref_tabs") or not hasattr(self, "files_edge_toggle_btn"):
+            return
+        is_files_tab = self.ref_tabs.tabText(index) == "Files"
+        if is_files_tab:
+            self._position_files_edge_toggle()
+            self.files_edge_toggle_btn.show()
+
+    def _refresh_file_table(self, *, selected_attachment_id: Optional[str] = None) -> None:
+        session = self._current_session
+        self.files_table.blockSignals(True)
+        self.files_table.setRowCount(0)
+        if not session:
+            self.files_table.blockSignals(False)
+            self._show_empty_file_preview("No file selected.")
+            self._update_file_action_states()
+            return
+        target_row: Optional[int] = None
+        for row, attachment in enumerate(session.attachments):
+            self.files_table.insertRow(row)
+            name_item = QTableWidgetItem(attachment.name)
+            name_item.setData(Qt.ItemDataRole.UserRole, attachment.id)
+            type_item = QTableWidgetItem(attachment.mime or _detect_mime(attachment.name))
+            size_item = QTableWidgetItem(_format_size(attachment.size_bytes))
+            updated_item = QTableWidgetItem(attachment.updated_at or attachment.added_at or "")
+            self.files_table.setItem(row, 0, name_item)
+            self.files_table.setItem(row, 1, type_item)
+            self.files_table.setItem(row, 2, size_item)
+            self.files_table.setItem(row, 3, updated_item)
+            if selected_attachment_id and attachment.id == selected_attachment_id:
+                target_row = row
+        if target_row is None and self.files_table.rowCount() > 0:
+            target_row = 0
+        if target_row is not None:
+            self.files_table.selectRow(target_row)
+        self.files_table.blockSignals(False)
+        self._on_selected_file_changed()
+        self._update_file_action_states()
+
+    def _refresh_file_row(self, attachment_id: str) -> None:
+        session = self._current_session
+        if not session:
+            return
+        attachment = next((a for a in session.attachments if a.id == attachment_id), None)
+        if attachment is None:
+            return
+        for row in range(self.files_table.rowCount()):
+            row_item = self.files_table.item(row, 0)
+            if row_item is None:
+                continue
+            if row_item.data(Qt.ItemDataRole.UserRole) != attachment_id:
+                continue
+            mime = attachment.mime or _detect_mime(attachment.name)
+            self.files_table.setItem(row, 1, QTableWidgetItem(mime))
+            self.files_table.setItem(row, 2, QTableWidgetItem(_format_size(attachment.size_bytes)))
+            self.files_table.setItem(
+                row,
+                3,
+                QTableWidgetItem(attachment.updated_at or attachment.added_at or ""),
+            )
+            break
+
+    def _current_attachment(self) -> Optional[SessionAttachment]:
+        session = self._current_session
+        if not session:
+            return None
+        row = self.files_table.currentRow()
+        if row < 0:
+            return None
+        name_item = self.files_table.item(row, 0)
+        if name_item is None:
+            return None
+        attachment_id = str(name_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        if not attachment_id:
+            return None
+        return next((a for a in session.attachments if a.id == attachment_id), None)
+
+    def _show_empty_file_preview(self, message: str) -> None:
+        self._active_text_attachment_id = None
+        self.files_preview_title.setText("Select an attached file")
+        self.files_empty_page.setText(message)
+        self.files_text_editor.blockSignals(True)
+        self.files_text_editor.setPlainText("")
+        self.files_text_editor.blockSignals(False)
+        self.files_image_view.load_image(None)
+        self.files_zoom_label.setText("100%")
+        self.files_preview_stack.setCurrentWidget(self.files_empty_page)
+        self._update_file_action_states()
+
+    def _on_selected_file_changed(self) -> None:
+        session = self._current_session
+        attachment = self._current_attachment()
+        if not session or attachment is None:
+            self._show_empty_file_preview("No file selected.")
+            return
+
+        self.files_preview_title.setText(attachment.name)
+        raw = self.manager.get_attachment_bytes(session.id, attachment.id)
+        if raw is None:
+            self._active_text_attachment_id = None
+            self.files_unsupported_page.setText(
+                f"Attachment asset missing for '{attachment.name}'."
+            )
+            self.files_preview_stack.setCurrentWidget(self.files_unsupported_page)
+            self._update_file_action_states()
+            return
+
+        suffix = Path(attachment.name).suffix.lower()
+        mime = attachment.mime or _detect_mime(attachment.name)
+        attachment.mime = mime
+
+        if suffix in IMAGE_FILE_EXTENSIONS or mime.startswith("image/"):
+            runtime_path = self._materialize_attachment_runtime_path(attachment, raw)
+            self.files_image_view.load_image(str(runtime_path))
+            if self.files_image_view._pixmap_item.pixmap().isNull():
+                self._active_text_attachment_id = None
+                self.files_unsupported_page.setText(
+                    f"Unable to decode preview for '{attachment.name}'."
+                )
+                self.files_preview_stack.setCurrentWidget(self.files_unsupported_page)
+            else:
+                self._active_text_attachment_id = None
+                self.files_preview_stack.setCurrentWidget(self.files_image_page)
+                self.files_zoom_label.setText("100%")
+            self._update_file_action_states()
+            return
+
+        if attachment.is_text or _is_text_extension(attachment.name, mime):
+            decoded = raw.decode("utf-8", errors="replace")
+            self._loading_attachment_text = True
+            self.files_text_editor.blockSignals(True)
+            self.files_text_editor.setPlainText(decoded)
+            self.files_text_editor.blockSignals(False)
+            self._loading_attachment_text = False
+            self._active_text_attachment_id = attachment.id
+            self.files_text_status.setText(
+                "Editing attached copy (source file is never modified)."
+            )
+            self.files_preview_stack.setCurrentWidget(self.files_text_page)
+            self._update_file_action_states()
+            return
+
+        if suffix in PDF_FILE_EXTENSIONS or mime == "application/pdf":
+            self._active_text_attachment_id = None
+            if self.files_pdf_viewer is not None:
+                runtime_path = self._materialize_attachment_runtime_path(attachment, raw)
+                self.files_pdf_viewer.load_pdf(str(runtime_path))
+            self.files_preview_stack.setCurrentWidget(self.files_pdf_page)
+            self._update_file_action_states()
+            return
+
+        self._active_text_attachment_id = None
+        self.files_unsupported_page.setText(
+            f"Preview unavailable for '{attachment.name}' ({mime}). Use Open to view externally."
+        )
+        self.files_preview_stack.setCurrentWidget(self.files_unsupported_page)
+        self._update_file_action_states()
+
+    def _attachment_runtime_dir(self) -> Path:
+        session = self._current_session
+        session_id = sanitize_filename(session.id) if session else "session"
+        return Path(default_dnd_save_dir()) / "cache" / "session_attachments" / session_id
+
+    def _materialize_attachment_runtime_path(
+        self, attachment: SessionAttachment, payload: bytes
+    ) -> Path:
+        runtime_dir = self._attachment_runtime_dir()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        file_name = _safe_attachment_filename(attachment.name)
+        runtime_path = runtime_dir / f"{sanitize_filename(attachment.id)}_{file_name}"
+        try:
+            if not runtime_path.exists() or runtime_path.read_bytes() != payload:
+                runtime_path.write_bytes(payload)
+        except Exception:
+            runtime_path.write_bytes(payload)
+        return runtime_path
+
+    def _session_attachment_total_size(self, session: Session) -> int:
+        total = 0
+        for attachment in session.attachments:
+            payload = self.manager.get_attachment_bytes(session.id, attachment.id)
+            if payload is not None:
+                total += len(payload)
+            else:
+                total += max(0, int(attachment.size_bytes))
+        return total
+
+    def _attach_files_to_session(self) -> None:
+        if not self._current_session:
+            QMessageBox.information(self, "No Session Selected", "Create or select a session first.")
+            return
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Attach Files",
+            os.path.expanduser("~"),
+            "All Files (*)",
+        )
+        if not files:
+            return
+        session = self._current_session
+        total_size = self._session_attachment_total_size(session)
+        added_ids: list[str] = []
+        for file_name in files:
+            source_path = Path(file_name)
+            try:
+                payload = source_path.read_bytes()
+            except Exception as exc:
+                self._report_io_failure(
+                    "Attach Failed",
+                    f"Unable to read file:\n{source_path}\n\n{exc}",
+                )
+                continue
+
+            payload_size = len(payload)
+            if payload_size > MAX_ATTACHMENT_FILE_BYTES:
+                QMessageBox.warning(
+                    self,
+                    "File Too Large",
+                    f"'{source_path.name}' exceeds the 25 MB per-file limit.",
+                )
+                continue
+            if total_size + payload_size > MAX_TOTAL_ATTACHMENT_BYTES:
+                QMessageBox.warning(
+                    self,
+                    "Session Limit Reached",
+                    "Adding this file would exceed the 150 MB session attachment limit.",
+                )
+                continue
+
+            attachment_id = generate_probabilistic_unique_id("att")
+            mime = _detect_mime(source_path.name)
+            now = _now_timestamp()
+            attachment = SessionAttachment(
+                id=attachment_id,
+                name=source_path.name,
+                asset_path=_attachment_asset_name(attachment_id, source_path.name),
+                mime=mime,
+                size_bytes=payload_size,
+                sha256=_hash_bytes(payload),
+                source_name=source_path.name,
+                source_path=str(source_path),
+                added_at=now,
+                updated_at=now,
+                is_text=_is_text_extension(source_path.name, mime),
+            )
+            session.attachments.append(attachment)
+            self.manager.set_attachment_bytes(session.id, attachment_id, payload)
+            total_size += payload_size
+            added_ids.append(attachment_id)
+
+        if not added_ids:
+            return
+        self._refresh_file_table(selected_attachment_id=added_ids[-1])
+        self._trigger_auto_save()
+
+    def _remove_selected_file(self) -> None:
+        session = self._current_session
+        attachment = self._current_attachment()
+        if not session or attachment is None:
+            return
+        session.attachments = [a for a in session.attachments if a.id != attachment.id]
+        self.manager.remove_attachment_bytes(session.id, attachment.id)
+        if self._active_text_attachment_id == attachment.id:
+            self._active_text_attachment_id = None
+        self._refresh_file_table()
+        self._trigger_auto_save()
+
+    def _open_selected_file_externally(self) -> None:
+        session = self._current_session
+        attachment = self._current_attachment()
+        if not session or attachment is None:
+            return
+        payload = self.manager.get_attachment_bytes(session.id, attachment.id)
+        if payload is None:
+            QMessageBox.warning(self, "Missing File", "Attachment data is not available.")
+            return
+        runtime_path = self._materialize_attachment_runtime_path(attachment, payload)
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(runtime_path))):
+            QMessageBox.warning(self, "Open Failed", "Unable to open attachment externally.")
+
+    def _on_file_text_changed(self) -> None:
+        if self._loading_attachment_text:
+            return
+        session = self._current_session
+        attachment_id = self._active_text_attachment_id
+        if not session or not attachment_id:
+            return
+        attachment = next((a for a in session.attachments if a.id == attachment_id), None)
+        if attachment is None:
+            return
+        payload = self.files_text_editor.toPlainText().encode("utf-8")
+        self.manager.set_attachment_bytes(session.id, attachment_id, payload)
+        attachment.size_bytes = len(payload)
+        attachment.sha256 = _hash_bytes(payload)
+        attachment.updated_at = _now_timestamp()
+        attachment.mime = attachment.mime or _detect_mime(attachment.name)
+        attachment.is_text = True
+        self._refresh_file_row(attachment_id)
         self._trigger_auto_save()

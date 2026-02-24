@@ -40,3 +40,6 @@ Unless specifically instructed there is no need to add backwards compatability e
 In case you get stuck somewhere, you can have a look at quirks.md it contains solutions to some reoccuring issues.
 
 
+## Small Fix Exception
+If the change is super small (for example tiny visual polish or trivial wording), you usually do not need to write a fail-first test before applying the fix.
+If a bug is persistent or keeps reappearing, fall back to the fail-first regression-test workflow to lock it down.

@@ -56,6 +56,21 @@ class SessionLogEntry:
 
 
 @dataclass
+class SessionAttachment:
+    id: str
+    name: str
+    asset_path: str
+    mime: str = "application/octet-stream"
+    size_bytes: int = 0
+    sha256: str = ""
+    source_name: str = ""
+    source_path: str = ""
+    added_at: str = ""
+    updated_at: str = ""
+    is_text: bool = False
+
+
+@dataclass
 class Session:
     id: str
     name: str
@@ -69,6 +84,7 @@ class Session:
     document_path: Optional[str] = None
     plan_text: str = ""
     group_ids: List[str] = field(default_factory=list)
+    attachments: List[SessionAttachment] = field(default_factory=list)
 
 
 @dataclass

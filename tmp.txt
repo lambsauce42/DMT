@@ -1,3 +1,4 @@
-.dmt<object> überall etablieren + unique ID für jedes Objekt für online object transfer. 
 Online transfer stabilisieren (Items und Character).
+navigation zu den files attachen
+files glätten.
 pyside6 statt pyqt6

@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 from typing import Iterable, List, Optional
 
-from PyQt6.QtCore import Qt, QUrl, QSize, QPoint, QRectF, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QUrl, QSize, QPoint, QPointF, QRectF, pyqtSignal, QTimer
 from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap, QPainter
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -64,7 +64,7 @@ MAP_FILE_EXTENSION = ".dmtmap"
 MAP_FILE_FORMAT = "dmtmap.v1"
 MAP_THUMB_SIZE = QSize(160, 100)
 MAP_THUMB_STORAGE_SCALE = 2
-MAP_VIEW_PADDING = 180
+MAP_VIEW_INFINITE_PADDING = 50000
 
 
 def maps_storage_dir() -> Path:
@@ -583,8 +583,8 @@ class MapViewPanel(QGraphicsView):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
 
         self._scene = QGraphicsScene(self)
@@ -597,9 +597,8 @@ class MapViewPanel(QGraphicsView):
 
         self._zoom = 1.0
         self._panning = False
-        self._pan_start: Optional[QPoint] = None
-        self._pan_h0 = 0
-        self._pan_v0 = 0
+        self._pan_last_pos: Optional[QPoint] = None
+        self._pan_center_scene: Optional[QPointF] = None
         self._auto_fit_active = False
 
         self._update_placeholder()
@@ -614,6 +613,7 @@ class MapViewPanel(QGraphicsView):
             self._pixmap_item.setPixmap(QPixmap())
             self._placeholder_item.setPlainText(self._placeholder_text)
             self._placeholder_item.setVisible(True)
+            self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
             self._zoom = 1.0
             self.resetTransform()
             self.zoomChanged.emit(100)
@@ -625,6 +625,7 @@ class MapViewPanel(QGraphicsView):
             self._pixmap_item.setPixmap(QPixmap())
             self._placeholder_item.setPlainText("Unable to load map preview.")
             self._placeholder_item.setVisible(True)
+            self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
             self._zoom = 1.0
             self.resetTransform()
             self.zoomChanged.emit(100)
@@ -633,6 +634,7 @@ class MapViewPanel(QGraphicsView):
             return
         self._pixmap_item.setPixmap(pixmap)
         self._placeholder_item.setVisible(False)
+        self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
         
         # Enable auto-fit mode for this image
         self._auto_fit_active = True
@@ -690,9 +692,10 @@ class MapViewPanel(QGraphicsView):
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
-            self._pan_start = event.pos()
-            self._pan_h0 = self.horizontalScrollBar().value()
-            self._pan_v0 = self.verticalScrollBar().value()
+            self._pan_last_pos = QPoint(event.pos())
+            self._pan_center_scene = self.mapToScene(self.viewport().rect().center())
+            self.centerOn(self._pan_center_scene)
+            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
             
             # Manual pan deactivates auto-fit
@@ -703,10 +706,19 @@ class MapViewPanel(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
-        if self._panning and self._pan_start is not None:
-            delta = event.pos() - self._pan_start
-            self.horizontalScrollBar().setValue(self._pan_h0 - delta.x())
-            self.verticalScrollBar().setValue(self._pan_v0 - delta.y())
+        if self._panning and self._pan_last_pos is not None and self._pan_center_scene is not None:
+            current_pos = QPoint(event.pos())
+            delta_px = current_pos - self._pan_last_pos
+            if delta_px.isNull():
+                event.accept()
+                return
+            inv_zoom = 1.0 / max(self._zoom, 1e-6)
+            self._pan_center_scene = QPointF(
+                self._pan_center_scene.x() - (float(delta_px.x()) * inv_zoom),
+                self._pan_center_scene.y() - (float(delta_px.y()) * inv_zoom),
+            )
+            self.centerOn(self._pan_center_scene)
+            self._pan_last_pos = current_pos
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -714,7 +726,8 @@ class MapViewPanel(QGraphicsView):
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.MiddleButton and self._panning:
             self._panning = False
-            self._pan_start = None
+            self._pan_last_pos = None
+            self._pan_center_scene = None
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
             return
@@ -734,6 +747,7 @@ class MapViewPanel(QGraphicsView):
     def set_zoom(self, zoom: float, *, anchor: str = "center") -> None:
         zoom = float(max(0.1, min(6.0, zoom)))
         if abs(zoom - self._zoom) < 1e-9:
+            self._update_scene_rect()
             return
         if anchor == "mouse":
             self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -755,27 +769,18 @@ class MapViewPanel(QGraphicsView):
         pixmap = self._pixmap_item.pixmap()
         viewport = self.viewport().size()
         if pixmap.isNull():
-            rect = QRectF(0, 0, max(1, viewport.width()), max(1, viewport.height()))
+            rect = QRectF(
+                -max(1, viewport.width()) / 2.0,
+                -max(1, viewport.height()) / 2.0,
+                max(1, viewport.width()),
+                max(1, viewport.height()),
+            )
             self._scene.setSceneRect(rect)
             self._update_placeholder()
             return
         rect = self._pixmap_item.boundingRect()
-        pad = MAP_VIEW_PADDING
+        pad = float(MAP_VIEW_INFINITE_PADDING)
         padded = rect.adjusted(-pad, -pad, pad, pad)
-        view_w = viewport.width() / max(self._zoom, 1e-6)
-        view_h = viewport.height() / max(self._zoom, 1e-6)
-        min_w = view_w + pad * 2
-        min_h = view_h + pad * 2
-        if padded.width() < min_w or padded.height() < min_h:
-            center = rect.center()
-            half_w = max(padded.width(), min_w) / 2.0
-            half_h = max(padded.height(), min_h) / 2.0
-            padded = QRectF(
-                center.x() - half_w,
-                center.y() - half_h,
-                half_w * 2.0,
-                half_h * 2.0,
-            )
         self._scene.setSceneRect(padded)
 
     def _update_placeholder(self) -> None:
