@@ -9,8 +9,9 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from session_creator import SessionManager, Session, SessionLogEntry
-from npc_database import NPCEntry, entry_to_dict, entry_from_dict
+from npc_database import NPCEntry, entry_to_dict, entry_from_dict, npc_storage_dir
 from maps_applet import MapAsset, entry_to_dict as map_to_dict, entry_from_dict as map_from_dict
+import player_sheets
 
 class TestPersistence(unittest.TestCase):
     def setUp(self):
@@ -25,7 +26,7 @@ class TestPersistence(unittest.TestCase):
         # Patch session_storage_path to redirect session storage root to our temp dir.
         import session_creator
         original_path_func = session_creator.session_storage_path
-        session_creator.session_storage_path = lambda: self.test_path / "sessions.json"
+        session_creator.session_storage_path = lambda: self.test_path / "sessions.dmtindex"
 
         try:
             manager = SessionManager()
@@ -92,6 +93,21 @@ class TestPersistence(unittest.TestCase):
         self.assertEqual(loaded_map.name, map_asset.name)
         self.assertEqual(loaded_map.image_path, map_asset.image_path)
         self.assertEqual(loaded_map.tags, map_asset.tags)
+
+    def test_character_and_npc_storage_directory_names(self):
+        import npc_database
+
+        original_sheet_save_dir = player_sheets.default_sheet_save_dir
+        original_npc_sheet_save_dir = npc_database.default_sheet_save_dir
+        player_sheets.default_sheet_save_dir = lambda: str(self.test_path)
+        npc_database.default_sheet_save_dir = lambda: str(self.test_path)
+        try:
+            self.assertEqual(player_sheets.character_sheets_dir(), self.test_path / "characters")
+            self.assertEqual(player_sheets.character_sheet_cache_dir(), self.test_path / "cache" / "characters")
+            self.assertEqual(npc_storage_dir(), self.test_path / "npcs")
+        finally:
+            player_sheets.default_sheet_save_dir = original_sheet_save_dir
+            npc_database.default_sheet_save_dir = original_npc_sheet_save_dir
 
 if __name__ == "__main__":
     unittest.main()

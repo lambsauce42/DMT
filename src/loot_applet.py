@@ -49,8 +49,10 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.widgets import PlusMinusSpinBox
+from dmt_package import read_dmt_package_info, write_dmt_package
 from item_file_format import list_item_file_paths, load_item_payload
 from save_paths import default_dnd_save_dir, items_dir
+from unique_ids import generate_probabilistic_unique_id
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
@@ -112,6 +114,8 @@ EXPORT_SCALE = 6
 EXPORT_DPI = 480
 ARTIFACT_DEFAULT_PROB = 0.5
 LOOT_RESULTS_EXTENSION = ".dmtloot"
+LOOT_PRESET_EXTENSION = ".dmtpreset"
+LOOT_PRESET_FORMAT = "dmtpreset.v1"
 CATEGORY_LABELS = {
     "equipment": "Equipment",
     "consumables": "Consumables",
@@ -2785,13 +2789,19 @@ class LootAppletWidget(QWidget):
                 PresetEntry(name=preset["name"], data=preset, built_in=True)
             )
 
-        for path in sorted(self._preset_dir.glob("*.json")):
+        for path in sorted(self._preset_dir.glob(f"*{LOOT_PRESET_EXTENSION}")):
             try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    data = json.load(handle)
+                info = read_dmt_package_info(path)
             except Exception:
                 continue
-            name = str(data.get("name") or path.stem)
+            if not isinstance(info, dict):
+                continue
+            if str(info.get("format") or "") != LOOT_PRESET_FORMAT:
+                continue
+            data = info.get("payload")
+            if not isinstance(data, dict):
+                continue
+            name = str(info.get("name") or data.get("name") or path.stem)
             self._preset_entries.append(
                 PresetEntry(name=name, data=data, path=path, built_in=False)
             )
@@ -2932,7 +2942,7 @@ class LootAppletWidget(QWidget):
         if not ok or not name.strip():
             return
         cleaned_name = name.strip()
-        filename = f"{_slugify(cleaned_name)}.json"
+        filename = f"{_slugify(cleaned_name)}{LOOT_PRESET_EXTENSION}"
         path = self._preset_dir / filename
 
         if path.exists():
@@ -2947,8 +2957,23 @@ class LootAppletWidget(QWidget):
         data = self._current_settings()
         data["name"] = cleaned_name
         try:
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, ensure_ascii=False)
+            existing_info = read_dmt_package_info(path) if path.exists() else None
+            object_id = (
+                str(existing_info.get("object_id") or "").strip()
+                if isinstance(existing_info, dict)
+                else ""
+            ) or generate_probabilistic_unique_id("loot_preset")
+            write_dmt_package(
+                path,
+                info={
+                    "format": LOOT_PRESET_FORMAT,
+                    "object_type": "loot_preset",
+                    "object_id": object_id,
+                    "name": cleaned_name,
+                    "updated_at": _utc_timestamp(),
+                    "payload": data,
+                },
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
             return

@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-import json
 import os
 import sys
 from pathlib import Path
@@ -38,6 +37,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
 )
 
+from dmt_package import list_dmt_package_assets, read_dmt_package_asset, read_dmt_package_info, write_dmt_package
 from navigate_widget import WORLD_DATA, move_to_trash
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
@@ -55,11 +55,13 @@ from player_sheets import (
     resolve_selection,
     sanitize_filename,
 )
+from unique_ids import generate_probabilistic_unique_id
 
 MAPS_DIR_NAME = "maps"
 MAPS_IMAGES_DIR_NAME = "images"
 MAPS_THUMBS_DIR_NAME = ".thumbs"
-MAPS_JSON_NAME = "maps.json"
+MAP_FILE_EXTENSION = ".dmtmap"
+MAP_FILE_FORMAT = "dmtmap.v1"
 MAP_THUMB_SIZE = QSize(160, 100)
 MAP_THUMB_STORAGE_SCALE = 2
 MAP_VIEW_PADDING = 180
@@ -78,7 +80,12 @@ def maps_thumbs_dir() -> Path:
 
 
 def maps_storage_path() -> Path:
-    return maps_storage_dir() / MAPS_JSON_NAME
+    return maps_storage_dir() / "maps.dmtindex"
+
+
+def map_file_path(map_id: str) -> Path:
+    safe = sanitize_filename(str(map_id or "").strip()) or "map"
+    return maps_storage_dir() / f"{safe}{MAP_FILE_EXTENSION}"
 
 
 def maps_trash_dir() -> Path:
@@ -106,6 +113,11 @@ def map_thumb_trash_path(entry: MapAsset) -> Path:
     return maps_trash_thumbs_dir() / f"{map_id}.png"
 
 
+def map_file_trash_path(entry: MapAsset) -> Path:
+    map_id = map_id_for_entry(entry)
+    return maps_trash_dir() / f"{map_id}{MAP_FILE_EXTENSION}"
+
+
 def _move_path_to_trash(
     path_value: Optional[str],
     trash_path: Path,
@@ -129,6 +141,11 @@ def _move_path_to_trash(
 
 
 def move_entry_files_to_trash(entry: MapAsset) -> tuple[Optional[str], Optional[str]]:
+    _move_path_to_trash(
+        str(map_file_path(map_id_for_entry(entry))),
+        map_file_trash_path(entry),
+        maps_trash_dir(),
+    )
     trashed_image = _move_path_to_trash(
         entry.image_path,
         map_image_trash_path(entry, entry.image_path),
@@ -150,6 +167,8 @@ def move_entry_files_to_trash(entry: MapAsset) -> tuple[Optional[str], Optional[
 def disintegrate_entry_files(entry: MapAsset) -> None:
     map_id = map_id_for_entry(entry)
     candidates: set[Path] = set()
+    candidates.add(map_file_path(map_id))
+    candidates.add(map_file_trash_path(entry))
     if entry.image_path:
         candidates.add(Path(entry.image_path))
     if entry.thumbnail_path:
@@ -501,11 +520,18 @@ class MapDialog(QDialog):
             QMessageBox.warning(self, "Missing Image", "Select a PNG for this map.")
             return
 
-        map_id = sanitize_filename(name)
+        map_id = (
+            str(getattr(self._original_entry, "id", "") or "").strip()
+            if self._original_entry
+            else ""
+        )
+        if not map_id:
+            map_id = generate_probabilistic_unique_id("map")
+        map_stem = sanitize_filename(name) or sanitize_filename(map_id)
         image_dir = maps_images_dir()
         image_dir.mkdir(parents=True, exist_ok=True)
         source_suffix = os.path.splitext(source_path)[1] or ".png"
-        desired_path = image_dir / f"{map_id}{source_suffix}"
+        desired_path = image_dir / f"{map_stem}{source_suffix}"
 
         final_path = desired_path
         if self._source_image_path:
@@ -527,13 +553,13 @@ class MapDialog(QDialog):
             else:
                 final_path = existing_path
 
-        thumb_path = maps_thumbs_dir() / f"{map_id}.png"
+        thumb_path = maps_thumbs_dir() / f"{sanitize_filename(map_id)}.png"
         resolved_thumb = _ensure_thumbnail(str(final_path), thumb_path)
 
         now = datetime.now().isoformat(timespec="seconds")
         created_at = self._original_entry.created_at if self._original_entry else now
         self._entry = MapAsset(
-            id=self._original_entry.id if self._original_entry else map_id,
+            id=map_id,
             name=name,
             image_path=str(final_path),
             thumbnail_path=resolved_thumb,
@@ -1061,31 +1087,104 @@ class MapsWidget(QWidget):
         return container
 
     def _load_entries(self) -> List[MapAsset]:
-        path = self._storage_path
-        if not path.exists():
-            return []
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            self._load_entries_error = f"Unable to read maps storage at '{path}': {exc}"
-            return []
-        if not isinstance(raw, list):
-            self._load_entries_error = (
-                f"Invalid maps storage format at '{path}': expected a JSON list."
-            )
-            return []
         entries: List[MapAsset] = []
-        for payload in raw:
+        maps_images_dir().mkdir(parents=True, exist_ok=True)
+        maps_thumbs_dir().mkdir(parents=True, exist_ok=True)
+        for path in sorted(maps_storage_dir().glob(f"*{MAP_FILE_EXTENSION}")):
+            info = read_dmt_package_info(path)
+            if not isinstance(info, dict):
+                continue
+            if str(info.get("format") or "") != MAP_FILE_FORMAT:
+                continue
+            payload = info.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            payload = dict(payload)
+            object_id = str(info.get("object_id") or payload.get("id") or "").strip()
+            if not object_id:
+                continue
+            payload["id"] = object_id
+            image_asset = str(info.get("image_asset") or "").strip()
+            thumb_asset = str(info.get("thumbnail_asset") or "").strip()
+            if image_asset:
+                raw = read_dmt_package_asset(path, image_asset)
+                if raw:
+                    image_suffix = Path(image_asset).suffix.lower() or ".png"
+                    image_target = maps_images_dir() / f"{sanitize_filename(object_id)}{image_suffix}"
+                    try:
+                        image_target.write_bytes(raw)
+                        payload["image_path"] = str(image_target)
+                    except OSError:
+                        continue
+            if thumb_asset:
+                raw_thumb = read_dmt_package_asset(path, thumb_asset)
+                if raw_thumb:
+                    thumb_target = maps_thumbs_dir() / f"{sanitize_filename(object_id)}.png"
+                    try:
+                        thumb_target.write_bytes(raw_thumb)
+                        payload["thumbnail_path"] = str(thumb_target)
+                    except OSError:
+                        pass
             entry = entry_from_dict(payload)
             if entry:
                 entries.append(entry)
         return entries
 
     def _save_entries(self) -> None:
-        path = self._storage_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [entry_to_dict(entry) for entry in self._manager.entries]
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        root = maps_storage_dir()
+        root.mkdir(parents=True, exist_ok=True)
+        expected_files: set[Path] = set()
+        for entry in self._manager.entries:
+            if not str(entry.id or "").strip():
+                entry.id = generate_probabilistic_unique_id("map")
+            resolved_image = self._resolve_map_image_path(entry)
+            if not resolved_image:
+                continue
+            image_path = Path(resolved_image)
+            image_suffix = image_path.suffix.lower() or ".png"
+            thumb_path = maps_thumbs_dir() / f"{sanitize_filename(entry.id)}.png"
+            thumb_str = _ensure_thumbnail(str(image_path), thumb_path)
+            if thumb_str:
+                entry.thumbnail_path = thumb_str
+            assets: dict[str, bytes] = {}
+            image_asset_name = f"assets/map{image_suffix}"
+            thumb_asset_name = "assets/thumb.png"
+            try:
+                assets[image_asset_name] = image_path.read_bytes()
+            except Exception:
+                continue
+            if entry.thumbnail_path:
+                try:
+                    assets[thumb_asset_name] = Path(entry.thumbnail_path).read_bytes()
+                except Exception:
+                    pass
+            file_path = map_file_path(entry.id)
+            expected_files.add(file_path.resolve())
+            write_dmt_package(
+                file_path,
+                info={
+                    "format": MAP_FILE_FORMAT,
+                    "object_type": "map",
+                    "object_id": str(entry.id),
+                    "name": str(entry.name),
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    "image_asset": image_asset_name,
+                    "thumbnail_asset": thumb_asset_name if thumb_asset_name in assets else "",
+                    "payload": entry_to_dict(entry),
+                },
+                assets=assets,
+            )
+        for existing in root.glob(f"*{MAP_FILE_EXTENSION}"):
+            try:
+                resolved_existing = existing.resolve()
+            except Exception:
+                resolved_existing = existing
+            if resolved_existing in expected_files:
+                continue
+            try:
+                existing.unlink()
+            except Exception:
+                continue
 
     def _on_world_changed(self) -> None:
         selected_campaign = self._refresh_campaigns()

@@ -4,6 +4,7 @@ import copy
 import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, pyqtSignal
@@ -53,11 +54,11 @@ EDIT_ICON = os.path.join(ICON_DIR, "edit.svg")
 DISINTEGRATE_ICON = os.path.join(ICON_DIR, "disintegrate.svg")
 REVIVE_ICON = os.path.join(ICON_DIR, "revive.svg")
 TRASH_RETENTION_DAYS = 30
-from save_paths import trash_json_path
-TRASH_RETENTION_DAYS = 30
 from save_paths import trash_json_path, navigation_json_path
+from navigation_storage import load_navigation_world_data, save_navigation_world_data
+TRASH_RETENTION_DAYS = 30
 TRASH_PATH = trash_json_path()
-NAVIGATION_PATH = navigation_json_path()
+NAVIGATION_PATH = str(navigation_json_path())
 
 
 
@@ -88,23 +89,23 @@ def save_trash(entries: list[dict], path: Optional[str] = None) -> None:
 
 
 
+def _navigation_base_dir() -> str:
+    return str(Path(NAVIGATION_PATH).expanduser().resolve().parent)
+
+
 def save_navigation_data(data: list) -> None:
-    path = NAVIGATION_PATH
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
+        save_navigation_world_data(
+            data if isinstance(data, list) else [],
+            base_dir=Path(_navigation_base_dir()),
+        )
     except Exception:
         pass
 
 
 def load_navigation_data() -> list:
-    path = NAVIGATION_PATH
-    if not os.path.exists(path):
-        return WORLD_DATA
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        data = load_navigation_world_data(base_dir=Path(_navigation_base_dir()))
         return data if isinstance(data, list) else WORLD_DATA
     except Exception:
         return WORLD_DATA
@@ -116,6 +117,8 @@ def move_to_trash(
     parent: Optional[dict] = None,
     path: Optional[str] = None,
 ) -> dict:
+    if not isinstance(payload, dict):
+        return {}
     if not path:
         path = TRASH_PATH
     trash = load_trash(path)
@@ -631,7 +634,6 @@ class NavigateContentWidget(QWidget):
         self._default_world_icon = os.path.join(ICON_DIR, "navigate.png")
         self._default_campaign_icon = os.path.join(ICON_DIR, "mapselector.png")
         self._default_group_icon = os.path.join(ICON_DIR, "charactersheets.png")
-        self._default_group_icon = os.path.join(ICON_DIR, "charactersheets.png")
         self._trash: list[dict] = []
         self._data = []
         
@@ -639,26 +641,45 @@ class NavigateContentWidget(QWidget):
         loaded_data = load_navigation_data()
         
         for world in loaded_data:
+            if not isinstance(world, dict):
+                continue
+            world_name = str(world.get("name", "")).strip()
+            if not world_name:
+                continue
             world_entry = {
-                "name": world["name"],
+                "name": world_name,
                 "icon": world.get("icon") or self._default_world_icon,
                 "campaigns": [],
             }
-            for campaign in world["campaigns"]:
+            campaigns = world.get("campaigns")
+            if not isinstance(campaigns, list):
+                campaigns = []
+            for campaign in campaigns:
+                if isinstance(campaign, dict):
+                    campaign_name = str(campaign.get("name", "")).strip()
+                    campaign_icon = campaign.get("icon") or self._default_campaign_icon
+                    raw_groups = campaign.get("groups")
+                else:
+                    campaign_name = str(campaign).strip()
+                    campaign_icon = self._default_campaign_icon
+                    raw_groups = []
+                if not campaign_name:
+                    continue
                 groups = []
-                for group in campaign["groups"]:
-                    if isinstance(group, dict):
-                        group_name = group.get("name", "")
-                        group_icon = group.get("icon") or self._default_group_icon
-                    else:
-                        group_name = str(group)
-                        group_icon = self._default_group_icon
-                    if group_name:
-                        groups.append({"name": group_name, "icon": group_icon})
+                if isinstance(raw_groups, list):
+                    for group in raw_groups:
+                        if isinstance(group, dict):
+                            group_name = str(group.get("name", "")).strip()
+                            group_icon = group.get("icon") or self._default_group_icon
+                        else:
+                            group_name = str(group).strip()
+                            group_icon = self._default_group_icon
+                        if group_name:
+                            groups.append({"name": group_name, "icon": group_icon})
                 world_entry["campaigns"].append(
                     {
-                        "name": campaign["name"],
-                        "icon": campaign.get("icon") or self._default_campaign_icon,
+                        "name": campaign_name,
+                        "icon": campaign_icon,
                         "groups": groups,
                     }
                 )
@@ -717,8 +738,8 @@ class NavigateContentWidget(QWidget):
             return
         expansion_state = self._capture_expansion_state()
         world = next((item for item in self._data if item["name"] == name), None)
-        if world:
-            self._move_to_trash("world", world)
+        if world is None:
+            return
         self._move_to_trash("world", world)
         self._data = [world for world in self._data if world["name"] != name]
         save_navigation_data(self._data)
@@ -756,7 +777,6 @@ class NavigateContentWidget(QWidget):
         for world in self._data:
             if world["name"] == old_name:
                 world["name"] = new_name
-                world["name"] = new_name
                 new_icon = icon or world.get("icon") or self._default_world_icon
                 world["icon"] = new_icon
                 break
@@ -771,7 +791,6 @@ class NavigateContentWidget(QWidget):
                     updated_campaigns[(new_name, campaign_name)] = expanded
                 else:
                     updated_campaigns[(world_name, campaign_name)] = expanded
-            expansion_state["campaigns"] = updated_campaigns
             expansion_state["campaigns"] = updated_campaigns
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
@@ -1298,6 +1317,8 @@ class NavigateContentWidget(QWidget):
             self._save_trash()
 
     def _move_to_trash(self, entry_type: str, payload: dict, parent: Optional[dict] = None) -> None:
+        if not isinstance(payload, dict):
+            return
         trash_entry = {
             "type": entry_type,
             "name": payload.get("name"),

@@ -35,7 +35,7 @@ from dungeon_constants import (
     ROLE_OWNER_PLAYER_ID,
 )
 from dungeon_items import EntityItem
-from save_paths import default_dnd_save_dir
+from dmt_package import read_dmt_package_info
 from item_file_format import build_item_document, load_item_payload
 
 _PNG_1X1_BYTES = (
@@ -760,9 +760,19 @@ def test_player_loot_add_from_inventory_sends_source_metadata(dungeon_widget, mo
 
 
 def test_loot_add_from_library_dialog_contract_and_selection(monkeypatch, dungeon_widget, tmp_path):
-    chosen_path = tmp_path / "sword.json"
+    chosen_path = tmp_path / "sword.dmtitem"
     chosen_path.write_text(
-        '{"item_id":"item-sword","title":"Sword","rarity":"common","level":1}',
+        json.dumps(
+            {
+                "format": "dmtitem.v1",
+                "payload": {
+                    "item_id": "item-sword",
+                    "title": "Sword",
+                    "rarity": "common",
+                    "level": 1,
+                },
+            }
+        ),
         encoding="utf-8",
     )
     selected_item = types.SimpleNamespace(
@@ -805,7 +815,7 @@ def test_loot_add_from_library_dialog_contract_and_selection(monkeypatch, dungeo
 
 
 def test_loot_add_from_library_ignores_missing_selected_item(monkeypatch, dungeon_widget):
-    ghost_item = types.SimpleNamespace(item_id="ghost", title="Ghost", path="ghost.json")
+    ghost_item = types.SimpleNamespace(item_id="ghost", title="Ghost", path="ghost.dmtitem")
 
     class _Dialog:
         def __init__(self, items, icon_provider, preview_provider, parent=None):
@@ -828,9 +838,19 @@ def test_loot_add_from_library_ignores_missing_selected_item(monkeypatch, dungeo
 
 
 def test_loot_pool_resolve_item_path_supports_absolute_item_id_path(dungeon_widget, tmp_path):
-    item_path = tmp_path / "abs_item.json"
+    item_path = tmp_path / "abs_item.dmtitem"
     item_path.write_text(
-        '{"item_id":"abs-item","title":"Absolute Item","rarity":"common","level":1}',
+        json.dumps(
+            {
+                "format": "dmtitem.v1",
+                "payload": {
+                    "item_id": "abs-item",
+                    "title": "Absolute Item",
+                    "rarity": "common",
+                    "level": 1,
+                },
+            }
+        ),
         encoding="utf-8",
     )
     resolved = dungeon_widget._loot_pool_resolve_item_path({"item_id": str(item_path)})
@@ -1251,7 +1271,7 @@ def test_host_snapshot_requested_sends_icon_assets_for_session_refs(dungeon_widg
     assert payload["filename"] == "token.png"
 
 
-def test_materialize_state_icons_for_save_moves_session_refs_to_collection_assets(dungeon_widget, monkeypatch, tmp_path):
+def test_materialize_state_icons_for_archive_moves_session_refs_to_assets(dungeon_widget, monkeypatch, tmp_path):
     cache_dir = tmp_path / "online" / "cache" / "icons"
     cache_dir.mkdir(parents=True, exist_ok=True)
     (cache_dir / "token.png").write_bytes(_PNG_1X1_BYTES)
@@ -1269,17 +1289,17 @@ def test_materialize_state_icons_for_save_moves_session_refs_to_collection_asset
         ],
         "fog": {"path": []},
     }
-    target_collection = tmp_path / "my_collection.json"
-    result = dungeon_widget._materialize_state_icons_for_save(state, target_collection)
+    assets = {}
+    result = dungeon_widget._materialize_state_icons_for_archive(state, assets)
 
     icon_path = str(result["items"][0]["icon_path"])
-    assert "my_collection_assets" in icon_path
+    assert icon_path.startswith("assets/icons/")
     assert icon_path.endswith(".png")
-    assert os.path.exists(icon_path)
+    assert icon_path in assets
 
 
 def test_collection_autosave_writes_sidecar_file_and_clears_dirty(dungeon_widget, tmp_path):
-    main_path = tmp_path / "campaign.json"
+    main_path = tmp_path / "campaign.dmtcollection"
     dungeon_widget._collection_path = main_path
     dungeon_widget._collection_name = "Campaign"
     dungeon_widget._players_dungeon_id = dungeon_widget._active_dungeon_id
@@ -1289,10 +1309,11 @@ def test_collection_autosave_writes_sidecar_file_and_clears_dirty(dungeon_widget
 
     dungeon_widget._run_collection_autosave()
 
-    autosave_path = tmp_path / "campaign_autosave.json"
+    autosave_path = tmp_path / "campaign_autosave.dmtcollection"
     assert autosave_path.exists()
     assert dungeon_widget._collection_dirty is False
-    payload = json.loads(autosave_path.read_text(encoding="utf-8"))
+    payload = read_dmt_package_info(autosave_path)
+    assert isinstance(payload, dict)
     assert payload["players_dungeon_id"] == dungeon_widget._players_dungeon_id
     assert "local_player_profile_id" in payload
 
@@ -1303,7 +1324,7 @@ def test_collection_autosave_timer_uses_fifteen_second_interval(dungeon_widget):
 
 
 def test_collection_autosave_status_label_is_dm_only(dungeon_widget, tmp_path):
-    main_path = tmp_path / "campaign.json"
+    main_path = tmp_path / "campaign.dmtcollection"
     dungeon_widget._collection_path = main_path
     dungeon_widget._collection_name = "Campaign"
     dungeon_widget._players_dungeon_id = dungeon_widget._active_dungeon_id
@@ -2118,9 +2139,19 @@ def test_client_claim_result_materializes_item_document_for_item_id(monkeypatch,
 
 
 def test_loot_pool_displays_items_before_notes_with_icons(dungeon_widget, tmp_path):
-    item_path = tmp_path / "blade.json"
+    item_path = tmp_path / "blade.dmtitem"
     item_path.write_text(
-        '{"item_id":"blade_1","title":"Blade","rarity":"common","level":1}',
+        json.dumps(
+            {
+                "format": "dmtitem.v1",
+                "payload": {
+                    "item_id": "blade_1",
+                    "title": "Blade",
+                    "rarity": "common",
+                    "level": 1,
+                },
+            }
+        ),
         encoding="utf-8",
     )
     dungeon_widget._session_loot_pool = [
@@ -3136,7 +3167,7 @@ def test_player_link_character_sends_host_sync_command(monkeypatch, dungeon_widg
     assert isinstance(request_id, str) and request_id
 
 
-def test_join_snapshot_pushes_local_linked_character_overrides_to_host(monkeypatch, dungeon_widget, tmp_path):
+def test_join_snapshot_prompts_resolution_instead_of_auto_overwrite_push(monkeypatch, dungeon_widget, tmp_path):
     class _ClientStub:
         def __init__(self):
             self.calls = []
@@ -3197,18 +3228,10 @@ def test_join_snapshot_pushes_local_linked_character_overrides_to_host(monkeypat
     }
     dungeon_widget._on_client_snapshot_received(snapshot)
 
-    assert dungeon_widget._client_controller.calls
-    action, payload, request_id = dungeon_widget._client_controller.calls[-1]
-    assert action == "link_character_entity"
-    assert payload["entity_id"] == "entity-local-1"
-    assert payload["sheet_id"] == "sheet-1"
-    assert payload["inventory"]["inventory"] == ["item-join"]
-    assert payload["stats"]["ac"] == 15
-    assert isinstance(payload["character_id"], str) and payload["character_id"]
-    assert isinstance(request_id, str) and request_id
+    assert dungeon_widget._client_controller.calls == []
 
 
-def test_snapshot_prefers_existing_local_sheet_and_pushes_update_to_host(monkeypatch, dungeon_widget, tmp_path):
+def test_snapshot_conflict_replaces_local_sheet_without_auto_host_overwrite(monkeypatch, dungeon_widget, tmp_path):
     class _ClientStub:
         def __init__(self):
             self.calls = []
@@ -3277,16 +3300,22 @@ def test_snapshot_prefers_existing_local_sheet_and_pushes_update_to_host(monkeyp
     }
     dungeon_widget._on_client_snapshot_received(snapshot)
 
-    assert synced_from_host == []
-    assert dungeon_widget._client_controller.calls
-    action, payload, request_id = dungeon_widget._client_controller.calls[-1]
-    assert action == "link_character_entity"
-    assert payload["entity_id"] == "entity-local-1"
-    assert payload["sheet_id"] == "sheet-1"
-    assert payload["inventory"]["inventory"] == ["item-local"]
-    assert payload["stats"]["ac"] == 19
-    assert isinstance(payload["character_id"], str) and payload["character_id"]
-    assert isinstance(request_id, str) and request_id
+    assert synced_from_host == [
+        (
+            "sheet-1",
+            {
+                "inventory": ["item-host"],
+                "inventory_notes": "",
+                "equipment": {},
+                "gold": 0,
+                "silver": 0,
+                "copper": 0,
+            },
+            "Local Hero",
+            True,
+        )
+    ]
+    assert dungeon_widget._client_controller.calls == []
 
 
 def test_player_link_character_extracts_archive_when_runtime_pdf_missing(monkeypatch, dungeon_widget, tmp_path):
@@ -3516,15 +3545,20 @@ def test_extract_character_stats_uses_raw_pdf_field_fallback_when_reader_is_unav
     assert stats["hp"] == 23
 
 
-def test_extract_character_stats_from_user_test_pdf_if_available():
+def test_extract_character_stats_from_generated_pdf_fixture(tmp_path):
     from dungeon_applet import _extract_character_stats_from_pdf
 
-    pdf_path = Path(default_dnd_save_dir()) / "character_sheets" / "test.pdf"
-    if not pdf_path.exists():
-        pytest.skip("Local test character PDF is not available.")
+    pdf_path = tmp_path / "generated_stats_fixture.pdf"
+    pdf_path.write_bytes(
+        b"%PDF-1.4\n"
+        b"1 0 obj<</Subtype/Widget/T(CharacterName)/V(Test)>>endobj\n"
+        b"2 0 obj<</Subtype/Widget/T(AC)/V(18)>>endobj\n"
+        b"3 0 obj<</Subtype/Widget/T(HPMax)/V(31)>>endobj\n"
+        b"4 0 obj<</Subtype/Widget/T(HPCurrent)/V(19)>>endobj\n",
+    )
 
     stats = _extract_character_stats_from_pdf(str(pdf_path))
     assert str(stats.get("name") or "").strip().lower() == "test"
-    assert isinstance(stats.get("ac"), int)
-    assert isinstance(stats.get("hp_max"), int)
-    assert isinstance(stats.get("hp_current"), int)
+    assert stats.get("ac") == 18
+    assert stats.get("hp_max") == 31
+    assert stats.get("hp_current") == 19

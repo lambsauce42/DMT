@@ -67,13 +67,14 @@ from navigate_widget import (
 )
 from compact_nav_tree import CompactNavTree
 from npc_database import NPCDatabaseWidget
-from player_sheets import PlayerSheetsWidget
+from player_sheets import PlayerSheetsWidget, refresh_character_sheet_index_cache
 from session_creator import SessionCreatorWidget
 from terminal_logic import build_terminal_response
 from save_paths import dungeon_collections_dir, navigation_trash_path, clear_all_online_runtime_caches
 from ui.encounter_panel import EncounterPanel
 from ui.widgets import TerminalWidget
 
+COLLECTION_FILE_EXTENSION = ".dmtcollection"
 
 try:
     from PyQt6.QtSvg import QSvgRenderer
@@ -1667,7 +1668,7 @@ class HomeWidget(QWidget):
             self,
             "Select Dungeon Collection",
             str(base_dir),
-            "Dungeon Collection (*.json)",
+            f"Dungeon Collection (*{COLLECTION_FILE_EXTENSION})",
         )
         if not filename:
             return
@@ -1804,6 +1805,10 @@ def main() -> int:
 
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     clear_all_online_runtime_caches()
+    try:
+        refresh_character_sheet_index_cache()
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setApplicationName("DnD-AAT")
     app.setStyleSheet(DARK_STYLESHEET)

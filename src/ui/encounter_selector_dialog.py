@@ -4,7 +4,6 @@ with a fancy, themed selection window.
 """
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -26,10 +25,13 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect,
 )
 
+from dmt_package import read_dmt_package_info
 from save_paths import dnd_saves_dir
 
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icons"))
+ENCOUNTER_FILE_EXTENSION = ".dmtencounter"
+ENCOUNTER_FILE_FORMAT = "dmtencounter.v1"
 
 
 class EncounterCard(QFrame):
@@ -444,7 +446,10 @@ class EncounterSelectorDialog(QDialog):
         if not encounters_dir.exists():
             encounters_dir.mkdir(parents=True, exist_ok=True)
             
-        encounter_files = sorted(encounters_dir.glob("*.json"), key=lambda p: p.stem.lower())
+        encounter_files = sorted(
+            encounters_dir.glob(f"*{ENCOUNTER_FILE_EXTENSION}"),
+            key=lambda p: p.stem.lower(),
+        )
         
         if not encounter_files:
             self._empty_label.show()
@@ -454,15 +459,17 @@ class EncounterSelectorDialog(QDialog):
         
         for path in encounter_files:
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = read_dmt_package_info(path)
                 if not isinstance(data, dict):
+                    continue
+                if str(data.get("format") or "") != ENCOUNTER_FILE_FORMAT:
                     continue
                 card = EncounterCard(path, data, self._cards_container)
                 card.clicked.connect(self._on_card_clicked)
                 card.double_clicked.connect(self._on_card_double_clicked)
                 self._cards.append(card)
                 self._cards_layout.addWidget(card)
-            except (json.JSONDecodeError, OSError, TypeError, ValueError, AttributeError):
+            except (OSError, TypeError, ValueError, AttributeError):
                 # Skip malformed or unreadable files
                 continue
                 
@@ -494,7 +501,7 @@ class EncounterSelectorDialog(QDialog):
         if self._selected_path is None or not self._selected_path.exists():
             return None
         try:
-            payload = json.loads(self._selected_path.read_text(encoding="utf-8"))
+            payload = read_dmt_package_info(self._selected_path)
             return payload if isinstance(payload, dict) else None
-        except (json.JSONDecodeError, OSError):
+        except OSError:
             return None

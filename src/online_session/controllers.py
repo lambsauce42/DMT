@@ -22,6 +22,7 @@ _RETRYABLE_PLAYER_ACTIONS = {
     "claim_loot",
     "add_loot_from_inventory",
     "link_character_entity",
+    "resolve_linked_character_conflict",
     "sync_character_inventory",
     "initiative_update",
     "upload_icon",

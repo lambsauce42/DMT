@@ -47,8 +47,10 @@ from PyQt6.QtWidgets import (
     QSpinBox,
 )
 
+from dmt_package import read_dmt_package_info, write_dmt_package
 from navigate_widget import WORLD_DATA
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
+from unique_ids import generate_probabilistic_unique_id
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
@@ -65,8 +67,9 @@ from player_sheets import (
     sanitize_filename,
 )
 
-NPCS_DIR_NAME = "npc_database"
-NPCS_JSON_NAME = "npcs.json"
+NPCS_DIR_NAME = "npcs"
+NPCS_FILE_EXTENSION = ".dmtnpc"
+NPCS_FILE_FORMAT = "dmtnpc.v1"
 NPCS_TRASH_NAME = "npc_trash.json"
 
 NPC_SORT_OPTIONS = [
@@ -86,7 +89,12 @@ def npc_storage_dir() -> Path:
 
 
 def npc_storage_path() -> Path:
-    return npc_storage_dir() / NPCS_JSON_NAME
+    return npc_storage_dir() / "npcs.dmtindex"
+
+
+def npc_file_path(npc_id: str) -> Path:
+    safe_name = sanitize_filename(str(npc_id or "").strip()) or "npc"
+    return npc_storage_dir() / f"{safe_name}{NPCS_FILE_EXTENSION}"
 
 
 def npc_trash_path() -> Path:
@@ -856,27 +864,55 @@ class NPCDatabaseWidget(QWidget):
         return label
 
     def _load_entries(self) -> List[NPCEntry]:
-        path = self._storage_path
-        if not path.exists():
-            return []
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return []
-        if not isinstance(raw, list):
-            return []
         entries: List[NPCEntry] = []
-        for payload in raw:
+        for path in sorted(npc_storage_dir().glob(f"*{NPCS_FILE_EXTENSION}")):
+            info = read_dmt_package_info(path)
+            if not isinstance(info, dict):
+                continue
+            if str(info.get("format") or "") != NPCS_FILE_FORMAT:
+                continue
+            payload = info.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if not str(payload.get("id") or "").strip():
+                payload = dict(payload)
+                payload["id"] = str(info.get("object_id") or "").strip()
             entry = entry_from_dict(payload)
             if entry:
                 entries.append(entry)
         return entries
 
     def _save_entries(self) -> None:
-        path = self._storage_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [entry_to_dict(entry) for entry in self._manager.entries]
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        root = npc_storage_dir()
+        root.mkdir(parents=True, exist_ok=True)
+        expected: set[Path] = set()
+        for entry in self._manager.entries:
+            if not str(entry.id or "").strip():
+                entry.id = generate_probabilistic_unique_id("npc")
+            path = npc_file_path(entry.id)
+            expected.add(path.resolve())
+            write_dmt_package(
+                path,
+                info={
+                    "format": NPCS_FILE_FORMAT,
+                    "object_type": "npc",
+                    "object_id": str(entry.id),
+                    "name": str(entry.name),
+                    "updated_at": _now_timestamp(),
+                    "payload": entry_to_dict(entry),
+                },
+            )
+        for existing in root.glob(f"*{NPCS_FILE_EXTENSION}"):
+            try:
+                resolved = existing.resolve()
+            except Exception:
+                resolved = existing
+            if resolved in expected:
+                continue
+            try:
+                existing.unlink()
+            except Exception:
+                continue
 
     def _on_world_changed(self) -> None:
         selected_campaign = self._refresh_campaigns()
@@ -1110,16 +1146,14 @@ class NPCDatabaseWidget(QWidget):
                 return
 
     def _make_unique_id(self, base_id: str) -> str:
-        base = base_id or "npc"
+        base = sanitize_filename(base_id or "npc")
         existing = {entry.id for entry in self._manager.entries}
-        if base not in existing:
+        if base and base not in existing:
             return base
-        suffix = 1
         while True:
-            candidate = f"{base}_{suffix}"
+            candidate = generate_probabilistic_unique_id(base or "npc")
             if candidate not in existing:
                 return candidate
-            suffix += 1
 
     def _show_placeholder(self, title: str) -> None:
         QMessageBox.information(self, "Placeholder", f"{title} is not implemented yet.")

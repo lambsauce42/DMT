@@ -1282,7 +1282,7 @@ class ItemCreatorWidget(QWidget):
 
     def _load_item(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Item", self._base_save_dir, "DMT Item (*.dmtitem);;JSON (*.json)"
+            self, "Load Item", self._base_save_dir, "DMT Item (*.dmtitem)"
         )
         if not path:
             return

@@ -40,23 +40,6 @@ class TestSavePaths(unittest.TestCase):
         self.assertEqual(Path(save_dir), Path("/home/user/Documents/DMT"))
 
     @patch("save_paths._in_test_env", return_value=False)
-    @patch("os.path.expanduser")
-    def test_migrate_old_data_merges_when_target_exists(self, mock_expanduser, _mock_in_test):
-        with tempfile.TemporaryDirectory() as td:
-            home = Path(td)
-            mock_expanduser.return_value = str(home)
-            old_dir = home / "Documents" / "AIOHub" / "DND-AAT"
-            new_dir = home / "Documents" / "DMT"
-            old_dir.mkdir(parents=True, exist_ok=True)
-            new_dir.mkdir(parents=True, exist_ok=True)
-            (old_dir / "legacy.txt").write_text("legacy", encoding="utf-8")
-
-            save_paths._migrate_old_data(new_dir)
-
-            self.assertFalse(old_dir.exists())
-            self.assertEqual((new_dir / "legacy.txt").read_text(encoding="utf-8"), "legacy")
-
-    @patch("save_paths._in_test_env", return_value=False)
     @patch("save_paths.default_dnd_save_dir")
     def test_derived_paths(self, mock_base, _mock_in_test):
         """Test paths derived from the canonical base save directory."""
@@ -127,6 +110,19 @@ class TestSavePaths(unittest.TestCase):
 
             self.assertFalse(icon_cache.exists())
             self.assertFalse(loot_cache.exists())
+
+    @patch("save_paths.default_dnd_save_dir")
+    def test_clear_all_online_runtime_caches_removes_root_cache_dir(self, mock_base):
+        with tempfile.TemporaryDirectory() as td:
+            mock_base.return_value = td
+            root_cache = Path(td) / "cache"
+            logs_cache = root_cache / "logs"
+            logs_cache.mkdir(parents=True, exist_ok=True)
+            (logs_cache / "online_debug.log").write_text("debug", encoding="utf-8")
+
+            save_paths.clear_all_online_runtime_caches()
+
+            self.assertFalse(root_cache.exists())
 
     def test_collection_icon_assets_dir_is_related_to_collection_file(self):
         path = Path("My Collection.json")

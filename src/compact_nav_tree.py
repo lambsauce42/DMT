@@ -16,6 +16,7 @@ import copy
 import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
@@ -48,6 +49,7 @@ except Exception:
     SVG_AVAILABLE = False
 
 from save_paths import trash_json_path, navigation_json_path
+from navigation_storage import load_navigation_world_data, save_navigation_world_data
 
 # Icons directory
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
@@ -104,16 +106,17 @@ def _list_icon_paths() -> list[str]:
 
 # Default world data structure
 WORLD_DATA: list[dict] = []
+NAVIGATION_PATH = str(navigation_json_path())
+
+
+def _navigation_base_dir() -> Path:
+    return Path(NAVIGATION_PATH).expanduser().resolve().parent
 
 
 def load_navigation_data() -> list:
     """Load navigation data from persistent storage."""
-    path = navigation_json_path()
-    if not os.path.exists(path):
-        return WORLD_DATA
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        data = load_navigation_world_data(base_dir=_navigation_base_dir())
         return data if isinstance(data, list) else WORLD_DATA
     except Exception:
         return WORLD_DATA
@@ -121,11 +124,8 @@ def load_navigation_data() -> list:
 
 def save_navigation_data(data: list) -> None:
     """Save navigation data to persistent storage."""
-    path = navigation_json_path()
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
+        save_navigation_world_data(data if isinstance(data, list) else [], base_dir=_navigation_base_dir())
     except Exception:
         pass
 

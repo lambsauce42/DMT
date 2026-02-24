@@ -283,15 +283,15 @@ def default_sheet_save_dir() -> str:
 
 
 def character_sheets_dir() -> Path:
-    return Path(default_sheet_save_dir()) / "character_sheets"
+    return Path(default_sheet_save_dir()) / "characters"
 
 
 def character_sheets_trash_dir() -> Path:
-    return Path(default_sheet_save_dir()) / "trash" / "character_sheets"
+    return Path(default_sheet_save_dir()) / "trash" / "characters"
 
 
 def character_sheet_cache_dir() -> Path:
-    return Path(default_sheet_save_dir()) / "cache" / "character_sheets"
+    return Path(default_sheet_save_dir()) / "cache" / "characters"
 
 
 class PlayerSheetEvents(QObject):
@@ -1099,11 +1099,15 @@ def sanitize_filename(name: str) -> str:
 
 
 def player_sheets_storage_path() -> Path:
-    return player_sheets_storage_dir() / "character_sheets.json"
+    return player_sheets_cache_dir() / "character_sheets.json"
 
 
 def player_sheets_storage_dir() -> Path:
-    return Path(default_sheet_save_dir()) / "character_sheets"
+    return Path(default_sheet_save_dir()) / "characters"
+
+
+def player_sheets_cache_dir() -> Path:
+    return Path(default_sheet_save_dir()) / "cache" / "characters"
 
 
 def entry_to_dict(entry: PlayerSheetEntry) -> dict:
@@ -1214,10 +1218,81 @@ def _entry_inventory_payload(entry: PlayerSheetEntry) -> dict:
     )
 
 
+def _entry_meta_payload(entry: PlayerSheetEntry, *, created_at: str | None = None) -> dict:
+    payload: dict[str, object] = {
+        "name": str(entry.name or "").strip(),
+        "sheet_id": sheet_id_for_entry(entry),
+        "world": str(entry.world or "").strip(),
+        "campaign": str(entry.campaign or "").strip(),
+        "group": str(entry.group or "").strip(),
+        "tags": [str(tag).strip() for tag in entry.tags if str(tag).strip()],
+        "created_at": str(created_at or "").strip(),
+    }
+    return payload
+
+
+def _apply_entry_meta(entry: PlayerSheetEntry, meta: dict) -> None:
+    if not isinstance(meta, dict):
+        return
+
+    name = str(meta.get("name") or "").strip()
+    if name:
+        entry.name = name
+
+    if "world" in meta:
+        world = str(meta.get("world") or "").strip()
+        entry.world = world or None
+    if "campaign" in meta:
+        campaign = str(meta.get("campaign") or "").strip()
+        entry.campaign = campaign or None
+    if "group" in meta:
+        group = str(meta.get("group") or "").strip()
+        entry.group = group or None
+    if "tags" in meta:
+        raw_tags = meta.get("tags")
+        if isinstance(raw_tags, list):
+            entry.tags = normalize_tags(
+                [str(tag).strip() for tag in raw_tags if str(tag).strip()]
+            )
+
+
+def _entry_from_archive(archive_path: Path) -> Optional[PlayerSheetEntry]:
+    archive_meta = read_character_meta(archive_path)
+    sheet_id = sanitize_filename(
+        str(archive_meta.get("sheet_id") or archive_path.stem)
+    )
+    if not sheet_id:
+        return None
+    name = str(archive_meta.get("name") or sheet_id).strip() or sheet_id
+    entry = PlayerSheetEntry(
+        name=name,
+        pdf_path=str(character_sheet_pdf_path(sheet_id)),
+        archive_path=str(archive_path),
+    )
+    _apply_entry_meta(entry, archive_meta)
+    ensure_entry_archive(entry)
+    return entry
+
+
+def _scan_archive_entries() -> List[PlayerSheetEntry]:
+    root = character_sheets_dir()
+    if not root.exists():
+        return []
+    entries: List[PlayerSheetEntry] = []
+    for archive_path in sorted(root.glob(f"*{ARCHIVE_EXTENSION}")):
+        entry = _entry_from_archive(archive_path)
+        if entry is None:
+            continue
+        entries.append(entry)
+    return entries
+
+
 def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
     archive_path = _entry_archive_path(entry)
     if archive_path.exists():
         entry.archive_path = str(archive_path)
+        archive_meta = read_character_meta(archive_path)
+        _apply_entry_meta(entry, archive_meta)
         if not entry.pdf_path or not Path(entry.pdf_path).exists():
             target_pdf = character_sheet_pdf_path(sheet_id_for_entry(entry))
             if extract_character_pdf(archive_path, target_pdf):
@@ -1248,11 +1323,10 @@ def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
             archive_path,
             pdf_path=source_pdf,
             inventory_payload=_entry_inventory_payload(entry),
-            meta={
-                "name": entry.name,
-                "sheet_id": sheet_id_for_entry(entry),
-                "created_at": read_character_meta(archive_path).get("created_at"),
-            },
+            meta=_entry_meta_payload(
+                entry,
+                created_at=read_character_meta(archive_path).get("created_at"),
+            ),
         )
     except Exception:
         logger.exception("Failed to create character archive for %s", entry.name)
@@ -1278,11 +1352,7 @@ def sync_entry_archive(entry: PlayerSheetEntry, pdf_source: str | None = None) -
             archive_path,
             pdf_path=source,
             inventory_payload=_entry_inventory_payload(entry),
-            meta={
-                "name": entry.name,
-                "sheet_id": sheet_id_for_entry(entry),
-                "created_at": created_at,
-            },
+            meta=_entry_meta_payload(entry, created_at=created_at),
         )
     except Exception:
         logger.exception("Failed to sync character archive for %s", entry.name)
@@ -1305,41 +1375,61 @@ def _is_legacy_mock_entry(entry: PlayerSheetEntry) -> bool:
 
 
 def load_entries_from_storage() -> List[PlayerSheetEntry]:
-    """Load index entries and opportunistically migrate legacy PDF-only rows to .dmtchar."""
+    """Load character rows from cache index and rebuild from .dmtchar archives when needed."""
     path = player_sheets_storage_path()
-    if not path.exists():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if not isinstance(raw, list):
-        return []
     entries: List[PlayerSheetEntry] = []
     removed_legacy_mock_entry = False
-    for payload in raw:
-        entry = entry_from_dict(payload)
-        if entry is None:
-            continue
-        if _is_legacy_mock_entry(entry):
-            removed_legacy_mock_entry = True
-            continue
-        ensure_entry_archive(entry)
-        entries.append(entry)
-    if removed_legacy_mock_entry:
+
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            raw = []
+        if isinstance(raw, list):
+            for payload in raw:
+                entry = entry_from_dict(payload)
+                if entry is None:
+                    continue
+                if _is_legacy_mock_entry(entry):
+                    removed_legacy_mock_entry = True
+                    continue
+                ensure_entry_archive(entry)
+                entries.append(entry)
+
+    archive_entries = _scan_archive_entries()
+    if archive_entries:
+        by_sheet_id: dict[str, PlayerSheetEntry] = {}
+        for entry in entries:
+            by_sheet_id[sheet_id_for_entry(entry)] = entry
+        for entry in archive_entries:
+            by_sheet_id[sheet_id_for_entry(entry)] = entry
+        entries = sorted(
+            by_sheet_id.values(),
+            key=lambda row: (str(row.name or "").casefold(), str(row.archive_path or "")),
+        )
+
+    if removed_legacy_mock_entry or archive_entries or not path.exists():
         try:
             save_entries_to_storage(entries)
         except Exception:
-            logger.exception("Failed to persist legacy mock character cleanup.")
+            logger.exception("Failed to persist character sheet cache index.")
     return entries
 
 
 def save_entries_to_storage(entries: List[PlayerSheetEntry]) -> None:
-    """Persist index metadata to character_sheets.json (archive remains canonical payload)."""
+    """Persist character sheet list metadata to cache (archives remain canonical payload)."""
     path = player_sheets_storage_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = [entry_to_dict(entry) for entry in entries]
+    payload: list[dict] = []
+    for entry in entries:
+        sync_entry_archive(entry)
+        payload.append(entry_to_dict(entry))
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def refresh_character_sheet_index_cache() -> None:
+    entries = _scan_archive_entries()
+    save_entries_to_storage(entries)
 
 
 def list_character_link_targets() -> List[PlayerSheetEntry]:

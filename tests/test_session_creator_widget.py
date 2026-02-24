@@ -58,6 +58,14 @@ class SessionCreatorWidgetTests(unittest.TestCase):
             sessions.append(json.loads(path.read_text(encoding="utf-8")))
         return sessions
 
+    @staticmethod
+    def _write_sessions_to_dir(storage_root: Path, sessions: list[dict]) -> None:
+        storage_root.mkdir(parents=True, exist_ok=True)
+        for session_payload in sessions:
+            session_id = str(session_payload.get("id") or "session")
+            path = storage_root / f"{session_id}.dmtsession"
+            path.write_text(json.dumps(session_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def test_new_session_inline_name_edit(self) -> None:
         widget = SessionCreatorWidget()
         self.addCleanup(widget.close)
@@ -107,7 +115,7 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
     def test_plan_text_persists_without_imported_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            storage_path = Path(tmp_dir) / "sessions.json"
+            storage_path = Path(tmp_dir) / "sessions.dmtindex"
             original_path_func = session_creator.session_storage_path
             session_creator.session_storage_path = lambda: storage_path
             try:
@@ -219,23 +227,21 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
     def test_auto_selects_most_recent_session_on_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            storage_path = Path(tmp_dir) / "sessions.json"
-            storage_path.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "old_session",
-                            "name": "Old Session",
-                            "session_date": "2026-01-01",
-                        },
-                        {
-                            "id": "new_session",
-                            "name": "New Session",
-                            "session_date": "2026-02-01",
-                        },
-                    ]
-                ),
-                encoding="utf-8",
+            storage_path = Path(tmp_dir) / "sessions.dmtindex"
+            self._write_sessions_to_dir(
+                Path(tmp_dir),
+                [
+                    {
+                        "id": "old_session",
+                        "name": "Old Session",
+                        "session_date": "2026-01-01",
+                    },
+                    {
+                        "id": "new_session",
+                        "name": "New Session",
+                        "session_date": "2026-02-01",
+                    },
+                ],
             )
 
             original_path_func = session_creator.session_storage_path
@@ -257,25 +263,23 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
     def test_linked_context_filters_sessions_by_restrictions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            storage_path = Path(tmp_dir) / "sessions.json"
-            storage_path.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "session_eld",
-                            "name": "Eldervale Session",
-                            "session_date": "2026-02-05",
-                            "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
-                        },
-                        {
-                            "id": "session_storm",
-                            "name": "Stormreach Session",
-                            "session_date": "2026-02-04",
-                            "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
-                        },
-                    ]
-                ),
-                encoding="utf-8",
+            storage_path = Path(tmp_dir) / "sessions.dmtindex"
+            self._write_sessions_to_dir(
+                Path(tmp_dir),
+                [
+                    {
+                        "id": "session_eld",
+                        "name": "Eldervale Session",
+                        "session_date": "2026-02-05",
+                        "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
+                    },
+                    {
+                        "id": "session_storm",
+                        "name": "Stormreach Session",
+                        "session_date": "2026-02-04",
+                        "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
+                    },
+                ],
             )
 
             original_path_func = session_creator.session_storage_path
@@ -303,25 +307,23 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
     def test_context_filtering_does_not_overwrite_session_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            storage_path = Path(tmp_dir) / "sessions.json"
-            storage_path.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "session_eld",
-                            "name": "Eldervale Session",
-                            "session_date": "2026-02-05",
-                            "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
-                        },
-                        {
-                            "id": "session_storm",
-                            "name": "Stormreach Session",
-                            "session_date": "2026-02-06",
-                            "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
-                        },
-                    ]
-                ),
-                encoding="utf-8",
+            storage_path = Path(tmp_dir) / "sessions.dmtindex"
+            self._write_sessions_to_dir(
+                Path(tmp_dir),
+                [
+                    {
+                        "id": "session_eld",
+                        "name": "Eldervale Session",
+                        "session_date": "2026-02-05",
+                        "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
+                    },
+                    {
+                        "id": "session_storm",
+                        "name": "Stormreach Session",
+                        "session_date": "2026-02-06",
+                        "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
+                    },
+                ],
             )
 
             original_path_func = session_creator.session_storage_path
@@ -338,7 +340,7 @@ class SessionCreatorWidgetTests(unittest.TestCase):
                 widget.world_combo.setCurrentIndex(eld_index)
                 self.assertEqual(widget.session_list.count(), 1)
 
-                payload = json.loads(storage_path.read_text(encoding="utf-8"))
+                payload = self._saved_sessions_in_dir(Path(tmp_dir))
                 storm_entry = next(entry for entry in payload if entry["id"] == "session_storm")
                 self.assertEqual(
                     storm_entry.get("group_ids"),
@@ -349,19 +351,17 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
     def test_save_and_load_session_preserves_linked_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            storage_path = Path(tmp_dir) / "sessions.json"
-            storage_path.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "seed_session",
-                            "name": "Seed Session",
-                            "session_date": "2026-01-01",
-                            "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
-                        }
-                    ]
-                ),
-                encoding="utf-8",
+            storage_path = Path(tmp_dir) / "sessions.dmtindex"
+            self._write_sessions_to_dir(
+                Path(tmp_dir),
+                [
+                    {
+                        "id": "seed_session",
+                        "name": "Seed Session",
+                        "session_date": "2026-01-01",
+                        "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
+                    }
+                ],
             )
             original_path_func = session_creator.session_storage_path
             session_creator.session_storage_path = lambda: storage_path
@@ -411,31 +411,29 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
     def test_loading_session_applies_linked_context_restrictions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            storage_path = Path(tmp_dir) / "sessions.json"
-            storage_path.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "session_eld_a",
-                            "name": "Eldervale A",
-                            "session_date": "2026-02-05",
-                            "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
-                        },
-                        {
-                            "id": "session_eld_b",
-                            "name": "Eldervale B",
-                            "session_date": "2026-02-04",
-                            "group_ids": ["Eldervale::Ashen Crown::The Gilded Tide"],
-                        },
-                        {
-                            "id": "session_storm",
-                            "name": "Stormreach",
-                            "session_date": "2026-02-03",
-                            "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
-                        },
-                    ]
-                ),
-                encoding="utf-8",
+            storage_path = Path(tmp_dir) / "sessions.dmtindex"
+            self._write_sessions_to_dir(
+                Path(tmp_dir),
+                [
+                    {
+                        "id": "session_eld_a",
+                        "name": "Eldervale A",
+                        "session_date": "2026-02-05",
+                        "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
+                    },
+                    {
+                        "id": "session_eld_b",
+                        "name": "Eldervale B",
+                        "session_date": "2026-02-04",
+                        "group_ids": ["Eldervale::Ashen Crown::The Gilded Tide"],
+                    },
+                    {
+                        "id": "session_storm",
+                        "name": "Stormreach",
+                        "session_date": "2026-02-03",
+                        "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
+                    },
+                ],
             )
 
             original_path_func = session_creator.session_storage_path

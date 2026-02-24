@@ -47,20 +47,19 @@ def test_build_document_with_embedded_icon_round_trip(tmp_path: Path) -> None:
     assert embedded_icon_path.suffix == ".png"
 
 
-def test_list_item_file_paths_includes_dmtitem_and_json(tmp_path: Path) -> None:
+def test_list_item_file_paths_includes_only_dmtitem(tmp_path: Path) -> None:
     root = tmp_path / "items"
     root.mkdir(parents=True, exist_ok=True)
-    json_path = root / "b_item.json"
     dmtitem_path = root / "a_item.dmtitem"
-    json_path.write_text("{}", encoding="utf-8")
+    (root / "b_item.json").write_text("{}", encoding="utf-8")
     dmtitem_path.write_text("{}", encoding="utf-8")
 
     files = list_item_file_paths(root)
     names = [path.name for path in files]
-    assert names == ["a_item.dmtitem", "b_item.json"]
+    assert names == ["a_item.dmtitem"]
 
 
-def test_load_item_payload_supports_legacy_json(tmp_path: Path) -> None:
+def test_load_item_payload_rejects_non_dmtitem_format(tmp_path: Path) -> None:
     legacy_path = tmp_path / "legacy.json"
     legacy_path.write_text(
         json.dumps({"title": "Legacy Item", "rarity": "rare", "level": 2}),
@@ -68,6 +67,4 @@ def test_load_item_payload_supports_legacy_json(tmp_path: Path) -> None:
     )
 
     loaded = load_item_payload(legacy_path)
-    assert isinstance(loaded, dict)
-    assert loaded["title"] == "Legacy Item"
-    assert loaded["rarity"] == "rare"
+    assert loaded is None

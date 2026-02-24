@@ -31,7 +31,7 @@ def test_character_sheet_pdf_runtime_path_uses_cache_dir(
 ) -> None:
     monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
     runtime_pdf = player_sheets.character_sheet_pdf_path("hero")
-    assert runtime_pdf == tmp_path / "cache" / "character_sheets" / "hero.pdf"
+    assert runtime_pdf == tmp_path / "cache" / "characters" / "hero.pdf"
     assert runtime_pdf.parent != player_sheets.character_sheets_dir()
 
 
@@ -48,6 +48,70 @@ def test_sync_entry_archive_does_not_create_sidecar_pdf_in_character_sheets(
     assert not sidecar_pdf.exists()
     assert Path(entry.archive_path).exists()
 
+
+def test_save_entries_writes_index_to_cache_not_save_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    source_pdf = tmp_path / "source.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4 source")
+    entry = player_sheets.PlayerSheetEntry(name="Hero", pdf_path=str(source_pdf))
+    assert player_sheets.ensure_entry_archive(entry)
+
+    player_sheets.save_entries_to_storage([entry])
+
+    cache_index = tmp_path / "cache" / "characters" / "character_sheets.json"
+    root_index = tmp_path / "characters" / "character_sheets.json"
+    assert cache_index.exists()
+    assert not root_index.exists()
+
+
+def test_load_entries_rebuilds_cache_index_from_archives_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    source_pdf = tmp_path / "source.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4 source")
+    sheet_id = "Hero"
+    archive_path = player_sheets.character_sheet_archive_path(sheet_id)
+    write_character_archive(
+        archive_path,
+        pdf_path=source_pdf,
+        inventory_payload={
+            "inventory": ["rope"],
+            "inventory_notes": "from archive",
+            "equipment": {"head": "helm_1"},
+            "gold": 5,
+            "silver": 1,
+            "copper": 0,
+        },
+        meta={
+            "name": "Hero",
+            "sheet_id": sheet_id,
+            "world": "Eldervale",
+            "campaign": "Ashen Crown",
+            "group": "Silver Lances",
+            "tags": ["fighter", "tank"],
+        },
+    )
+
+    cache_index = tmp_path / "cache" / "characters" / "character_sheets.json"
+    root_index = tmp_path / "characters" / "character_sheets.json"
+    assert not cache_index.exists()
+    assert not root_index.exists()
+
+    entries = player_sheets.load_entries_from_storage()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert player_sheets.sheet_id_for_entry(entry) == sheet_id
+    assert entry.name == "Hero"
+    assert entry.world == "Eldervale"
+    assert entry.campaign == "Ashen Crown"
+    assert entry.group == "Silver Lances"
+    assert sorted(entry.tags) == ["fighter", "tank"]
+    assert Path(entry.archive_path).exists()
+    assert cache_index.exists()
+    assert not root_index.exists()
 
 def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> None:
     source_pdf = tmp_path / "sheet.pdf"
@@ -151,7 +215,7 @@ def test_legacy_character_sheet_entry_migrates_to_archive(
     persisted = json.loads(storage_path.read_text(encoding="utf-8"))
     assert persisted and isinstance(persisted, list)
     row = persisted[0]
-    assert row["pdf_path"] == str(legacy_pdf)
+    assert row["pdf_path"] == str(tmp_path / "cache" / "characters" / "Legacy_Hero.pdf")
     assert row["archive_path"] == str(archive_path)
 
 

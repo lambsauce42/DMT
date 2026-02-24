@@ -10,9 +10,8 @@ from typing import Optional
 from save_paths import dnd_saves_dir
 
 ITEM_FILE_EXTENSION = ".dmtitem"
-LEGACY_ITEM_FILE_EXTENSION = ".json"
 ITEM_FILE_FORMAT = "dmtitem.v1"
-ITEM_FILE_PATTERNS = ("*.dmtitem", "*.json")
+ITEM_FILE_PATTERNS = ("*.dmtitem",)
 
 _ITEM_ICON_DIRS = (
     Path(__file__).resolve().parent.parent / "assets" / "itemicons",
@@ -122,7 +121,7 @@ def load_item_payload(path: Path) -> Optional[dict]:
         return None
 
     if str(data.get("format") or "").strip().lower() != ITEM_FILE_FORMAT:
-        return data
+        return None
 
     payload = data.get("payload")
     if not isinstance(payload, dict):

@@ -18,36 +18,7 @@ def _in_test_env() -> bool:
     return "pytest" in sys.modules
 
 
-def _migrate_old_data(new_dir: Path) -> None:
-    """Migrates old DND-AAT and AIOHub data to the new DMT directory if they exist."""
-    if _in_test_env():
-        return
-        
-    home = os.path.expanduser("~")
-    migration_sources = [
-        ("Documents", "AIOHub", "DND-AAT"),
-        ("documents", "AIOHub", "DND-AAT"),
-        ("Documents", "AIOHub", "DMT"),
-        ("documents", "AIOHub", "DMT"),
-    ]
-    
-    for parts in migration_sources:
-        old_dir = Path(home).joinpath(*parts)
-        if old_dir.exists() and old_dir.resolve() != new_dir.resolve():
-            try:
-                new_dir.parent.mkdir(parents=True, exist_ok=True)
-                if new_dir.exists():
-                    if new_dir.is_dir():
-                        shutil.copytree(old_dir, new_dir, dirs_exist_ok=True)
-                        shutil.rmtree(old_dir, ignore_errors=True)
-                        print(f"Merged data from {old_dir} into {new_dir}")
-                    else:
-                        print(f"Failed to migrate data: target exists and is not a directory ({new_dir})")
-                else:
-                    shutil.move(str(old_dir), str(new_dir))
-                    print(f"Migrated data from {old_dir} to {new_dir}")
-            except Exception as e:
-                print(f"Failed to migrate data from {old_dir}: {e}")
+
 
 
 def default_dnd_save_dir() -> str:
@@ -57,9 +28,6 @@ def default_dnd_save_dir() -> str:
     home = os.path.expanduser("~")
     primary = Path(home).joinpath(*DEFAULT_SAVE_DIR_PARTS)
     fallback = Path(home).joinpath(*DEFAULT_SAVE_DIR_FALLBACK_PARTS)
-    
-    # Check for migration
-    _migrate_old_data(primary)
     
     if os.path.exists(os.path.join(home, DEFAULT_SAVE_DIR_PARTS[0])):
         return str(primary)
@@ -73,7 +41,7 @@ def _legacy_nested_dnd_dir(base_dir: Path) -> Path:
 def _root_dnd_data_seems_empty(base_dir: Path) -> bool:
     markers = (
         "items",
-        "navigation.json",
+        "navigation_objects",
         "trash.json",
         "dungeon_collections",
         "encounters",
@@ -161,6 +129,10 @@ def online_loot_item_cache_root() -> Path:
     return dnd_saves_dir() / "cache" / "online_loot_items"
 
 
+def runtime_cache_root() -> Path:
+    return dnd_saves_dir() / "cache"
+
+
 def online_loot_item_cache_dir(session_id: str) -> Path:
     session_key = _safe_component(str(session_id or ""), "local")
     return online_loot_item_cache_root() / session_key
@@ -239,6 +211,17 @@ def clear_all_online_loot_item_caches() -> None:
         return
 
 
+def clear_runtime_cache_root() -> None:
+    root = runtime_cache_root()
+    if not root.exists():
+        return
+    try:
+        shutil.rmtree(root, ignore_errors=True)
+    except Exception:
+        return
+
+
 def clear_all_online_runtime_caches() -> None:
     clear_all_online_icon_caches()
     clear_all_online_loot_item_caches()
+    clear_runtime_cache_root()

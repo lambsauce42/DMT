@@ -27,23 +27,21 @@ class NavigateWidgetTests(unittest.TestCase):
         self.original_path = navigate_widget.NAVIGATION_PATH
         self.temp_dir = tempfile.TemporaryDirectory()
         navigate_widget.NAVIGATION_PATH = os.path.join(self.temp_dir.name, "nav.json")
-        with open(navigate_widget.NAVIGATION_PATH, "w", encoding="utf-8") as handle:
-            json.dump(
-                [
-                    {
-                        "name": "World A",
-                        "campaigns": [
-                            {
-                                "name": "Campaign A",
-                                "groups": ["Group A"],
-                            }
-                        ],
-                    }
-                ],
-                handle,
-                ensure_ascii=False,
-                indent=2,
-            )
+        navigate_widget.save_navigation_data(
+            [
+                {
+                    "name": "World A",
+                    "icon": "",
+                    "campaigns": [
+                        {
+                            "name": "Campaign A",
+                            "icon": "",
+                            "groups": [{"name": "Group A", "icon": ""}],
+                        }
+                    ],
+                }
+            ]
+        )
 
     def tearDown(self) -> None:
         navigate_widget.NAVIGATION_PATH = self.original_path

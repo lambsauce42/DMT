@@ -5,7 +5,7 @@ import hashlib
 import os
 import json
 import math
-import platform
+import sys
 import time
 import re
 import uuid
@@ -118,8 +118,8 @@ from dungeon_items import EntityItem, FogItem
 from ui.widgets import PlusMinusSpinBox
 from online_session.authz import authorize_command
 from online_session.controllers import ClientSessionController, HostSessionController
-from online_session.journal import JournalEntry, PlayerUndoJournal
 from online_session.types import OnlineRole
+from dmt_package import list_dmt_package_assets, read_dmt_package_asset, read_dmt_package_info, write_dmt_package
 from save_paths import (
     default_dnd_save_dir,
     dnd_saves_dir,
@@ -139,6 +139,7 @@ from item_file_format import (
     list_item_file_paths,
     load_item_payload,
 )
+from unique_ids import generate_probabilistic_unique_id, machine_entropy_string
 
 class ToolType(Enum):
     SELECT = auto()
@@ -164,6 +165,8 @@ INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 ONLINE_DEBUG_LOG_FILENAME = "dmt_online_debug.log"
 COLLECTION_AUTOSAVE_SUFFIX = "_autosave"
 COLLECTION_AUTOSAVE_INTERVAL_MS = 15000
+COLLECTION_FILE_EXTENSION = ".dmtcollection"
+COLLECTION_FILE_FORMAT = "dmtcollection.v1"
 LOCAL_DUNGEON_PROFILE_FILENAME = "dungeon_profile.json"
 FOG_OVERLAY_Z = 200.0
 
@@ -174,29 +177,20 @@ def _sanitize_filename(name: str, fallback: str = "dungeon_collection") -> str:
     return cleaned or fallback
 
 
+def _in_test_env() -> bool:
+    if os.environ.get("DMT_TEST_MODE") == "1":
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    return "pytest" in sys.modules
+
+
 def _machine_entropy_string() -> str:
-    parts = [
-        os.environ.get("COMPUTERNAME", ""),
-        os.environ.get("HOSTNAME", ""),
-        os.environ.get("USERNAME", ""),
-        os.environ.get("USER", ""),
-        platform.node(),
-        platform.system(),
-        platform.release(),
-        platform.machine(),
-    ]
-    return "|".join(str(value or "").strip() for value in parts if str(value or "").strip())
+    return machine_entropy_string()
 
 
 def _generate_probabilistic_unique_id(prefix: str) -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    machine_entropy = _machine_entropy_string()
-    random_entropy = f"{uuid.uuid4().hex}{uuid.uuid4().hex}"
-    digest = hashlib.sha256(
-        f"{prefix}|{timestamp}|{machine_entropy}|{random_entropy}".encode("utf-8")
-    ).hexdigest()[:24]
-    safe_prefix = re.sub(r"[^a-z0-9_]+", "", str(prefix or "id").strip().lower()) or "id"
-    return f"{safe_prefix}_{timestamp}_{digest}_{random_entropy[:16]}"
+    return generate_probabilistic_unique_id(prefix)
 
 
 def _extract_character_stats_from_pdf(pdf_path: str) -> dict:
@@ -4173,6 +4167,8 @@ class DungeonAppletWidget(QWidget):
         self._player_connection_ready: bool = False
         self._suppress_external_inventory_forward = False
         self._online_inventory_sync_fingerprints: dict[str, str] = {}
+        self._pending_link_conflicts: dict[str, dict] = {}
+        self._active_link_conflict_prompt_key: str = ""
         self._debug_instance_id: str = uuid.uuid4().hex[:8]
         self._debug_log_enabled: bool = str(
             os.environ.get("DMT_ONLINE_DEBUG_LOG", "0")
@@ -4182,9 +4178,9 @@ class DungeonAppletWidget(QWidget):
         self._suppress_network_sync = False
         self._suppress_ping_sync = False
         self._suppress_remote_apply = False
-        self._player_undo_journal = PlayerUndoJournal()
         self._view_mode = "dm"
         self._collection_name = "Dungeon Collection"
+        self._collection_id = generate_probabilistic_unique_id("collection")
         self._collection_path: Path | None = None
         self._collection_meta_dirty = False
         self._collection_dirty = False
@@ -5264,6 +5260,9 @@ class DungeonAppletWidget(QWidget):
         entry: dict,
         resolved_path: Path | None,
     ) -> Path | None:
+        def _normalize_similarity_id(value: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
         if resolved_path is None:
             return None
         source = Path(resolved_path).expanduser()
@@ -5305,6 +5304,31 @@ class DungeonAppletWidget(QWidget):
                 payload_title = str(payload.get("title") or "").strip()
             else:
                 payload_title = ""
+            if payload_item_id:
+                normalized_payload_id = _normalize_similarity_id(payload_item_id)
+                replacement_target: Path | None = None
+                for existing_path in list_item_file_paths(library_root):
+                    existing_payload = load_item_payload(existing_path)
+                    if not isinstance(existing_payload, dict):
+                        continue
+                    existing_item_id = str(existing_payload.get("item_id") or "").strip()
+                    if not existing_item_id:
+                        continue
+                    if existing_item_id == payload_item_id:
+                        replacement_target = existing_path
+                        break
+                    if normalized_payload_id and _normalize_similarity_id(existing_item_id) == normalized_payload_id:
+                        replacement_target = existing_path
+                        break
+                if replacement_target is not None:
+                    try:
+                        replacement_target.write_text(
+                            json.dumps(item_document, indent=2, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                        persisted_path = replacement_target
+                    except Exception:
+                        persisted_path = None
             try:
                 digest = hashlib.sha256(
                     json.dumps(
@@ -5329,16 +5353,17 @@ class DungeonAppletWidget(QWidget):
                 if digest
                 else f"{safe_name}{ITEM_FILE_EXTENSION}"
             )
-            target_path = library_root / filename
-            if not target_path.exists():
-                try:
-                    target_path.write_text(
-                        json.dumps(item_document, indent=2, ensure_ascii=False),
-                        encoding="utf-8",
-                    )
-                except Exception:
-                    target_path = None
-            persisted_path = target_path
+            if persisted_path is None:
+                target_path = library_root / filename
+                if not target_path.exists():
+                    try:
+                        target_path.write_text(
+                            json.dumps(item_document, indent=2, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        target_path = None
+                persisted_path = target_path
 
         if persisted_path is None:
             try:
@@ -6811,14 +6836,7 @@ class DungeonAppletWidget(QWidget):
             if self._online_mode == ONLINE_MODE_DM_HOST:
                 self._collapse_initiative_overlay(force=True)
             else:
-                self._animate_center_panel(
-                    self._initiative_overlay,
-                    show=False,
-                    target_rect=self._target_initiative_geometry(),
-                    attr_name="_initiative_panel_anim",
-                    duration_ms=150,
-                )
-                self._initiative_state["collapsed"] = True
+                self._collapse_initiative_overlay(force=True)
             return
         if self._online_mode == ONLINE_MODE_DM_HOST and not bool(self._initiative_state.get("active", False)):
             self._show_initiative_overlay(allow_inactive=True)
@@ -6828,13 +6846,10 @@ class DungeonAppletWidget(QWidget):
     def _collapse_initiative_overlay(self, *, force: bool = False) -> None:
         if self._online_mode == ONLINE_MODE_PLAYER:
             self._initiative_state["collapsed"] = True
-            self._animate_center_panel(
-                self._initiative_overlay,
-                show=False,
-                target_rect=self._target_initiative_geometry(),
-                attr_name="_initiative_panel_anim",
-                duration_ms=150,
-            )
+            existing = getattr(self, "_initiative_panel_anim", None)
+            if isinstance(existing, QPropertyAnimation):
+                existing.stop()
+            self._initiative_overlay.hide()
             self._initiative_reopen_btn.hide()
             self._position_initiative_overlay()
             return
@@ -7110,6 +7125,8 @@ class DungeonAppletWidget(QWidget):
         was_ready = bool(self._player_connection_ready)
         self._player_connection_ready = False
         self._pending_join_character_override_sync = False
+        self._pending_link_conflicts.clear()
+        self._active_link_conflict_prompt_key = ""
         self._local_player_id = None
         self._update_connected_players({})
         if self._online_mode != ONLINE_MODE_PLAYER:
@@ -7210,6 +7227,7 @@ class DungeonAppletWidget(QWidget):
             "active_dungeon_id": active_dungeon_id,
             "players_dungeon_id": players_dungeon_id or self._players_dungeon_id,
             "collection_name": self._collection_name,
+            "collection_id": str(self._collection_id or ""),
             "dungeons": dungeons_payload,
             "players": self._connected_players,
             "loot_pool": list(self._session_loot_pool),
@@ -7476,6 +7494,14 @@ class DungeonAppletWidget(QWidget):
 
         if action == "link_character_entity":
             self._handle_host_link_character_entity(player_id, payload, request_id=request_id)
+            return
+
+        if action == "resolve_linked_character_conflict":
+            self._handle_host_resolve_linked_character_conflict(
+                player_id,
+                payload,
+                request_id=request_id,
+            )
             return
 
         if action == "claim_loot":
@@ -7756,6 +7782,7 @@ class DungeonAppletWidget(QWidget):
         payload: dict,
         *,
         request_id: str | None = None,
+        result_data: dict | None = None,
     ) -> None:
         if self._host_controller is None:
             return
@@ -7840,8 +7867,131 @@ class DungeonAppletWidget(QWidget):
             ok=True,
             message="Linked character synced",
             request_id=request_id,
+            data=result_data or {},
         )
         self._broadcast_snapshot_if_host()
+
+    def _handle_host_resolve_linked_character_conflict(
+        self,
+        player_id: str,
+        payload: dict,
+        *,
+        request_id: str | None = None,
+    ) -> None:
+        if self._host_controller is None:
+            return
+        mode = str(payload.get("mode") or "").strip().lower()
+        if mode != "overwrite_dm":
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Unsupported conflict resolution mode.",
+                request_id=request_id,
+            )
+            return
+        entity_id = str(payload.get("entity_id") or "").strip()
+        sheet_id = str(payload.get("sheet_id") or "").strip()
+        dungeon_id = str(payload.get("dungeon_id") or "").strip()
+        sheet_name = str(payload.get("sheet_name") or sheet_id).strip() or sheet_id
+        conflict_key = str(payload.get("conflict_key") or "").strip()
+        if not entity_id or not sheet_id:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Invalid linked character conflict payload.",
+                request_id=request_id,
+            )
+            return
+        dungeon, item_data = self._find_entity_state_entry(entity_id, dungeon_id)
+        if dungeon is None or item_data is None:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Target linked entity not found.",
+                request_id=request_id,
+                data={
+                    "action": "resolve_linked_character_conflict",
+                    "resolution": "dm_denied",
+                    "conflict": {
+                        "conflict_key": conflict_key,
+                        "entity_id": entity_id,
+                        "sheet_id": sheet_id,
+                        "sheet_name": sheet_name,
+                        "dungeon_id": dungeon_id,
+                        "inventory": normalize_inventory_payload(item_data.get("linked_inventory") or {})
+                        if isinstance(item_data, dict)
+                        else {},
+                    },
+                },
+            )
+            return
+        if str(item_data.get("owner_player_id") or "").strip() != str(player_id or "").strip():
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Entity owned by a different player.",
+                request_id=request_id,
+            )
+            return
+        if str(item_data.get("linked_sheet_id") or "").strip() != sheet_id:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Entity is not linked to that sheet.",
+                request_id=request_id,
+            )
+            return
+        accepted = False
+        if _in_test_env():
+            accepted = True
+        else:
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("Character Overwrite Request")
+            dialog.setText(
+                f"Player '{self._connected_players.get(player_id, player_id)}' requested to overwrite "
+                f"the DM version of '{sheet_name}'."
+            )
+            dialog.setInformativeText("Accepting replaces the DM linked character for this assigned entity.")
+            accept_btn = dialog.addButton("Accept Overwrite", QMessageBox.ButtonRole.AcceptRole)
+            dialog.addButton("Deny", QMessageBox.ButtonRole.RejectRole)
+            dialog.exec()
+            accepted = dialog.clickedButton() == accept_btn
+        if not accepted:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="DM denied overwrite request.",
+                request_id=request_id,
+                data={
+                    "action": "resolve_linked_character_conflict",
+                    "resolution": "dm_denied",
+                    "conflict": {
+                        "conflict_key": conflict_key,
+                        "entity_id": entity_id,
+                        "sheet_id": sheet_id,
+                        "sheet_name": sheet_name,
+                        "dungeon_id": dungeon_id,
+                        "inventory": normalize_inventory_payload(item_data.get("linked_inventory") or {}),
+                    },
+                },
+            )
+            return
+        self._handle_host_link_character_entity(
+            player_id,
+            payload,
+            request_id=request_id,
+            result_data={
+                "action": "resolve_linked_character_conflict",
+                "resolution": "dm_accepted",
+                "conflict": {
+                    "conflict_key": conflict_key,
+                    "entity_id": entity_id,
+                    "sheet_id": sheet_id,
+                    "sheet_name": sheet_name,
+                    "dungeon_id": dungeon_id,
+                },
+            },
+        )
 
     def _player_has_linked_sheet(self, player_id: str, sheet_id: str) -> bool:
         clean_sheet = str(sheet_id or "").strip()
@@ -8790,6 +8940,110 @@ class DungeonAppletWidget(QWidget):
             "stats": stats,
         }
 
+    def _linked_character_conflict_key(self, dungeon_id: str, entity_id: str, sheet_id: str) -> str:
+        return f"{str(dungeon_id or '').strip()}::{str(entity_id or '').strip()}::{str(sheet_id or '').strip()}"
+
+    def _prompt_linked_character_conflict(self, conflict: dict, *, force: bool = False) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return
+        if self._client_controller is None:
+            return
+        dungeon_id = str(conflict.get("dungeon_id") or "").strip()
+        entity_id = str(conflict.get("entity_id") or "").strip()
+        sheet_id = str(conflict.get("sheet_id") or "").strip()
+        sheet_name = str(conflict.get("sheet_name") or sheet_id).strip() or sheet_id
+        host_inventory = normalize_inventory_payload(conflict.get("inventory") or {})
+        if not entity_id or not sheet_id:
+            return
+        conflict_key = str(conflict.get("conflict_key") or "").strip() or self._linked_character_conflict_key(
+            dungeon_id,
+            entity_id,
+            sheet_id,
+        )
+        conflict = dict(conflict)
+        conflict["conflict_key"] = conflict_key
+        conflict["sheet_name"] = sheet_name
+        conflict["inventory"] = host_inventory
+        self._pending_link_conflicts[conflict_key] = conflict
+        if _in_test_env():
+            ok, _message = self._sync_local_sheet_inventory_from_host(
+                sheet_id,
+                host_inventory,
+                sheet_name=sheet_name,
+                refresh_entities=True,
+            )
+            if ok:
+                self._pending_link_conflicts.pop(conflict_key, None)
+            return
+        if self._active_link_conflict_prompt_key and self._active_link_conflict_prompt_key != conflict_key:
+            return
+
+        while True:
+            self._active_link_conflict_prompt_key = conflict_key
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("Linked Character Conflict")
+            dialog.setText(
+                f"The DM linked '{sheet_name}' to one of your assigned entities, "
+                "but you already have a local character with this sheet id."
+            )
+            dialog.setInformativeText(
+                "Choose whether to replace your local character with the DM version, "
+                "or request to overwrite the DM character with your local version."
+            )
+            replace_btn = dialog.addButton("Replace Local With DM", QMessageBox.ButtonRole.AcceptRole)
+            overwrite_btn = dialog.addButton("Request Overwrite DM", QMessageBox.ButtonRole.ActionRole)
+            dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            dialog.exec()
+            clicked = dialog.clickedButton()
+            self._active_link_conflict_prompt_key = ""
+
+            if clicked == replace_btn:
+                ok, message = self._sync_local_sheet_inventory_from_host(
+                    sheet_id,
+                    host_inventory,
+                    sheet_name=sheet_name,
+                    refresh_entities=True,
+                )
+                if ok:
+                    self._pending_link_conflicts.pop(conflict_key, None)
+                    return
+                QMessageBox.warning(self, "Linked Character Conflict", str(message or "Unable to replace local character."))
+                if not force:
+                    return
+                continue
+
+            if clicked == overwrite_btn:
+                local_payload = self._resolve_local_sheet_sync_payload(sheet_id)
+                if not isinstance(local_payload, dict):
+                    QMessageBox.warning(
+                        self,
+                        "Linked Character Conflict",
+                        "Local character payload is unavailable for overwrite.",
+                    )
+                    if not force:
+                        return
+                    continue
+                self._client_controller.send_command(
+                    "resolve_linked_character_conflict",
+                    {
+                        "mode": "overwrite_dm",
+                        "conflict_key": conflict_key,
+                        "entity_id": entity_id,
+                        "sheet_id": sheet_id,
+                        "sheet_name": sheet_name,
+                        "dungeon_id": dungeon_id,
+                        "character_id": str(local_payload.get("character_id") or ""),
+                        "inventory": normalize_inventory_payload(local_payload.get("inventory") or {}),
+                        "stats": dict(local_payload.get("stats") or {}),
+                    },
+                    request_id=uuid.uuid4().hex,
+                )
+                return
+
+            if force:
+                continue
+            return
+
     def _push_local_character_overrides_to_host(
         self,
         *,
@@ -8886,8 +9140,9 @@ class DungeonAppletWidget(QWidget):
             if not local_player_id:
                 return
             inventory_by_sheet: dict[str, dict] = {}
-            local_priority_sheets: set[str] = set()
+            conflicts_by_key: dict[str, dict] = {}
             for dungeon in self._dungeons:
+                dungeon_id = str(dungeon.get("id") or "").strip()
                 state = dungeon.get("state")
                 if not isinstance(state, dict):
                     continue
@@ -8905,7 +9160,17 @@ class DungeonAppletWidget(QWidget):
                     if not sheet_id:
                         continue
                     if self._local_character_sheet_exists(sheet_id):
-                        local_priority_sheets.add(sheet_id)
+                        entity_id = str(item_data.get("entity_id") or "").strip()
+                        conflict_key = self._linked_character_conflict_key(dungeon_id, entity_id, sheet_id)
+                        if conflict_key not in conflicts_by_key:
+                            conflicts_by_key[conflict_key] = {
+                                "conflict_key": conflict_key,
+                                "dungeon_id": dungeon_id,
+                                "entity_id": entity_id,
+                                "sheet_id": sheet_id,
+                                "sheet_name": str(item_data.get("linked_sheet_name") or sheet_id).strip() or sheet_id,
+                                "inventory": normalize_inventory_payload(item_data.get("linked_inventory") or {}),
+                            }
                         continue
                     sheet_name = str(item_data.get("linked_sheet_name") or sheet_id).strip() or sheet_id
                     linked_inventory = item_data.get("linked_inventory")
@@ -8918,14 +9183,8 @@ class DungeonAppletWidget(QWidget):
                             "inventory": normalize_inventory_payload(linked_inventory),
                         },
                     )
-            if local_priority_sheets:
-                sent_overrides = self._push_local_character_overrides_to_host(
-                    prefer_sheet_ids=local_priority_sheets
-                )
-                if sent_overrides > 0:
-                    self._append_server_log(
-                        "[INFO] Prioritized local linked character and synced update(s) to host."
-                    )
+            for conflict_payload in conflicts_by_key.values():
+                self._prompt_linked_character_conflict(conflict_payload)
             for sheet_id, sync_payload in inventory_by_sheet.items():
                 inventory_payload = sync_payload.get("inventory", {})
                 sheet_name = str(sync_payload.get("sheet_name") or sheet_id)
@@ -8939,19 +9198,8 @@ class DungeonAppletWidget(QWidget):
                     self._append_server_log(f"[WARN] {message}")
 
         def _run_post_snapshot_character_sync() -> None:
-            sent_overrides = 0
-            if self._pending_join_character_override_sync:
-                self._pending_join_character_override_sync = False
-                sent_overrides = self._push_local_character_overrides_to_host()
-                if sent_overrides > 0:
-                    # Intentional: on initial join we push the player's local linked
-                    # character state to host so DM and host storage are overwritten
-                    # with the player's latest character edits.
-                    self._append_server_log(
-                        f"[INFO] Synced {sent_overrides} linked character update(s) to host."
-                    )
-            if sent_overrides == 0:
-                _sync_owned_sheet_inventories_from_snapshot()
+            self._pending_join_character_override_sync = False
+            _sync_owned_sheet_inventories_from_snapshot()
 
         initiative_state_raw = snapshot.get("initiative_state")
         player_entry_count = 0
@@ -9013,6 +9261,9 @@ class DungeonAppletWidget(QWidget):
         collection_name = snapshot.get("collection_name")
         if isinstance(collection_name, str) and collection_name.strip():
             self._collection_name = collection_name.strip()
+        snapshot_collection_id = str(snapshot.get("collection_id") or "").strip()
+        if snapshot_collection_id:
+            self._collection_id = snapshot_collection_id
         dungeons_payload = snapshot.get("dungeons")
         if isinstance(dungeons_payload, list):
             dungeons: list[dict] = []
@@ -9107,6 +9358,12 @@ class DungeonAppletWidget(QWidget):
     def _on_client_command_result(self, result: dict) -> None:
         if result.get("ok"):
             data = result.get("data")
+            if isinstance(data, dict) and str(data.get("action") or "") == "resolve_linked_character_conflict":
+                conflict = data.get("conflict")
+                if isinstance(conflict, dict):
+                    conflict_key = str(conflict.get("conflict_key") or "").strip()
+                    if conflict_key:
+                        self._pending_link_conflicts.pop(conflict_key, None)
             if isinstance(data, dict) and str(data.get("action") or "") == "add_loot_from_inventory":
                 sheet_id = str(data.get("sheet_id") or "").strip()
                 inventory_payload = data.get("inventory")
@@ -9136,6 +9393,13 @@ class DungeonAppletWidget(QWidget):
                         request_id=uuid.uuid4().hex,
                     )
             return
+        data = result.get("data")
+        if isinstance(data, dict) and str(data.get("action") or "") == "resolve_linked_character_conflict":
+            if str(data.get("resolution") or "").strip() == "dm_denied":
+                conflict = data.get("conflict")
+                if isinstance(conflict, dict):
+                    self._prompt_linked_character_conflict(conflict, force=True)
+                    return
         message = str(result.get("message") or "Command rejected")
         self._append_server_log(f"[WARN] {message}")
 
@@ -9240,6 +9504,8 @@ class DungeonAppletWidget(QWidget):
     def closeEvent(self, event) -> None:
         current_session = str(self._online_session_id or "")
         self._debug_log("close_event", session=current_session)
+        self._suppress_change_tracking = True
+        self._suppress_network_sync = True
         loot_pool_viewport = getattr(self, "_loot_pool_viewport", None)
         if loot_pool_viewport is not None:
             try:
@@ -9249,13 +9515,22 @@ class DungeonAppletWidget(QWidget):
         self._loot_pool_viewport = None
         self._loot_pool_list = None
         self._remove_app_event_filter()
+        self._host_scene_sync_pending = False
+        self._preview_timer.stop()
         self._collection_autosave_timer.stop()
+        self._host_scene_sync_timer.stop()
+        self._host_scene_watchdog_timer.stop()
+        self._loot_claim_reservation_timer.stop()
         self._save_local_profile()
         if self._host_controller is not None:
             self._host_controller.stop()
         if self._client_controller is not None:
             self._client_controller.disconnect()
         self._clear_online_runtime_cache(current_session)
+        self._preview_timer.stop()
+        self._host_scene_sync_timer.stop()
+        self._host_scene_watchdog_timer.stop()
+        self._loot_claim_reservation_timer.stop()
         super().closeEvent(event)
 
     def _local_profile_path(self) -> Path:
@@ -9777,6 +10052,7 @@ class DungeonAppletWidget(QWidget):
 
     def _init_collection(self) -> None:
         self._collection_path = None
+        self._collection_id = generate_probabilistic_unique_id("collection")
         self._collection_meta_dirty = False
         self._collection_dirty = False
         self._dungeons = []
@@ -9938,11 +10214,14 @@ class DungeonAppletWidget(QWidget):
             if stem.endswith(COLLECTION_AUTOSAVE_SUFFIX):
                 filename = f"{stem}{self._collection_path.suffix}"
             else:
-                filename = f"{stem}{COLLECTION_AUTOSAVE_SUFFIX}{self._collection_path.suffix or '.json'}"
+                filename = (
+                    f"{stem}{COLLECTION_AUTOSAVE_SUFFIX}"
+                    f"{self._collection_path.suffix or COLLECTION_FILE_EXTENSION}"
+                )
             return self._collection_path.with_name(filename)
         base_dir = self._collection_dir()
         stem = _sanitize_filename(self._collection_name, "dungeon_collection")
-        return base_dir / f"{stem}{COLLECTION_AUTOSAVE_SUFFIX}.json"
+        return base_dir / f"{stem}{COLLECTION_AUTOSAVE_SUFFIX}{COLLECTION_FILE_EXTENSION}"
 
     def _schedule_collection_autosave(self) -> None:
         if not self._autosave_enabled:
@@ -10892,13 +11171,12 @@ class DungeonAppletWidget(QWidget):
         from save_paths import dungeon_collections_dir
         return dungeon_collections_dir()
 
-    def _materialize_state_icons_for_save(self, state: dict, target_path: Path) -> dict:
+    def _materialize_state_icons_for_archive(self, state: dict, assets: dict[str, bytes]) -> dict:
         if not isinstance(state, dict):
             return state
         items = state.get("items")
         if not isinstance(items, list):
             return state
-        icons_dir = self._collection_working_icon_dir(target_path)
         for item_data in items:
             if not isinstance(item_data, dict):
                 continue
@@ -10922,24 +11200,19 @@ class DungeonAppletWidget(QWidget):
                 ext = ".png"
             digest = hashlib.sha256(raw).hexdigest()
             filename = f"{digest}{ext}"
-            try:
-                icons_dir.mkdir(parents=True, exist_ok=True)
-                saved_icon = icons_dir / filename
-                if not saved_icon.exists():
-                    saved_icon.write_bytes(raw)
-            except Exception:
-                continue
-            item_data["icon_path"] = str(saved_icon)
+            asset_name = f"assets/icons/{filename}"
+            assets.setdefault(asset_name, raw)
+            item_data["icon_path"] = asset_name
         return state
 
-    def _build_collection_payload(self, target_path: Path | None = None) -> dict:
+    def _build_collection_payload(self) -> tuple[dict, dict[str, bytes]]:
         self._save_active_dungeon_state()
+        assets: dict[str, bytes] = {}
         dungeons_payload = []
         for dungeon in self._dungeons:
             dungeon_state = dungeon.get("state") or self._blank_dungeon_state()
             state_for_save = json.loads(json.dumps(dungeon_state))
-            if target_path is not None:
-                state_for_save = self._materialize_state_icons_for_save(state_for_save, target_path)
+            state_for_save = self._materialize_state_icons_for_archive(state_for_save, assets)
             dungeons_payload.append(
                 {
                     "id": dungeon["id"],
@@ -10947,7 +11220,10 @@ class DungeonAppletWidget(QWidget):
                     "state": state_for_save,
                 }
             )
-        return {
+        payload = {
+            "format": COLLECTION_FILE_FORMAT,
+            "object_type": "collection",
+            "object_id": str(self._collection_id or ""),
             "version": DUNGEON_COLLECTION_VERSION,
             "collection_name": self._collection_name,
             "active_dungeon_id": self._active_dungeon_id,
@@ -10957,6 +11233,7 @@ class DungeonAppletWidget(QWidget):
             "known_player_profiles": dict(self._known_player_profiles),
             "dungeons": dungeons_payload,
         }
+        return payload, assets
 
     def _save_collection(self) -> bool:
         if self._collection_path is None:
@@ -10966,26 +11243,31 @@ class DungeonAppletWidget(QWidget):
     def _save_collection_as(self) -> bool:
         base_dir = self._collection_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
-        default_name = _sanitize_filename(self._collection_name, "dungeon_collection") + ".json"
+        default_name = _sanitize_filename(self._collection_name, "dungeon_collection") + COLLECTION_FILE_EXTENSION
         default_path = str(base_dir / default_name)
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Save Dungeon Collection",
             default_path,
-            "Dungeon Collection (*.json)",
+            f"Dungeon Collection (*{COLLECTION_FILE_EXTENSION})",
         )
         if not filename:
             return False
         path = Path(filename)
-        if path.suffix.lower() != ".json":
-            path = path.with_suffix(".json")
+        if path.suffix.lower() != COLLECTION_FILE_EXTENSION:
+            path = path.with_suffix(COLLECTION_FILE_EXTENSION)
         return self._save_collection_to_path(path)
 
     def _save_collection_to_path(self, path: Path, *, commit_as_primary: bool = True) -> bool:
-        payload = self._build_collection_payload(path)
+        if path.suffix.lower() != COLLECTION_FILE_EXTENSION:
+            path = path.with_suffix(COLLECTION_FILE_EXTENSION)
+        payload, assets = self._build_collection_payload()
+        if not str(payload.get("object_id") or "").strip():
+            payload["object_id"] = generate_probabilistic_unique_id("collection")
+            self._collection_id = str(payload["object_id"])
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            write_dmt_package(path, info=payload, assets=assets)
         except Exception as exc:
             if commit_as_primary:
                 QMessageBox.critical(self, "Save Failed", str(exc))
@@ -11007,7 +11289,7 @@ class DungeonAppletWidget(QWidget):
             self,
             "Load Dungeon Collection",
             str(base_dir),
-            "Dungeon Collection (*.json)",
+            f"Dungeon Collection (*{COLLECTION_FILE_EXTENSION})",
         )
         if not filename:
             return
@@ -11033,17 +11315,59 @@ class DungeonAppletWidget(QWidget):
         return False
 
     def _load_collection_from_path(self, path: Path) -> None:
+        payload = read_dmt_package_info(path)
+        if not isinstance(payload, dict) or str(payload.get("format") or "") != COLLECTION_FILE_FORMAT:
+            QMessageBox.critical(self, "Load Failed", "Collection file is invalid.")
+            return
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            icon_assets = list_dmt_package_assets(path)
+        except Exception:
+            icon_assets = []
+        icon_bytes_by_asset: dict[str, bytes] = {}
+        for asset_name in icon_assets:
+            if not str(asset_name).startswith("assets/icons/"):
+                continue
+            raw = read_dmt_package_asset(path, asset_name)
+            if raw:
+                icon_bytes_by_asset[str(asset_name)] = raw
+        try:
+            icons_dir = self._collection_working_icon_dir(path)
+            if icon_bytes_by_asset:
+                icons_dir.mkdir(parents=True, exist_ok=True)
+                for asset_name, raw in icon_bytes_by_asset.items():
+                    icon_name = Path(asset_name).name
+                    target_path = icons_dir / icon_name
+                    if not target_path.exists():
+                        target_path.write_bytes(raw)
         except Exception as exc:
             QMessageBox.critical(self, "Load Failed", str(exc))
             return
         name = payload.get("collection_name") or path.stem
+        loaded_object_id = str(payload.get("object_id") or "").strip()
+        if loaded_object_id:
+            self._collection_id = loaded_object_id
+        else:
+            self._collection_id = generate_probabilistic_unique_id("collection")
         dungeons: list[dict] = []
         for entry in payload.get("dungeons", []):
             dungeon_id = entry.get("id") or uuid.uuid4().hex
             dungeon_name = entry.get("name") or f"Dungeon {len(dungeons) + 1}"
             dungeon_state = entry.get("state") or self._blank_dungeon_state()
+            if isinstance(dungeon_state, dict):
+                items = dungeon_state.get("items")
+                if isinstance(items, list):
+                    for item_data in items:
+                        if not isinstance(item_data, dict):
+                            continue
+                        if item_data.get("type") != "entity":
+                            continue
+                        icon_ref = str(item_data.get("icon_path") or "")
+                        if not icon_ref.startswith("assets/icons/"):
+                            continue
+                        icon_name = Path(icon_ref).name
+                        runtime_icon = self._collection_working_icon_dir(path) / icon_name
+                        if runtime_icon.exists():
+                            item_data["icon_path"] = str(runtime_icon)
             dungeons.append(
                 {
                     "id": dungeon_id,

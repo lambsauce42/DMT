@@ -81,7 +81,7 @@ except Exception:
     pass
 
 SESSION_DIR_NAME = "sessions"
-SESSION_JSON_NAME = "sessions.json"
+SESSION_STORAGE_MARKER_NAME = "sessions.dmtindex"
 SESSION_FILE_EXTENSION = ".dmtsession"
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 
@@ -92,7 +92,7 @@ def session_storage_dir() -> Path:
     return Path(default_dnd_save_dir()) / SESSION_DIR_NAME
 
 def session_storage_path() -> Path:
-    return session_storage_dir() / SESSION_JSON_NAME
+    return session_storage_dir() / SESSION_STORAGE_MARKER_NAME
 
 def session_file_path(session_id: str, base_dir: Optional[Path] = None) -> Path:
     target_dir = base_dir if base_dir is not None else session_storage_path().parent
@@ -119,13 +119,9 @@ class SessionManager:
         self.last_error = ""
         self.sessions = []
         storage_root = session_storage_path().parent
-        legacy_path = session_storage_path()
-        loaded_any = False
 
         if storage_root.exists():
             session_files = sorted(storage_root.glob(f"*{SESSION_FILE_EXTENSION}"))
-            if session_files:
-                loaded_any = True
             for file_path in session_files:
                 try:
                     payload = json.loads(file_path.read_text(encoding="utf-8"))
@@ -133,19 +129,6 @@ class SessionManager:
                         self.sessions.append(self._dict_to_session(payload))
                 except Exception as exc:
                     self.last_error = f"Unable to load session from '{file_path}': {exc}"
-
-        if loaded_any:
-            return
-
-        if not legacy_path.exists():
-            return
-        try:
-            data = json.loads(legacy_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                for item in data:
-                    self.sessions.append(self._dict_to_session(item))
-        except Exception as exc:
-            self.last_error = f"Unable to load sessions from '{legacy_path}': {exc}"
 
     def save(self) -> None:
         storage_root = session_storage_path().parent
@@ -230,7 +213,7 @@ class SessionCreatorWidget(QWidget):
         self.sheets_manager = PlayerSheetsManager(entries=self._load_sheet_entries())
 
         # Auto-save timer
-        self.auto_save_timer = QTimer()
+        self.auto_save_timer = QTimer(self)
         self.auto_save_timer.setInterval(2000) # 2 seconds
         self.auto_save_timer.setSingleShot(True)
         self.auto_save_timer.timeout.connect(self._save_current_session)
@@ -251,6 +234,10 @@ class SessionCreatorWidget(QWidget):
                 ),
             )
 
+    def closeEvent(self, event) -> None:
+        self.auto_save_timer.stop()
+        super().closeEvent(event)
+
     def _current_context_restrictions(self) -> tuple[str, str, str]:
         world = _combo_optional_value(self.world_combo) if hasattr(self, "world_combo") else ""
         campaign = _combo_optional_value(self.campaign_combo) if hasattr(self, "campaign_combo") else ""
@@ -267,8 +254,7 @@ class SessionCreatorWidget(QWidget):
             return "", "", ""
         raw = str(session.group_ids[0])
         if "::" not in raw:
-            # Backward compatibility: legacy group-only storage.
-            return "", "", raw
+            return "", "", ""
         parts = raw.split("::", 2)
         while len(parts) < 3:
             parts.append("")

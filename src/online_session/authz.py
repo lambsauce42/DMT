@@ -16,6 +16,7 @@ _ALLOWED_PLAYER_ACTIONS = {
     "add_loot_from_inventory",
     "initiative_update",
     "link_character_entity",
+    "resolve_linked_character_conflict",
 }
 
 
@@ -38,7 +39,7 @@ def authorize_command(
     if action not in _ALLOWED_PLAYER_ACTIONS:
         return PermissionDecision(False, "action not allowed for players")
 
-    if action in {"move_entity", "update_entity", "upload_icon"}:
+    if action == "upload_icon":
         if not target_owner_id:
             return PermissionDecision(False, "target has no owner")
         if target_owner_id != actor_id:

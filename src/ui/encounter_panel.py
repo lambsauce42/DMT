@@ -53,13 +53,17 @@ from encounter_engine import (
     sort_monsters_by_xp,
     suggest_monsters,
 )
+from dmt_package import read_dmt_package_info, write_dmt_package
 from save_paths import dnd_saves_dir
+from unique_ids import generate_probabilistic_unique_id
 from ui.encounter_edit_dialog import ModifyMonsterDialog
 from ui.widgets.encounter_progress import EncounterProgressBar
 from ui.widgets.monster_card import MonsterCard
 from ui.widgets import PlusMinusSpinBox, SliderSpinBox
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icons"))
+ENCOUNTER_FILE_EXTENSION = ".dmtencounter"
+ENCOUNTER_FILE_FORMAT = "dmtencounter.v1"
 
 
 class IconPreviewLabel(QLabel):
@@ -148,6 +152,7 @@ class EncounterPanel(QWidget):
         self._difficulty_table: dict[int, dict[str, int]] = {}
         self._difficulty_keys: list[str] = []
         self._expanded_monster_id: Optional[str] = None
+        self._encounter_id: str = ""
         self._sort_mode = "none"
         self._settings = self._load_settings()
         self._sort_mode = self._settings.get("xp_sort", "none")
@@ -1394,6 +1399,7 @@ class EncounterPanel(QWidget):
 
     def new_encounter(self) -> None:
         self._encounter_entries = []
+        self._encounter_id = generate_probabilistic_unique_id("encounter")
         self._refresh_encounter()
 
     def _encounters_dir(self) -> Path:
@@ -1405,23 +1411,31 @@ class EncounterPanel(QWidget):
                 self,
                 "Save Encounter",
                 str(self._encounters_dir()),
-                "Encounter (*.json)",
+                f"Encounter (*{ENCOUNTER_FILE_EXTENSION})",
             )
             if not filename:
                 return
             path = Path(filename)
         else:
-            path = self._encounters_dir() / f"{name}.json"
+            path = self._encounters_dir() / f"{name}{ENCOUNTER_FILE_EXTENSION}"
+        if path.suffix.lower() != ENCOUNTER_FILE_EXTENSION:
+            path = path.with_suffix(ENCOUNTER_FILE_EXTENSION)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = self._serialize_encounter(path.stem)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_dmt_package(path, info=data)
         QMessageBox.information(self, "Encounter", f"Saved {path.name}.")
 
     def load_encounter(self, path: Path) -> None:
         if not path.exists():
             QMessageBox.warning(self, "Encounter", "Encounter file not found.")
             return
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_dmt_package_info(path)
+        if not isinstance(data, dict) or str(data.get("format") or "") != ENCOUNTER_FILE_FORMAT:
+            QMessageBox.warning(self, "Encounter", "Encounter file is invalid.")
+            return
+        self._encounter_id = str(data.get("object_id") or "").strip()
+        if not self._encounter_id:
+            self._encounter_id = generate_probabilistic_unique_id("encounter")
         self._encounter_entries = []
         levels = data.get("party_levels") or []
         self._party_size_slider.setValue(max(1, len(levels)))
@@ -1462,16 +1476,18 @@ class EncounterPanel(QWidget):
         self._refresh_encounter()
 
     def export_encounter(self, path: Path) -> None:
+        if path.suffix.lower() != ENCOUNTER_FILE_EXTENSION:
+            path = path.with_suffix(ENCOUNTER_FILE_EXTENSION)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = self._serialize_encounter(path.stem)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_dmt_package(path, info=data)
 
     def _export_dialog(self) -> None:
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Export Encounter",
             str(self._encounters_dir()),
-            "Encounter (*.json)",
+            f"Encounter (*{ENCOUNTER_FILE_EXTENSION})",
         )
         if not filename:
             return
@@ -1482,7 +1498,12 @@ class EncounterPanel(QWidget):
         raw_xp, multiplier, adjusted_xp = compute_adjusted_xp(
             self._encounter_entries, self._party_size_slider.value()
         )
+        if not self._encounter_id:
+            self._encounter_id = generate_probabilistic_unique_id("encounter")
         return {
+            "format": ENCOUNTER_FILE_FORMAT,
+            "object_type": "encounter",
+            "object_id": self._encounter_id,
             "schema_version": 1,
             "name": name,
             "party_levels": levels,

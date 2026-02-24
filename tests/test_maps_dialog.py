@@ -78,16 +78,19 @@ def test_map_dialog_edit_entry_keeps_id_and_updates_name(qtbot, monkeypatch, tmp
     assert Path(updated.image_path).exists()
 
 
-def test_maps_widget_reports_storage_read_errors(qtbot, monkeypatch, tmp_path):
-    broken_storage = tmp_path / "maps.json"
-    broken_storage.write_text("{not valid json", encoding="utf-8")
-    monkeypatch.setattr("maps_applet.maps_storage_path", lambda: broken_storage)
+def test_maps_widget_ignores_invalid_map_packages(qtbot, monkeypatch, tmp_path):
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(parents=True, exist_ok=True)
+    (maps_dir / "broken.dmtmap").write_text("not a package", encoding="utf-8")
+    monkeypatch.setattr("maps_applet.maps_storage_dir", lambda: maps_dir)
+    monkeypatch.setattr("maps_applet.maps_images_dir", lambda: maps_dir / "images")
+    monkeypatch.setattr("maps_applet.maps_thumbs_dir", lambda: maps_dir / "images" / ".thumbs")
 
     widget = MapsWidget()
     qtbot.addWidget(widget)
 
     assert widget._manager.entries == []
-    assert "Unable to read maps storage" in widget._load_entries_error
+    assert widget._load_entries_error == ""
 
 
 def test_map_trash_paths_use_stable_id_not_name():
