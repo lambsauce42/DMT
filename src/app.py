@@ -8,12 +8,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, QEventLoop
 from PySide6.QtGui import (
     QColor,
     QIcon,
     QImage,
     QPainter,
+    QPen,
     QPixmap,
     QTextCharFormat,
     QTextCursor,
@@ -1275,12 +1276,97 @@ class AppletWidget(QWidget):
         QMessageBox.information(self, "Placeholder", f"{action} is not implemented yet.")
 
 
+class CircularLoadingSpinner(QWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._angle = 0
+        self.setFixedSize(18, 18)
+        self._timer = QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._advance)
+        self._timer.stop()
+
+    def start(self) -> None:
+        if not self._timer.isActive():
+            self._timer.start()
+        self.update()
+
+    def stop(self) -> None:
+        if self._timer.isActive():
+            self._timer.stop()
+
+    def _advance(self) -> None:
+        self._angle = (self._angle + 24) % 360
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor("#58a6ff"))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        arc_rect = self.rect().adjusted(2, 2, -2, -2)
+        painter.drawArc(arc_rect, int(-self._angle * 16), int(120 * 16))
+
+
+class AppletLoadingOverlay(QWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("background-color: rgba(13, 17, 23, 120);")
+
+        self._card = QFrame(self)
+        self._card.setStyleSheet(
+            """
+            QFrame {
+                background-color: rgba(22, 27, 34, 230);
+                border: 1px solid #3b424b;
+                border-radius: 10px;
+            }
+            """
+        )
+        card_layout = QHBoxLayout(self._card)
+        card_layout.setContentsMargins(10, 8, 10, 8)
+        card_layout.setSpacing(8)
+
+        self._spinner = CircularLoadingSpinner(self._card)
+        self._label = QLabel("Loading applet...", self._card)
+        self._label.setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: 500;")
+        card_layout.addWidget(self._spinner)
+        card_layout.addWidget(self._label)
+
+    def start_animation(self) -> None:
+        self._spinner.start()
+
+    def stop_animation(self) -> None:
+        self._spinner.stop()
+
+    def set_message(self, message: str) -> None:
+        self._label.setText(str(message or "Loading applet..."))
+        self._label.adjustSize()
+        self._card.adjustSize()
+        self._position_card()
+
+    def _position_card(self) -> None:
+        card_size = self._card.sizeHint()
+        x = max(0, (self.width() - card_size.width()) // 2)
+        y = max(0, (self.height() - card_size.height()) // 2)
+        self._card.setGeometry(x, y, card_size.width(), card_size.height())
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._position_card()
+
+
 class MainLauncherWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("AIO-Hub | D&D Management Toolkit")
         self.setMinimumSize(1200, 700)
         self._tab_by_key: Dict[str, QWidget] = {}
+        self._loading_tabs: set[str] = set()
 
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(False)
@@ -1293,14 +1379,84 @@ class MainLauncherWindow(QMainWindow):
         self._disable_tab_close(home_index)
 
         self.setCentralWidget(self.tabs)
+        self._loading_overlay = AppletLoadingOverlay(self.tabs)
+        self._loading_overlay.setGeometry(self.tabs.rect())
+        self._loading_overlay.hide()
 
     def _disable_tab_close(self, index: int) -> None:
         bar = self.tabs.tabBar()
         bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
         bar.setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
 
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if hasattr(self, "_loading_overlay"):
+            self._loading_overlay.setGeometry(self.tabs.rect())
+
+    def _show_applet_loading_overlay(self, message: str) -> None:
+        self._loading_overlay.setGeometry(self.tabs.rect())
+        self._loading_overlay.set_message(message)
+        self._loading_overlay.start_animation()
+        self._loading_overlay.show()
+        self._loading_overlay.raise_()
+
+    def _hide_applet_loading_overlay(self) -> None:
+        self._loading_overlay.stop_animation()
+        self._loading_overlay.hide()
+
+    def _warmup_loading_overlay(self, *, frames: int = 2, frame_ms: int = 75) -> None:
+        target_frames = max(0, int(frames))
+        delay_ms = max(1, int(frame_ms))
+        for _ in range(target_frames):
+            QApplication.processEvents()
+            loop = QEventLoop(self)
+            QTimer.singleShot(delay_ms, loop.quit)
+            loop.exec()
+
+    def _build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
+        if str(key).startswith("online_host::"):
+            widget = DungeonAppletWidget(self.tabs)
+            online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
+            port = int(online_cfg.get("port", 8765))
+            collection_path = str(online_cfg.get("collection_path") or "").strip()
+            started = widget.start_online_host(port, collection_path or None)
+            if not started:
+                widget.deleteLater()
+                return None
+            return widget
+        if str(key).startswith("online_join::"):
+            widget = DungeonAppletWidget(self.tabs)
+            online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
+            host_ip = str(online_cfg.get("host_ip") or "").strip()
+            port = int(online_cfg.get("port", 8765))
+            player_name = str(online_cfg.get("player_name") or "Player").strip() or "Player"
+            widget.join_online_session(host_ip, port, player_name)
+            return widget
+        if key == "item_creator":
+            return ItemCreatorWidget(self.tabs)
+        if key == "map_library":
+            return MapsWidget(self.tabs)
+        if key == "player_sheets":
+            return PlayerSheetsWidget(self.tabs)
+        if key == "session_creator":
+            return SessionCreatorWidget(self.tabs)
+        if key == "loot_table_generator":
+            return LootAppletWidget(self.tabs)
+        if key == "npc_database":
+            return NPCDatabaseWidget(self.tabs)
+        if key == "encounter_creator":
+            return EncounterPanel(self.tabs)
+        if key == "dungeon_creator":
+            return DungeonAppletWidget(self.tabs)
+        return AppletWidget(
+            applet["title"],
+            applet["actions"],
+            applet["panels"],
+            self.tabs,
+        )
+
     def open_applet(self, applet: Dict[str, object], focus_if_new: bool = True) -> None:
-        key = applet["key"]
+        key = str(applet["key"])
         
         # Guard against world selector or existing tabs
         if key == "world_selector":
@@ -1316,62 +1472,27 @@ class MainLauncherWindow(QMainWindow):
                 self.tabs.setCurrentIndex(index)
                 return
 
-        # Initialize tracking set if missing
-        if not hasattr(self, "_loading_tabs"):
-            self._loading_tabs = set()
-            
         if key in self._loading_tabs:
             return
-            
+
         self._loading_tabs.add(key)
-        
+        self._show_applet_loading_overlay(f"Loading {applet.get('title', 'applet')}...")
+        self._warmup_loading_overlay()
+        self._loading_overlay.repaint()
+        self.tabs.repaint()
+
         try:
-            if str(key).startswith("online_host::"):
-                widget = DungeonAppletWidget(self.tabs)
-                online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
-                port = int(online_cfg.get("port", 8765))
-                collection_path = str(online_cfg.get("collection_path") or "").strip()
-                started = widget.start_online_host(port, collection_path or None)
-                if not started:
-                    widget.deleteLater()
-                    return
-            elif str(key).startswith("online_join::"):
-                widget = DungeonAppletWidget(self.tabs)
-                online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
-                host_ip = str(online_cfg.get("host_ip") or "").strip()
-                port = int(online_cfg.get("port", 8765))
-                player_name = str(online_cfg.get("player_name") or "Player").strip() or "Player"
-                widget.join_online_session(host_ip, port, player_name)
-            elif key == "item_creator":
-                widget = ItemCreatorWidget(self.tabs)
-            elif key == "map_library":
-                widget = MapsWidget(self.tabs)
-            elif key == "player_sheets":
-                widget = PlayerSheetsWidget(self.tabs)
-            elif key == "session_creator":
-                widget = SessionCreatorWidget(self.tabs)
-            elif key == "loot_table_generator":
-                widget = LootAppletWidget(self.tabs)
-            elif key == "npc_database":
-                widget = NPCDatabaseWidget(self.tabs)
-            elif key == "encounter_creator":
-                widget = EncounterPanel(self.tabs)
-            elif key == "dungeon_creator":
-                widget = DungeonAppletWidget(self.tabs)
-            else:
-                widget = AppletWidget(
-                    applet["title"],
-                    applet["actions"],
-                    applet["panels"],
-                    self.tabs
-                )
-            
+            widget = self._build_applet_widget(key, applet)
+            if widget is None:
+                return
             self._tab_by_key[key] = widget
             index = self.tabs.addTab(widget, applet.get("tab", applet["title"]))
             if focus_if_new:
                 self.tabs.setCurrentIndex(index)
         finally:
-            self._loading_tabs.remove(key)
+            self._loading_tabs.discard(key)
+            if not self._loading_tabs:
+                self._hide_applet_loading_overlay()
 
     def _close_tab(self, index: int) -> None:
         if index == 0:

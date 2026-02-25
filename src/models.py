@@ -83,6 +83,7 @@ class Session:
     # Existing fields
     document_path: Optional[str] = None
     plan_text: str = ""
+    plan_html: str = ""
     group_ids: List[str] = field(default_factory=list)
     attachments: List[SessionAttachment] = field(default_factory=list)
 

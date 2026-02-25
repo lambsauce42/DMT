@@ -1326,6 +1326,35 @@ class MapsWidget(QWidget):
         entry = current.data(Qt.ItemDataRole.UserRole) if current else None
         self._set_details(entry)
 
+    def _select_entry_by_id(self, entry_id: str) -> None:
+        clean_id = str(entry_id or "").strip()
+        if not clean_id:
+            return
+        for index in range(self._map_list.count()):
+            item = self._map_list.item(index)
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if entry and str(getattr(entry, "id", "")).strip() == clean_id:
+                self._map_list.setCurrentRow(index)
+                return
+
+    def open_linked_entry(self, entry_id: str) -> bool:
+        clean_id = str(entry_id or "").strip()
+        if not clean_id:
+            return False
+        self._world_combo.blockSignals(True)
+        self._campaign_combo.blockSignals(True)
+        self._group_combo.blockSignals(True)
+        self._world_combo.setCurrentIndex(0)
+        self._campaign_combo.setCurrentIndex(0)
+        self._group_combo.setCurrentIndex(0)
+        self._world_combo.blockSignals(False)
+        self._campaign_combo.blockSignals(False)
+        self._group_combo.blockSignals(False)
+        self._tag_input.setText("")
+        self._apply_filters()
+        self._select_entry_by_id(clean_id)
+        return bool(self._current_entry and self._current_entry.id == clean_id)
+
     def _load_map_preview(self, entry: Optional[MapAsset]) -> None:
         if not entry:
             self._preview_panel.load_image(None)

@@ -48,6 +48,7 @@ import save_paths
 from item_file_format import (
     ITEM_FILE_EXTENSION,
     build_item_document,
+    list_item_file_paths,
     load_item_payload,
 )
 
@@ -1302,6 +1303,30 @@ class ItemCreatorWidget(QWidget):
         else:
             self._last_save_path = str(loaded_path.with_suffix(ITEM_FILE_EXTENSION))
         self._set_dirty(False)
+
+    def open_linked_item(self, item_id: str) -> bool:
+        clean_id = str(item_id or "").strip()
+        if not clean_id:
+            return False
+        root = Path(self._base_save_dir)
+        target_path = None
+        for path in list_item_file_paths(root):
+            if str(path.stem or "").strip() == clean_id:
+                target_path = path
+                break
+        if target_path is None:
+            return False
+        try:
+            data = load_item_payload(target_path)
+            if data is None:
+                return False
+            spec = spec_from_dict(data)
+        except Exception:
+            return False
+        self._apply_spec(spec)
+        self._last_save_path = str(target_path)
+        self._set_dirty(False)
+        return True
 
     def update_preview(self) -> None:
         self._preview_fast_timer.start(70)

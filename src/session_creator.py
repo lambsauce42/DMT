@@ -78,6 +78,8 @@ from player_sheets import (
     _populate_combo,
 )
 from maps_applet import MapViewPanel
+from session_text_link_controller import SessionTextLinkController
+from session_text_links import LinkSuggestion, ParsedSessionLink, load_link_suggestions
 from ui.widgets import TerminalWidget
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
 from unique_ids import generate_probabilistic_unique_id
@@ -116,6 +118,64 @@ TEXT_FILE_EXTENSIONS = {
 IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 PDF_FILE_EXTENSIONS = {".pdf"}
 WORLD_DATA: list[dict] = []
+SESSION_LINK_APPLET_DEFINITIONS: dict[str, dict[str, object]] = {
+    "npc_database": {
+        "key": "npc_database",
+        "tab": "NPCs",
+        "title": "NPCs",
+        "subtitle": "Browse NPC records",
+        "actions": [],
+        "panels": [],
+    },
+    "map_library": {
+        "key": "map_library",
+        "tab": "Maps",
+        "title": "Maps",
+        "subtitle": "Browse and link maps",
+        "actions": [],
+        "panels": [],
+    },
+    "dungeon_creator": {
+        "key": "dungeon_creator",
+        "tab": "Dungeons",
+        "title": "Dungeons",
+        "subtitle": "Build dungeon assets",
+        "actions": [],
+        "panels": [],
+    },
+    "item_creator": {
+        "key": "item_creator",
+        "tab": "Item Creator",
+        "title": "Item Creator",
+        "subtitle": "Create item PDFs",
+        "actions": [],
+        "panels": [],
+    },
+    "player_sheets": {
+        "key": "player_sheets",
+        "tab": "Characters",
+        "title": "Characters",
+        "subtitle": "PDF folder access",
+        "actions": [],
+        "panels": [],
+    },
+    "encounter_creator": {
+        "key": "encounter_creator",
+        "tab": "Encounters",
+        "title": "Encounters",
+        "subtitle": "Build encounters",
+        "actions": [],
+        "panels": [],
+    },
+}
+SESSION_LINK_APPLET_KEY_BY_KIND: dict[str, str] = {
+    "npc": "npc_database",
+    "map": "map_library",
+    "dungeon": "dungeon_creator",
+    "item": "item_creator",
+    "character": "player_sheets",
+    "encounter": "encounter_creator",
+}
 
 
 def _navigation_world_data() -> list[dict]:
@@ -355,6 +415,7 @@ class SessionManager:
             logs=logs,
             document_path=d.get("document_path"),
             plan_text=d.get("plan_text", ""),
+            plan_html=d.get("plan_html", ""),
             group_ids=d.get("group_ids", []),
             attachments=[],
         )
@@ -370,6 +431,7 @@ class SessionManager:
             "logs": [asdict(l) for l in s.logs],
             "document_path": s.document_path,
             "plan_text": s.plan_text,
+            "plan_html": s.plan_html,
             "group_ids": s.group_ids,
         }
 
@@ -478,6 +540,7 @@ class SessionCreatorWidget(QWidget):
         self._active_text_attachment_id: Optional[str] = None
         self._files_list_collapsed = False
         self._files_last_expanded_width = 320
+        self._text_link_controllers: list[SessionTextLinkController] = []
         
         self._world_data = _navigation_world_data()
         
@@ -510,6 +573,16 @@ class SessionCreatorWidget(QWidget):
 
     def closeEvent(self, event) -> None:
         self.auto_save_timer.stop()
+        if hasattr(self, "_files_splitter_animation"):
+            try:
+                self._files_splitter_animation.stop()
+            except Exception:
+                pass
+        for controller in getattr(self, "_text_link_controllers", []):
+            try:
+                controller.deleteLater()
+            except Exception:
+                pass
         super().closeEvent(event)
 
     def resizeEvent(self, event) -> None:
@@ -942,6 +1015,7 @@ class SessionCreatorWidget(QWidget):
         # Initialize Combo Boxes
         _populate_combo(self.world_combo, self._world_options())
         self._on_world_changed() # Trigger cascade
+        self._init_text_link_controllers()
 
     def _build_files_tab(self) -> QWidget:
         files_tab = QWidget(self)
@@ -1193,6 +1267,7 @@ class SessionCreatorWidget(QWidget):
         # Only saving scratchpad and context now, as date/duration/log removed from UI
         self._current_session.notes = self.scratchpad.toHtml()
         self._current_session.plan_text = self.plan_editor.toPlainText()
+        self._current_session.plan_html = self.plan_editor.toHtml()
         
         # Save linked context
         w, c, g = self._current_context_restrictions()
@@ -1342,7 +1417,11 @@ class SessionCreatorWidget(QWidget):
         self.scratchpad.blockSignals(True)
         self.scratchpad.setHtml(session.notes)
         self.scratchpad.blockSignals(False)
-        self._load_plan_text_file(session.document_path, fallback_text=session.plan_text)
+        self._load_plan_text_file(
+            session.document_path,
+            fallback_text=session.plan_text,
+            fallback_html=getattr(session, "plan_html", ""),
+        )
         self._refresh_file_table()
 
         if apply_context:
@@ -1388,6 +1467,153 @@ class SessionCreatorWidget(QWidget):
     def _sync_reference_tabs(self) -> None:
         # Reference tabs currently do not require context-specific sync.
         return
+
+    def _init_text_link_controllers(self) -> None:
+        self._text_link_controllers = [
+            SessionTextLinkController(
+                self.scratchpad,
+                self._session_link_suggestions,
+                self._handle_session_text_link,
+                self,
+            ),
+            SessionTextLinkController(
+                self.plan_editor,
+                self._session_link_suggestions,
+                self._handle_session_text_link,
+                self,
+            ),
+        ]
+        self._scratchpad_link_controller = self._text_link_controllers[0]
+        self._plan_link_controller = self._text_link_controllers[1]
+
+    def _session_link_suggestions(self, command: str, query: str) -> list[LinkSuggestion]:
+        world, campaign, group = self._current_context_restrictions()
+        try:
+            return load_link_suggestions(
+                command,
+                query,
+                world=world,
+                campaign=campaign,
+                group=group,
+            )
+        except Exception as exc:
+            print(
+                f"[WARN] Unable to load session link suggestions for '{command}': {exc}",
+                file=sys.stderr,
+            )
+            return []
+
+    def _resolve_session_link_host(self):
+        host = self.window()
+        if hasattr(host, "open_applet"):
+            return host
+        return None
+
+    def _open_session_link_target(
+        self,
+        kind: str,
+        target_id: str,
+        collection_path: Optional[str] = None,
+    ) -> bool:
+        clean_kind = str(kind or "").strip().lower()
+        clean_target_id = str(target_id or "").strip()
+        if not clean_target_id:
+            return False
+        applet_key = SESSION_LINK_APPLET_KEY_BY_KIND.get(clean_kind)
+        if not applet_key:
+            print(f"[WARN] Unsupported link kind '{kind}'", file=sys.stderr)
+            return False
+        applet_def = SESSION_LINK_APPLET_DEFINITIONS.get(applet_key)
+        if not applet_def:
+            print(f"[WARN] Missing applet definition for '{applet_key}'", file=sys.stderr)
+            return False
+        host = self._resolve_session_link_host()
+        if host is None:
+            print("[WARN] Session link routing host is unavailable", file=sys.stderr)
+            return False
+
+        try:
+            host.open_applet(dict(applet_def), focus_if_new=True)
+        except Exception as exc:
+            print(f"[WARN] Failed to open applet '{applet_key}': {exc}", file=sys.stderr)
+            return False
+
+        target_widget = None
+        if hasattr(host, "_tab_by_key") and isinstance(getattr(host, "_tab_by_key"), dict):
+            target_widget = host._tab_by_key.get(applet_key)
+        if target_widget is None:
+            print(f"[WARN] Opened applet '{applet_key}' has no target widget", file=sys.stderr)
+            return False
+
+        if clean_kind in {"npc", "map"}:
+            open_method = getattr(target_widget, "open_linked_entry", None)
+            if callable(open_method):
+                return bool(open_method(clean_target_id))
+            print(
+                f"[WARN] Applet '{applet_key}' does not expose open_linked_entry",
+                file=sys.stderr,
+            )
+            return False
+
+        if clean_kind == "item":
+            open_method = getattr(target_widget, "open_linked_item", None)
+            if callable(open_method):
+                return bool(open_method(clean_target_id))
+            print(
+                f"[WARN] Applet '{applet_key}' does not expose open_linked_item",
+                file=sys.stderr,
+            )
+            return False
+
+        if clean_kind == "character":
+            open_method = getattr(target_widget, "open_linked_sheet", None)
+            if callable(open_method):
+                return bool(open_method(clean_target_id))
+            print(
+                f"[WARN] Applet '{applet_key}' does not expose open_linked_sheet",
+                file=sys.stderr,
+            )
+            return False
+
+        if clean_kind == "encounter":
+            open_method = getattr(target_widget, "open_linked_encounter", None)
+            if callable(open_method):
+                return bool(open_method(clean_target_id))
+            print(
+                f"[WARN] Applet '{applet_key}' does not expose open_linked_encounter",
+                file=sys.stderr,
+            )
+            return False
+
+        if clean_kind == "dungeon":
+            open_method = getattr(target_widget, "open_linked_dungeon", None)
+            if callable(open_method):
+                return bool(open_method(str(collection_path or ""), clean_target_id))
+            print(
+                f"[WARN] Applet '{applet_key}' does not expose open_linked_dungeon",
+                file=sys.stderr,
+            )
+            return False
+        return False
+
+    def _handle_session_text_link(self, link: ParsedSessionLink) -> bool:
+        ok = self._open_session_link_target(
+            link.kind,
+            link.target_id,
+            collection_path=link.collection_path,
+        )
+        if ok:
+            return True
+        print(
+            f"[WARN] Unable to resolve linked target kind='{link.kind}' id='{link.target_id}'",
+            file=sys.stderr,
+        )
+        QMessageBox.warning(
+            self,
+            "Linked Target Missing",
+            "The linked target could not be opened. It may have been removed or renamed.",
+        )
+        return False
 
     def _make_plan_tool_button(self, tooltip: str, icon_name: Optional[str], text: Optional[str] = None) -> QToolButton:
         btn = QToolButton()
@@ -1578,11 +1804,19 @@ class SessionCreatorWidget(QWidget):
         self._load_plan_text_file(filename)
         self._trigger_auto_save()
 
-    def _load_plan_text_file(self, path: Optional[str], fallback_text: str = "") -> None:
+    def _load_plan_text_file(
+        self,
+        path: Optional[str],
+        fallback_text: str = "",
+        fallback_html: str = "",
+    ) -> None:
         self._loading_plan_text = True
         self.plan_editor.blockSignals(True)
         if not path:
-            self.plan_editor.setPlainText(fallback_text or "")
+            if str(fallback_html or "").strip():
+                self.plan_editor.setHtml(fallback_html)
+            else:
+                self.plan_editor.setPlainText(fallback_text or "")
             self.plan_path_label.setText("No text file loaded")
             self.plan_editor.blockSignals(False)
             self._loading_plan_text = False
@@ -1591,6 +1825,14 @@ class SessionCreatorWidget(QWidget):
 
         text_path = Path(path)
         text = fallback_text or ""
+        # Preserve rich DMT links from session storage when available.
+        if str(fallback_html or "").strip() and "dmt://" in str(fallback_html or "").lower():
+            self.plan_editor.setHtml(fallback_html)
+            self.plan_path_label.setText(text_path.name if text_path.name else str(text_path))
+            self.plan_editor.blockSignals(False)
+            self._loading_plan_text = False
+            self._update_plan_toolbar_state()
+            return
         if text_path.exists():
             try:
                 text = text_path.read_text(encoding="utf-8")
@@ -1705,15 +1947,18 @@ class SessionCreatorWidget(QWidget):
             or not hasattr(self, "files_preview_panel")
         ):
             return
-        preview_panel = self.files_preview_panel
-        if preview_panel.width() <= 0 or preview_panel.height() <= 0:
+        try:
+            preview_panel = self.files_preview_panel
+            if preview_panel.width() <= 0 or preview_panel.height() <= 0:
+                return
+            btn = self.files_edge_toggle_btn
+            x = 4
+            y = max(0, (preview_panel.height() - btn.height()) // 2)
+            btn.move(x, y)
+            btn.raise_()
+            btn.show()
+        except RuntimeError:
             return
-        btn = self.files_edge_toggle_btn
-        x = 4
-        y = max(0, (preview_panel.height() - btn.height()) // 2)
-        btn.move(x, y)
-        btn.raise_()
-        btn.show()
 
     def _on_reference_tab_changed(self, index: int) -> None:
         if not hasattr(self, "ref_tabs") or not hasattr(self, "files_edge_toggle_btn"):

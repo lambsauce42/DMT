@@ -1380,6 +1380,25 @@ class NPCDatabaseWidget(QWidget):
                 self._npc_list.setCurrentRow(index)
                 return
 
+    def open_linked_entry(self, entry_id: str) -> bool:
+        clean_id = str(entry_id or "").strip()
+        if not clean_id:
+            return False
+        self._world_combo.blockSignals(True)
+        self._campaign_combo.blockSignals(True)
+        self._group_combo.blockSignals(True)
+        self._world_combo.setCurrentIndex(0)
+        self._campaign_combo.setCurrentIndex(0)
+        self._group_combo.setCurrentIndex(0)
+        self._world_combo.blockSignals(False)
+        self._campaign_combo.blockSignals(False)
+        self._group_combo.blockSignals(False)
+        self._tag_input.setText("")
+        self._search_input.setText("")
+        self._apply_filters()
+        self._select_entry_by_id(clean_id)
+        return bool(self._current_entry and self._current_entry.id == clean_id)
+
     def _make_unique_id(self, base_id: str) -> str:
         base = sanitize_filename(base_id or "npc")
         existing = {entry.id for entry in self._manager.entries}

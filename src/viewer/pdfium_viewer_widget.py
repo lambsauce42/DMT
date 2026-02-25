@@ -736,40 +736,47 @@ class PdfiumViewerWidget(QWidget):
         bitmap = pdfium_c.FPDFBitmap_Create(width_px, height_px, 1)
         if not bitmap:
             return None
-        pdfium_c.FPDFBitmap_FillRect(bitmap, 0, 0, width_px, height_px, 0xFFFFFFFF)
-        render_flags = pdfium_c.FPDF_ANNOT | pdfium_c.FPDF_LCD_TEXT
-        render_flags |= getattr(pdfium_c, "FPDF_RENDER_FORCEHALFTONE", 0)
-        pdfium_c.FPDF_RenderPageBitmap(
-            bitmap, raw_page, 0, 0, width_px, height_px, 0, render_flags
-        )
-        if self._form_handle is not None:
-            pdfium_c.FPDF_FFLDraw(
-                self._form_handle,
-                bitmap,
-                raw_page,
-                0,
-                0,
-                width_px,
-                height_px,
-                0,
-                render_flags,
-            )
-        buffer_ptr = pdfium_c.FPDFBitmap_GetBuffer(bitmap)
-        stride = pdfium_c.FPDFBitmap_GetStride(bitmap)
         image: Optional[QImage] = None
-        if buffer_ptr:
-            image = QImage(
-                buffer_ptr,
-                width_px,
-                height_px,
-                stride,
-                QImage.Format.Format_ARGB32,
-            ).copy()
-            image.setDevicePixelRatio(dpr)
-            self._cache_image(cache_key, image)
-        pdfium_c.FPDFBitmap_Destroy(bitmap)
-        self._dirty_pages.discard(index)
-        return image
+        try:
+            pdfium_c.FPDFBitmap_FillRect(bitmap, 0, 0, width_px, height_px, 0xFFFFFFFF)
+            render_flags = pdfium_c.FPDF_ANNOT | pdfium_c.FPDF_LCD_TEXT
+            render_flags |= getattr(pdfium_c, "FPDF_RENDER_FORCEHALFTONE", 0)
+            pdfium_c.FPDF_RenderPageBitmap(
+                bitmap, raw_page, 0, 0, width_px, height_px, 0, render_flags
+            )
+            if self._form_handle is not None:
+                pdfium_c.FPDF_FFLDraw(
+                    self._form_handle,
+                    bitmap,
+                    raw_page,
+                    0,
+                    0,
+                    width_px,
+                    height_px,
+                    0,
+                    render_flags,
+                )
+            buffer_ptr = pdfium_c.FPDFBitmap_GetBuffer(bitmap)
+            stride = int(pdfium_c.FPDFBitmap_GetStride(bitmap))
+            if buffer_ptr and stride > 0:
+                byte_count = stride * height_px
+                if byte_count > 0:
+                    # PySide6 does not accept raw integer pointers for QImage data.
+                    # Copy PDFium's BGRA buffer into Python bytes before QImage creation.
+                    pixel_bytes = ctypes.string_at(buffer_ptr, byte_count)
+                    image = QImage(
+                        pixel_bytes,
+                        width_px,
+                        height_px,
+                        stride,
+                        QImage.Format.Format_ARGB32,
+                    ).copy()
+                    image.setDevicePixelRatio(dpr)
+                    self._cache_image(cache_key, image)
+            self._dirty_pages.discard(index)
+            return image
+        finally:
+            pdfium_c.FPDFBitmap_Destroy(bitmap)
 
     def _cache_image(self, key: Tuple[int, float, int], image: QImage) -> None:
         self._render_cache[key] = image
@@ -897,7 +904,8 @@ class PdfiumViewerWidget(QWidget):
     def _ffi_set_cursor(self, _info, cursor_type: int) -> None:
         mapping = {
             pdfium_c.FXCT_ARROW: Qt.CursorShape.ArrowCursor,
-            pdfium_c.FXCT_VBEAM: Qt.CursorShape.IBeamCursor,
+            # Keep a single pointer style in text fields to avoid a second text-cursor look.
+            pdfium_c.FXCT_VBEAM: Qt.CursorShape.ArrowCursor,
             pdfium_c.FXCT_HAND: Qt.CursorShape.PointingHandCursor,
             pdfium_c.FXCT_HBEAM: Qt.CursorShape.SizeHorCursor,
             pdfium_c.FXCT_NESW: Qt.CursorShape.SizeBDiagCursor,

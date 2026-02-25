@@ -3751,6 +3751,63 @@ class PlayerSheetsWidget(QWidget):
         else:
             self._set_details(None)
 
+    def _select_entry_by_sheet_id(self, sheet_id: str) -> None:
+        clean_id = str(sheet_id or "").strip()
+        normalized_target = clean_id.casefold()
+        if not clean_id:
+            return
+        for index in range(self._sheet_list.count()):
+            item = self._sheet_list.item(index)
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(entry, PlayerSheetEntry):
+                continue
+            entry_sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+            if entry_sheet_id.casefold() == normalized_target:
+                self._sheet_list.setCurrentRow(index)
+                return
+
+    def open_linked_sheet(self, sheet_id: str) -> bool:
+        clean_id = str(sheet_id or "").strip()
+        normalized_target = clean_id.casefold()
+        if not clean_id:
+            return False
+        self._world_combo.blockSignals(True)
+        self._campaign_combo.blockSignals(True)
+        self._group_combo.blockSignals(True)
+        self._world_combo.setCurrentIndex(0)
+        self._campaign_combo.setCurrentIndex(0)
+        self._group_combo.setCurrentIndex(0)
+        self._world_combo.blockSignals(False)
+        self._campaign_combo.blockSignals(False)
+        self._group_combo.blockSignals(False)
+        self._tag_input.setText("")
+        self._apply_filters()
+        matched_entry: Optional[PlayerSheetEntry] = None
+        matched_item: Optional[QListWidgetItem] = None
+        for index in range(self._sheet_list.count()):
+            item = self._sheet_list.item(index)
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(entry, PlayerSheetEntry):
+                continue
+            entry_sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+            if entry_sheet_id.casefold() == normalized_target:
+                matched_entry = entry
+                matched_item = item
+                break
+        if matched_entry is None:
+            return False
+        self._selection_guard = True
+        try:
+            if matched_item is not None:
+                self._sheet_list.setCurrentItem(matched_item)
+            self._set_details(matched_entry)
+        finally:
+            self._selection_guard = False
+        if self._current_entry is None:
+            return False
+        current_sheet_id = str(sheet_id_for_entry(self._current_entry) or "").strip()
+        return current_sheet_id.casefold() == normalized_target
+
     def _set_details(self, entry: Optional[PlayerSheetEntry]) -> None:
         self._current_entry = entry
         self._set_unsaved_indicator(False)

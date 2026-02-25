@@ -1476,6 +1476,37 @@ class EncounterPanel(QWidget):
             self._encounter_entries.append(EncounterEntry(monster=monster, count=count))
         self._refresh_encounter()
 
+    def open_linked_encounter(self, encounter_id: str) -> bool:
+        clean_id = str(encounter_id or "").strip()
+        if not clean_id:
+            return False
+        target_casefold = clean_id.casefold()
+        encounters_dir = self._encounters_dir()
+        if not encounters_dir.exists():
+            print(
+                f"[WARN] Encounter directory does not exist: '{encounters_dir}'",
+                file=sys.stderr,
+            )
+            return False
+        for path in sorted(encounters_dir.rglob(f"*{ENCOUNTER_FILE_EXTENSION}")):
+            if not path.is_file():
+                continue
+            data = self._read_encounter_payload(path)
+            if not isinstance(data, dict):
+                continue
+            candidate_id = str(data.get("object_id") or data.get("id") or path.stem).strip()
+            if not candidate_id:
+                continue
+            if candidate_id.casefold() != target_casefold:
+                continue
+            self.load_encounter(path)
+            return str(self._encounter_id or "").strip().casefold() == target_casefold
+        print(
+            f"[WARN] Unable to resolve linked encounter id='{clean_id}'",
+            file=sys.stderr,
+        )
+        return False
+
     def _read_encounter_payload(self, path: Path) -> Optional[dict]:
         data = read_dmt_package_info(path)
         if isinstance(data, dict) and str(data.get("format") or "") == ENCOUNTER_FILE_FORMAT:

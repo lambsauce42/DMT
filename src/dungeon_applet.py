@@ -11468,6 +11468,43 @@ class DungeonAppletWidget(QWidget):
         self._preview_timer.start()
         self._update_active_dungeon_label()
 
+    def open_linked_dungeon(self, collection_path: str, dungeon_id: str) -> bool:
+        clean_dungeon_id = str(dungeon_id or "").strip()
+        if not clean_dungeon_id:
+            return False
+
+        requested_collection = str(collection_path or "").strip()
+        if requested_collection:
+            target_path = Path(requested_collection).expanduser().resolve()
+            if not target_path.exists():
+                return False
+            current_path = self._collection_path.resolve() if self._collection_path is not None else None
+            if current_path is None or current_path != target_path:
+                if not self._confirm_unsaved_before_load():
+                    return False
+                self._load_collection_from_path(target_path)
+
+        target_dungeon = self._find_dungeon(clean_dungeon_id)
+        if target_dungeon is None:
+            return False
+
+        if str(self._active_dungeon_id or "") != clean_dungeon_id:
+            self._switch_to_dungeon(clean_dungeon_id, save_current=True)
+
+        for index in range(self._dungeon_list.count()):
+            item = self._dungeon_list.item(index)
+            if item is None:
+                continue
+            try:
+                item_id = item.data(Qt.ItemDataRole.UserRole)
+            except RuntimeError:
+                continue
+            if item_id == clean_dungeon_id:
+                self._dungeon_list.setCurrentItem(item)
+                break
+        self._update_tile_selection(clean_dungeon_id)
+        return str(self._active_dungeon_id or "") == clean_dungeon_id
+
     def _add_dungeon(self) -> None:
         base_name = "Dungeon"
         existing = {d["name"] for d in self._dungeons}
