@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -58,6 +59,7 @@ from player_sheets import (
     _combo_optional_value,
     _populate_combo,
     default_sheet_save_dir,
+    list_character_link_targets,
     list_campaigns,
     list_groups,
     list_worlds,
@@ -65,7 +67,10 @@ from player_sheets import (
     parse_tag_query,
     resolve_selection,
     sanitize_filename,
+    sheet_id_for_entry,
 )
+
+logger = logging.getLogger(__name__)
 
 NPCS_DIR_NAME = "npcs"
 NPCS_FILE_EXTENSION = ".dmtnpc"
@@ -137,6 +142,7 @@ class NPCEntry:
     sessions: List[str] = field(default_factory=list)
     encounters: List[str] = field(default_factory=list)
     loot: List[str] = field(default_factory=list)
+    linked_sheet_id: str = ""
     created_at: str = ""
     last_modified: str = ""
     archived: bool = False
@@ -159,6 +165,7 @@ def entry_to_dict(entry: NPCEntry) -> dict:
         "sessions": list(entry.sessions),
         "encounters": list(entry.encounters),
         "loot": list(entry.loot),
+        "linked_sheet_id": str(entry.linked_sheet_id or "").strip(),
         "created_at": entry.created_at,
         "last_modified": entry.last_modified,
         "archived": entry.archived,
@@ -196,6 +203,7 @@ def entry_from_dict(payload: dict) -> Optional[NPCEntry]:
         sessions=[str(value) for value in sessions if str(value).strip()],
         encounters=[str(value) for value in encounters if str(value).strip()],
         loot=[str(value) for value in loot if str(value).strip()],
+        linked_sheet_id=str(payload.get("linked_sheet_id") or "").strip(),
         created_at=str(payload.get("created_at") or "").strip(),
         last_modified=str(payload.get("last_modified") or "").strip(),
         archived=bool(payload.get("archived", False)),
@@ -230,6 +238,188 @@ def move_to_trash(entry: NPCEntry) -> None:
         }
     )
     save_trash(trash)
+
+
+def load_npc_entries_from_storage() -> List[NPCEntry]:
+    entries: List[NPCEntry] = []
+    for path in sorted(npc_storage_dir().glob(f"*{NPCS_FILE_EXTENSION}")):
+        info = read_dmt_package_info(path)
+        if not isinstance(info, dict):
+            continue
+        if str(info.get("format") or "") != NPCS_FILE_FORMAT:
+            continue
+        payload = info.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if not str(payload.get("id") or "").strip():
+            payload = dict(payload)
+            payload["id"] = str(info.get("object_id") or "").strip()
+        entry = entry_from_dict(payload)
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def save_npc_entries_to_storage(entries: List[NPCEntry]) -> None:
+    root = npc_storage_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    expected: set[Path] = set()
+    for entry in entries:
+        if not str(entry.id or "").strip():
+            entry.id = generate_probabilistic_unique_id("npc")
+        path = npc_file_path(entry.id)
+        expected.add(path.resolve())
+        write_dmt_package(
+            path,
+            info={
+                "format": NPCS_FILE_FORMAT,
+                "object_type": "npc",
+                "object_id": str(entry.id),
+                "name": str(entry.name),
+                "updated_at": _now_timestamp(),
+                "payload": entry_to_dict(entry),
+            },
+        )
+    for existing in root.glob(f"*{NPCS_FILE_EXTENSION}"):
+        try:
+            resolved = existing.resolve()
+        except Exception:
+            resolved = existing
+        if resolved in expected:
+            continue
+        try:
+            existing.unlink()
+        except Exception:
+            continue
+
+
+def _character_sheet_name_map() -> dict[str, str]:
+    try:
+        entries = list_character_link_targets()
+    except Exception as exc:
+        logger.warning(
+            "Unable to load character link targets while resolving NPC links: %s",
+            exc,
+        )
+        return {}
+    mapping: dict[str, str] = {}
+    for entry in entries:
+        sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+        if not sheet_id:
+            continue
+        mapping[sheet_id] = str(getattr(entry, "name", "") or sheet_id).strip() or sheet_id
+    return mapping
+
+
+def linked_npc_names_by_sheet_id() -> dict[str, list[str]]:
+    entries = load_npc_entries_from_storage()
+    name_map = _character_sheet_name_map()
+    valid_sheet_ids = set(name_map.keys())
+    changed = False
+    result: dict[str, list[str]] = {}
+    for entry in entries:
+        linked_sheet = str(entry.linked_sheet_id or "").strip()
+        if not linked_sheet:
+            continue
+        if linked_sheet not in valid_sheet_ids:
+            logger.warning(
+                "Auto-unlinking NPC '%s' (%s) from missing character sheet '%s'.",
+                entry.name,
+                entry.id,
+                linked_sheet,
+            )
+            entry.linked_sheet_id = ""
+            entry.last_modified = _now_timestamp()
+            changed = True
+            continue
+        result.setdefault(linked_sheet, []).append(entry.name)
+    for sheet_id, names in result.items():
+        result[sheet_id] = sorted(names, key=lambda value: str(value).casefold())
+    if changed:
+        save_npc_entries_to_storage(entries)
+    return result
+
+
+def set_npc_link(npc_id: str, sheet_id: str) -> bool:
+    target_npc_id = str(npc_id or "").strip()
+    target_sheet_id = str(sheet_id or "").strip()
+    if not target_npc_id:
+        return False
+    entries = load_npc_entries_from_storage()
+    for entry in entries:
+        if str(entry.id or "").strip() != target_npc_id:
+            continue
+        if str(entry.linked_sheet_id or "").strip() == target_sheet_id:
+            return False
+        entry.linked_sheet_id = target_sheet_id
+        entry.last_modified = _now_timestamp()
+        save_npc_entries_to_storage(entries)
+        return True
+    return False
+
+
+def set_links_for_sheet(sheet_id: str, selected_npc_ids: set[str]) -> tuple[int, int]:
+    target_sheet_id = str(sheet_id or "").strip()
+    if not target_sheet_id:
+        return (0, 0)
+    selected = {str(value or "").strip() for value in selected_npc_ids if str(value or "").strip()}
+    entries = load_npc_entries_from_storage()
+    linked_count = 0
+    unlinked_count = 0
+    changed = False
+    for entry in entries:
+        npc_id = str(entry.id or "").strip()
+        current = str(entry.linked_sheet_id or "").strip()
+        if npc_id in selected:
+            if current != target_sheet_id:
+                entry.linked_sheet_id = target_sheet_id
+                entry.last_modified = _now_timestamp()
+                linked_count += 1
+                changed = True
+            continue
+        if current == target_sheet_id:
+            entry.linked_sheet_id = ""
+            entry.last_modified = _now_timestamp()
+            unlinked_count += 1
+            changed = True
+    if changed:
+        save_npc_entries_to_storage(entries)
+    return (linked_count, unlinked_count)
+
+
+def retarget_links_for_sheet_rename(old_sheet_id: str, new_sheet_id: str) -> int:
+    source_sheet = str(old_sheet_id or "").strip()
+    target_sheet = str(new_sheet_id or "").strip()
+    if not source_sheet or not target_sheet or source_sheet == target_sheet:
+        return 0
+    entries = load_npc_entries_from_storage()
+    migrated = 0
+    for entry in entries:
+        if str(entry.linked_sheet_id or "").strip() != source_sheet:
+            continue
+        entry.linked_sheet_id = target_sheet
+        entry.last_modified = _now_timestamp()
+        migrated += 1
+    if migrated > 0:
+        save_npc_entries_to_storage(entries)
+    return migrated
+
+
+def unlink_links_for_sheet(sheet_id: str) -> int:
+    target_sheet = str(sheet_id or "").strip()
+    if not target_sheet:
+        return 0
+    entries = load_npc_entries_from_storage()
+    cleared = 0
+    for entry in entries:
+        if str(entry.linked_sheet_id or "").strip() != target_sheet:
+            continue
+        entry.linked_sheet_id = ""
+        entry.last_modified = _now_timestamp()
+        cleared += 1
+    if cleared > 0:
+        save_npc_entries_to_storage(entries)
+    return cleared
 
 
 def matches_filters(
@@ -654,6 +844,12 @@ class NPCDatabaseWidget(QWidget):
         self._header_name.setObjectName("PanelTitle")
         header_layout.addWidget(self._header_name, 1)
 
+        self._manage_link_button = QToolButton()
+        self._manage_link_button.setObjectName("SecondaryButton")
+        self._manage_link_button.setIcon(QIcon(os.path.join(ICON_DIR, "person.svg")))
+        self._manage_link_button.setToolTip("Manage Character Link")
+        self._manage_link_button.clicked.connect(self._manage_character_link)
+
         self._duplicate_button = QToolButton()
         self._duplicate_button.setObjectName("PrimaryButton")
         self._duplicate_button.setIcon(QIcon(os.path.join(ICON_DIR, "copy.svg")))
@@ -686,6 +882,7 @@ class NPCDatabaseWidget(QWidget):
 
         for btn in (
             # self._add_button, Removed
+            self._manage_link_button,
             self._duplicate_button,
             self._edit_button,
             self._save_button,
@@ -743,6 +940,7 @@ class NPCDatabaseWidget(QWidget):
         self._detail_group = QLabel("-")
         self._detail_location = QLabel("-")
         self._detail_tags = QLabel("-")
+        self._detail_linked_character = QLabel("-")
         self._detail_updated = QLabel("-")
         for label in (
             self._detail_name,
@@ -752,6 +950,7 @@ class NPCDatabaseWidget(QWidget):
             self._detail_group,
             self._detail_location,
             self._detail_tags,
+            self._detail_linked_character,
             self._detail_updated,
         ):
             label.setWordWrap(True)
@@ -763,6 +962,9 @@ class NPCDatabaseWidget(QWidget):
         summary_layout.addRow(self._make_field_label("Group"), self._detail_group)
         summary_layout.addRow(self._make_field_label("Location"), self._detail_location)
         summary_layout.addRow(self._make_field_label("Tags"), self._detail_tags)
+        summary_layout.addRow(
+            self._make_field_label("Linked Character"), self._detail_linked_character
+        )
         summary_layout.addRow(self._make_field_label("Last Updated"), self._detail_updated)
 
         details_body_layout.addWidget(summary_section)
@@ -864,55 +1066,10 @@ class NPCDatabaseWidget(QWidget):
         return label
 
     def _load_entries(self) -> List[NPCEntry]:
-        entries: List[NPCEntry] = []
-        for path in sorted(npc_storage_dir().glob(f"*{NPCS_FILE_EXTENSION}")):
-            info = read_dmt_package_info(path)
-            if not isinstance(info, dict):
-                continue
-            if str(info.get("format") or "") != NPCS_FILE_FORMAT:
-                continue
-            payload = info.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            if not str(payload.get("id") or "").strip():
-                payload = dict(payload)
-                payload["id"] = str(info.get("object_id") or "").strip()
-            entry = entry_from_dict(payload)
-            if entry:
-                entries.append(entry)
-        return entries
+        return load_npc_entries_from_storage()
 
     def _save_entries(self) -> None:
-        root = npc_storage_dir()
-        root.mkdir(parents=True, exist_ok=True)
-        expected: set[Path] = set()
-        for entry in self._manager.entries:
-            if not str(entry.id or "").strip():
-                entry.id = generate_probabilistic_unique_id("npc")
-            path = npc_file_path(entry.id)
-            expected.add(path.resolve())
-            write_dmt_package(
-                path,
-                info={
-                    "format": NPCS_FILE_FORMAT,
-                    "object_type": "npc",
-                    "object_id": str(entry.id),
-                    "name": str(entry.name),
-                    "updated_at": _now_timestamp(),
-                    "payload": entry_to_dict(entry),
-                },
-            )
-        for existing in root.glob(f"*{NPCS_FILE_EXTENSION}"):
-            try:
-                resolved = existing.resolve()
-            except Exception:
-                resolved = existing
-            if resolved in expected:
-                continue
-            try:
-                existing.unlink()
-            except Exception:
-                continue
+        save_npc_entries_to_storage(self._manager.entries)
 
     def _on_world_changed(self) -> None:
         selected_campaign = self._refresh_campaigns()
@@ -1017,6 +1174,7 @@ class NPCDatabaseWidget(QWidget):
         self._current_entry = entry
         if not entry:
             self._header_name.setText("NPC: None")
+            self._manage_link_button.setEnabled(False)
             self._edit_button.setEnabled(False)
             self._duplicate_button.setEnabled(False)
             self._delete_button.setEnabled(False)
@@ -1029,12 +1187,14 @@ class NPCDatabaseWidget(QWidget):
             self._detail_group.setText("-")
             self._detail_location.setText("-")
             self._detail_tags.setText("-")
+            self._detail_linked_character.setText("-")
             self._detail_updated.setText("-")
             self._detail_updated.setText("-")
 
             return
 
         self._header_name.setText(f"NPC: {entry.name}")
+        self._manage_link_button.setEnabled(True)
         self._edit_button.setEnabled(True)
         self._duplicate_button.setEnabled(True)
         self._delete_button.setEnabled(True)
@@ -1045,12 +1205,85 @@ class NPCDatabaseWidget(QWidget):
         self._detail_group.setText(entry.group or "Unassigned")
         self._detail_location.setText(entry.location or "Unknown")
         self._detail_tags.setText(", ".join(entry.tags) if entry.tags else "None")
+        linked_text = self._linked_character_display_text(str(entry.linked_sheet_id or ""))
+        self._detail_linked_character.setText(linked_text)
         updated = entry.last_modified or entry.created_at or "Unknown"
         self._detail_updated.setText(updated)
         self._detail_updated.setText(updated)
         self._description_text.blockSignals(True)
         self._description_text.setHtml(entry.description or "")
         self._description_text.blockSignals(False)
+
+    def _character_link_candidates_for_entry(
+        self, entry: NPCEntry
+    ) -> list[tuple[str, str]]:
+        candidates: list[tuple[tuple[int, str, str], tuple[str, str]]] = []
+        for target in list_character_link_targets():
+            sheet_id = str(sheet_id_for_entry(target) or "").strip()
+            if not sheet_id:
+                continue
+            sheet_name = str(getattr(target, "name", "") or sheet_id).strip() or sheet_id
+            same_context = (
+                str(getattr(target, "world", None) or "") == str(entry.world or "")
+                and str(getattr(target, "campaign", None) or "") == str(entry.campaign or "")
+                and str(getattr(target, "group", None) or "") == str(entry.group or "")
+            )
+            sort_key = (
+                0 if same_context else 1,
+                sheet_name.casefold(),
+                sheet_id.casefold(),
+            )
+            candidates.append((sort_key, (sheet_id, sheet_name)))
+        candidates.sort(key=lambda value: value[0])
+        return [item for _sort_key, item in candidates]
+
+    def _linked_character_display_text(self, sheet_id: str) -> str:
+        clean_sheet = str(sheet_id or "").strip()
+        if not clean_sheet:
+            return "None"
+        sheet_name = _character_sheet_name_map().get(clean_sheet)
+        if sheet_name:
+            return f"{sheet_name} ({clean_sheet})"
+        return clean_sheet
+
+    def _manage_character_link(self) -> None:
+        if not self._current_entry:
+            QMessageBox.information(self, "No Selection", "Select an NPC first.")
+            return
+        options = self._character_link_candidates_for_entry(self._current_entry)
+        labels = ["None (Unlink)"]
+        label_to_sheet: dict[str, str] = {"None (Unlink)": ""}
+        for sheet_id, sheet_name in options:
+            label = f"{sheet_name} ({sheet_id})"
+            labels.append(label)
+            label_to_sheet[label] = sheet_id
+        current_sheet = str(self._current_entry.linked_sheet_id or "").strip()
+        current_label = "None (Unlink)"
+        for label, sheet_id in label_to_sheet.items():
+            if sheet_id == current_sheet:
+                current_label = label
+                break
+        current_index = max(0, labels.index(current_label))
+        selected_label, ok = QInputDialog.getItem(
+            self,
+            "Manage Character Link",
+            "Character sheet",
+            labels,
+            current_index,
+            False,
+        )
+        if not ok:
+            return
+        new_sheet_id = str(label_to_sheet.get(str(selected_label), "") or "").strip()
+        if str(self._current_entry.linked_sheet_id or "").strip() == new_sheet_id:
+            return
+        self._current_entry.linked_sheet_id = new_sheet_id
+        self._current_entry.last_modified = _now_timestamp()
+        entry_id = str(self._current_entry.id or "")
+        self._save_entries()
+        self._apply_filters()
+        if entry_id:
+            self._select_entry_by_id(entry_id)
 
 
 
@@ -1077,6 +1310,7 @@ class NPCDatabaseWidget(QWidget):
         if not entry:
             return
         entry.id = self._current_entry.id
+        entry.linked_sheet_id = self._current_entry.linked_sheet_id
         self._manager.update_entry(entry)
         self._save_entries()
         self._apply_filters()
@@ -1111,6 +1345,7 @@ class NPCDatabaseWidget(QWidget):
             sessions=list(self._current_entry.sessions),
             encounters=list(self._current_entry.encounters),
             loot=list(self._current_entry.loot),
+            linked_sheet_id=str(self._current_entry.linked_sheet_id or ""),
             created_at=now,
             last_modified=now,
             archived=self._current_entry.archived,

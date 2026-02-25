@@ -110,6 +110,76 @@ from loot_applet import (
 
 logger = logging.getLogger(__name__)
 
+
+def _linked_npc_names_by_sheet_id() -> dict[str, list[str]]:
+    try:
+        from npc_database import linked_npc_names_by_sheet_id
+    except Exception as exc:
+        logger.warning("Unable to import NPC link map helper: %s", exc)
+        return {}
+    try:
+        return linked_npc_names_by_sheet_id()
+    except Exception as exc:
+        logger.warning("Unable to resolve linked NPC names by sheet id: %s", exc)
+        return {}
+
+
+def _load_npcs_for_linking() -> list[object]:
+    try:
+        from npc_database import load_npc_entries_from_storage
+    except Exception as exc:
+        logger.warning("Unable to import NPC link loader: %s", exc)
+        return []
+    try:
+        return list(load_npc_entries_from_storage())
+    except Exception as exc:
+        logger.warning("Unable to load NPC entries for link management: %s", exc)
+        return []
+
+
+def _set_links_for_sheet(sheet_id: str, selected_ids: set[str]) -> tuple[int, int]:
+    try:
+        from npc_database import set_links_for_sheet
+    except Exception as exc:
+        logger.warning("Unable to import NPC link mutator: %s", exc)
+        return (0, 0)
+    try:
+        return set_links_for_sheet(sheet_id, selected_ids)
+    except Exception as exc:
+        logger.warning("Unable to set NPC links for sheet '%s': %s", sheet_id, exc)
+        return (0, 0)
+
+
+def _retarget_npc_links_for_sheet_rename(old_sheet_id: str, new_sheet_id: str) -> int:
+    try:
+        from npc_database import retarget_links_for_sheet_rename
+    except Exception as exc:
+        logger.warning("Unable to import NPC link retarget helper: %s", exc)
+        return 0
+    try:
+        return int(retarget_links_for_sheet_rename(old_sheet_id, new_sheet_id))
+    except Exception as exc:
+        logger.warning(
+            "Unable to retarget NPC links from '%s' to '%s': %s",
+            old_sheet_id,
+            new_sheet_id,
+            exc,
+        )
+        return 0
+
+
+def _unlink_npc_links_for_sheet(sheet_id: str) -> int:
+    try:
+        from npc_database import unlink_links_for_sheet
+    except Exception as exc:
+        logger.warning("Unable to import NPC unlink helper: %s", exc)
+        return 0
+    try:
+        return int(unlink_links_for_sheet(sheet_id))
+    except Exception as exc:
+        logger.warning("Unable to unlink NPC links for sheet '%s': %s", sheet_id, exc)
+        return 0
+
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
 EQUIPMENT_BACKGROUNDS_DIR = Path(__file__).resolve().parent.parent / "assets" / "equipment backgrounds"
@@ -1796,6 +1866,17 @@ def filter_entries(
     ]
 
 
+def _format_linked_npc_summary(names: Iterable[str], max_names: int = 2) -> str:
+    cleaned = [str(name).strip() for name in names if str(name).strip()]
+    if not cleaned:
+        return "None"
+    visible = cleaned[:max_names]
+    remaining = max(0, len(cleaned) - len(visible))
+    if remaining > 0:
+        return f"{', '.join(visible)} (+{remaining})"
+    return ", ".join(visible)
+
+
 def _combo_optional_value(combo: QComboBox) -> Optional[str]:
     value = combo.currentText().strip()
     if not value or value == ANY_LABEL:
@@ -2767,6 +2848,7 @@ class PlayerSheetsWidget(QWidget):
         self._inventory_notes_row: Optional[QWidget] = None
         self._inventory_notepad: Optional[QTextEdit] = None
         self._syncing_inventory_notes = False
+        self._linked_npc_names_map: dict[str, list[str]] = {}
         self._header_name_text = "Character: None"
         self._sheet_unsaved = False
         self._sheet_expanded = False
@@ -2937,6 +3019,12 @@ class PlayerSheetsWidget(QWidget):
         self._edit_button.setToolTip("Edit Character Settings")
         self._edit_button.clicked.connect(self._open_edit_sheet_dialog)
 
+        self._manage_npc_links_button = QToolButton()
+        self._manage_npc_links_button.setObjectName("SecondaryButton")
+        self._manage_npc_links_button.setIcon(QIcon(os.path.join(ICON_DIR, "person.svg")))
+        self._manage_npc_links_button.setToolTip("Manage NPC Links")
+        self._manage_npc_links_button.clicked.connect(self._open_manage_npc_links_dialog)
+
         self._save_button = QToolButton()
         self._save_button.setObjectName("SecondaryButton")
         self._save_button.setIcon(QIcon(os.path.join(ICON_DIR, "save.svg")))
@@ -2958,6 +3046,7 @@ class PlayerSheetsWidget(QWidget):
         for button in (
             self._open_pdf_button,
             self._edit_button,
+            self._manage_npc_links_button,
             self._save_button,
             self._delete_button,
             self._disintegrate_button,
@@ -3610,7 +3699,21 @@ class PlayerSheetsWidget(QWidget):
     def _reset_tags_filter(self) -> None:
         self._tag_input.setText("")
 
+    def _reload_linked_npc_name_map(self) -> None:
+        self._linked_npc_names_map = _linked_npc_names_by_sheet_id()
+
+    def _linked_npc_names_for_entry(self, entry: PlayerSheetEntry) -> list[str]:
+        sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+        if not sheet_id:
+            return []
+        names = self._linked_npc_names_map.get(sheet_id, [])
+        return [str(name).strip() for name in names if str(name).strip()]
+
+    def _linked_npc_summary_for_entry(self, entry: PlayerSheetEntry) -> str:
+        return _format_linked_npc_summary(self._linked_npc_names_for_entry(entry))
+
     def _apply_filters(self) -> None:
+        self._reload_linked_npc_name_map()
         self._manager.set_filters(
             world=_combo_optional_value(self._world_combo),
             campaign=_combo_optional_value(self._campaign_combo),
@@ -3629,7 +3732,11 @@ class PlayerSheetsWidget(QWidget):
             context_parts = [part for part in [entry.world, entry.campaign, entry.group] if part]
             context_line = " • ".join(context_parts) if context_parts else "Unassigned"
             tags_line = ", ".join(entry.tags) if entry.tags else "No tags"
-            item_text = f"Character: {entry.name}\n{context_line}\n{tags_line}"
+            linked_summary = self._linked_npc_summary_for_entry(entry)
+            item_text = (
+                f"Character: {entry.name}\n{context_line}\n{tags_line}\n"
+                f"NPCs: {linked_summary}"
+            )
             item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, entry)
             self._sheet_list.addItem(item)
@@ -3651,14 +3758,17 @@ class PlayerSheetsWidget(QWidget):
             self._set_header_name("Character: None")
             self._open_pdf_button.setEnabled(False)
             self._edit_button.setEnabled(False)
+            self._manage_npc_links_button.setEnabled(False)
             self._save_button.setEnabled(False)
             self._load_pdf_preview(None)
             self._set_inventory(None)
             return
 
-        self._set_header_name(f"Character: {entry.name}")
+        linked_summary = self._linked_npc_summary_for_entry(entry)
+        self._set_header_name(f"Character: {entry.name} | NPCs: {linked_summary}")
         self._open_pdf_button.setEnabled(bool(entry.pdf_path or entry.archive_path))
         self._edit_button.setEnabled(True)
+        self._manage_npc_links_button.setEnabled(True)
         self._save_button.setEnabled(True)
         self._load_pdf_preview(entry)
         self._set_inventory(entry)
@@ -3669,11 +3779,14 @@ class PlayerSheetsWidget(QWidget):
             self._set_header_name("Character: None")
             self._open_pdf_button.setEnabled(False)
             self._edit_button.setEnabled(False)
+            self._manage_npc_links_button.setEnabled(False)
             self._save_button.setEnabled(False)
             return
-        self._set_header_name(f"Character: {entry.name}")
+        linked_summary = self._linked_npc_summary_for_entry(entry)
+        self._set_header_name(f"Character: {entry.name} | NPCs: {linked_summary}")
         self._open_pdf_button.setEnabled(bool(entry.pdf_path or entry.archive_path))
         self._edit_button.setEnabled(True)
+        self._manage_npc_links_button.setEnabled(True)
         self._save_button.setEnabled(True)
 
     def _refresh_inventory_library(self) -> None:
@@ -4471,6 +4584,111 @@ class PlayerSheetsWidget(QWidget):
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
             QMessageBox.warning(self, "Open Failed", "Unable to open the PDF file.")
 
+    def _select_npc_links_for_sheet(
+        self,
+        sheet_entry: PlayerSheetEntry,
+        npc_entries: list[object],
+    ) -> Optional[set[str]]:
+        sheet_id = str(sheet_id_for_entry(sheet_entry) or "").strip()
+        if not sheet_id:
+            return None
+
+        def _sort_key(npc: object) -> tuple[int, str, str]:
+            same_context = (
+                str(getattr(npc, "world", None) or "") == str(sheet_entry.world or "")
+                and str(getattr(npc, "campaign", None) or "") == str(sheet_entry.campaign or "")
+                and str(getattr(npc, "group", None) or "") == str(sheet_entry.group or "")
+            )
+            npc_name = str(getattr(npc, "name", "") or "").strip()
+            npc_id = str(getattr(npc, "id", "") or "").strip()
+            return (0 if same_context else 1, npc_name.casefold(), npc_id.casefold())
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage NPC Links")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        heading = QLabel(f"Select NPC links for {sheet_entry.name}", dialog)
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        list_widget = QListWidget(dialog)
+        list_widget.setObjectName("NavList")
+        list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        layout.addWidget(list_widget, 1)
+
+        for npc in sorted(npc_entries, key=_sort_key):
+            npc_id = str(getattr(npc, "id", "") or "").strip()
+            if not npc_id:
+                continue
+            npc_name = str(getattr(npc, "name", "") or npc_id).strip() or npc_id
+            context_parts = [
+                part
+                for part in [
+                    str(getattr(npc, "world", None) or "").strip(),
+                    str(getattr(npc, "campaign", None) or "").strip(),
+                    str(getattr(npc, "group", None) or "").strip(),
+                ]
+                if part
+            ]
+            context_line = " • ".join(context_parts) if context_parts else "Unassigned"
+            linked_sheet_id = str(getattr(npc, "linked_sheet_id", "") or "").strip()
+            suffix = ""
+            if linked_sheet_id and linked_sheet_id != sheet_id:
+                suffix = f" [linked: {linked_sheet_id}]"
+            item = QListWidgetItem(f"{npc_name}\n{context_line}{suffix}")
+            item.setData(Qt.ItemDataRole.UserRole, npc_id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            if linked_sheet_id == sheet_id:
+                item.setCheckState(Qt.CheckState.Checked)
+            else:
+                item.setCheckState(Qt.CheckState.Unchecked)
+            list_widget.addItem(item)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        selected_ids: set[str] = set()
+        for index in range(list_widget.count()):
+            item = list_widget.item(index)
+            if item.checkState() != Qt.CheckState.Checked:
+                continue
+            npc_id = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+            if npc_id:
+                selected_ids.add(npc_id)
+        return selected_ids
+
+    def _open_manage_npc_links_dialog(self) -> None:
+        if not self._current_entry:
+            QMessageBox.information(self, "No Selection", "Select a sheet to manage links.")
+            return
+        npc_entries = _load_npcs_for_linking()
+        selected_ids = self._select_npc_links_for_sheet(self._current_entry, npc_entries)
+        if selected_ids is None:
+            return
+        sheet_id = str(sheet_id_for_entry(self._current_entry) or "").strip()
+        if not sheet_id:
+            QMessageBox.warning(self, "Manage NPC Links", "Selected sheet has no valid id.")
+            return
+        _set_links_for_sheet(sheet_id, selected_ids)
+        self._apply_filters()
+        for index in range(self._sheet_list.count()):
+            item = self._sheet_list.item(index)
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if entry and str(sheet_id_for_entry(entry) or "").strip() == sheet_id:
+                self._sheet_list.setCurrentRow(index)
+                break
+
     def _check_unsaved_before_switch(
         self, target: QListWidgetItem, previous: Optional[QListWidgetItem]
     ) -> None:
@@ -4575,6 +4793,7 @@ class PlayerSheetsWidget(QWidget):
         if not self._current_entry:
             QMessageBox.information(self, "No Selection", "Select a sheet to delete.")
             return
+        sheet_id = str(sheet_id_for_entry(self._current_entry) or "").strip()
         # Move to trash immediately - no confirmation needed since it's recoverable
         if self._sheet_panel is not None:
             self._sheet_panel.clear()
@@ -4590,6 +4809,8 @@ class PlayerSheetsWidget(QWidget):
                 "Failed to move player sheet PDF to trash for: %s",
                 self._current_entry.pdf_path,
             )
+        if sheet_id:
+            _unlink_npc_links_for_sheet(sheet_id)
         self._remove_entry(self._current_entry)
 
     def _disintegrate_current_sheet(self) -> None:
@@ -4613,9 +4834,12 @@ class PlayerSheetsWidget(QWidget):
                 "Disintegration cancelled. The confirmation text did not match.",
             )
             return
+        sheet_id = str(sheet_id_for_entry(self._current_entry) or "").strip()
         if self._sheet_panel is not None:
             self._sheet_panel.clear()
         disintegrate_entry_files(self._current_entry)
+        if sheet_id:
+            _unlink_npc_links_for_sheet(sheet_id)
         self._remove_entry(self._current_entry)
 
     def _delete_entry_files(self, entry: PlayerSheetEntry) -> None:
@@ -4951,6 +5175,7 @@ class PlayerSheetsWidget(QWidget):
         if not self._current_entry:
             QMessageBox.information(self, "No Selection", "Select a sheet to edit.")
             return
+        old_sheet_id = str(sheet_id_for_entry(self._current_entry) or "").strip()
         dialog = PlayerSheetDialog(self._world_data, self, entry=self._current_entry)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -4964,6 +5189,16 @@ class PlayerSheetsWidget(QWidget):
         self._current_entry.campaign = updated.campaign
         self._current_entry.group = updated.group
         self._current_entry.tags = updated.tags
+        new_sheet_id = str(sheet_id_for_entry(self._current_entry) or "").strip()
+        if old_sheet_id and new_sheet_id and old_sheet_id != new_sheet_id:
+            migrated = _retarget_npc_links_for_sheet_rename(old_sheet_id, new_sheet_id)
+            if migrated > 0:
+                logger.info(
+                    "Retargeted %s NPC links from '%s' to '%s'.",
+                    migrated,
+                    old_sheet_id,
+                    new_sheet_id,
+                )
         ensure_entry_archive(self._current_entry)
         self._save_entries()
         self._apply_filters()
