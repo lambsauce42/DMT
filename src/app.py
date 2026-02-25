@@ -57,22 +57,12 @@ from loot_applet import LootAppletWidget
 from maps_applet import MapsWidget
 from ui.widgets import TerminalWidget
 
-from navigate_widget import (
-    IconListDialog, 
-    NameIconDialog, 
-    _list_icon_paths, 
-    WORLD_DATA,
-    load_navigation_data,
-    save_navigation_data
-)
 from compact_nav_tree import CompactNavTree
 from npc_database import NPCDatabaseWidget
 from player_sheets import PlayerSheetsWidget, refresh_character_sheet_index_cache
 from session_creator import SessionCreatorWidget
-from terminal_logic import build_terminal_response
-from save_paths import dungeon_collections_dir, navigation_trash_path, clear_all_online_runtime_caches
+from save_paths import dungeon_collections_dir, clear_all_online_runtime_caches
 from ui.encounter_panel import EncounterPanel
-from ui.widgets import TerminalWidget
 
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
 

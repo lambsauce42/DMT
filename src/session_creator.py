@@ -64,7 +64,7 @@ from PyQt6.QtWidgets import (
 from dmt_package import read_dmt_package_asset, read_dmt_package_info, write_dmt_package
 from models import Session, SessionAttachment, SessionLogEntry
 from save_paths import default_dnd_save_dir
-from navigate_widget import WORLD_DATA
+from navigate_widget import load_navigation_data
 from player_sheets import (
     PlayerSheetsManager,
     PlayerSheetEntry,
@@ -115,6 +115,15 @@ TEXT_FILE_EXTENSIONS = {
 }
 IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 PDF_FILE_EXTENSIONS = {".pdf"}
+WORLD_DATA: list[dict] = []
+
+
+def _navigation_world_data() -> list[dict]:
+    # Keep explicit test overrides working while defaulting to live navigation storage.
+    if isinstance(WORLD_DATA, list) and WORLD_DATA:
+        return WORLD_DATA
+    loaded = load_navigation_data()
+    return loaded if isinstance(loaded, list) else []
 
 
 def session_storage_dir() -> Path:
@@ -470,7 +479,7 @@ class SessionCreatorWidget(QWidget):
         self._files_list_collapsed = False
         self._files_last_expanded_width = 320
         
-        self._world_data = WORLD_DATA
+        self._world_data = _navigation_world_data()
         
         self.sheets_manager = PlayerSheetsManager(entries=self._load_sheet_entries())
 

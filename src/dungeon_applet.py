@@ -4648,19 +4648,12 @@ class DungeonAppletWidget(QWidget):
             self._client_controller.client.hello_ack.connect(self._on_client_hello_ack)
         else:
             self._client_controller.disconnect()
-        try:
-            self._client_controller.connect_to_host(
-                host_ip,
-                int(port),
-                self._local_player_name,
-                persistent_player_id=self._persistent_local_player_id,
-            )
-        except TypeError:
-            self._client_controller.connect_to_host(
-                host_ip,
-                int(port),
-                self._local_player_name,
-            )
+        self._client_controller.connect_to_host(
+            host_ip,
+            int(port),
+            self._local_player_name,
+            persistent_player_id=self._persistent_local_player_id,
+        )
 
     def _clear_online_runtime_cache(self, session_id: str | None = None) -> None:
         target_session = str(session_id or self._online_session_id or "").strip()

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codebase Deepdive Auditor"
+  short_description: "Find deep bugs, dead code, and workflow regressions"
+  default_prompt: "Use $codebase-deepdive-auditor to investigate this repo for deep behavioral defects and dead paths."

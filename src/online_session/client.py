@@ -55,6 +55,8 @@ class OnlineSessionClient(QObject):
     ) -> None:
         self._requested_name = name.strip()
         self._player_id = None
+        # Always start each transport connection with a fresh frame buffer.
+        self._decoder = FrameDecoder()
         if persistent_player_id is not None:
             self._persistent_player_id = str(persistent_player_id or "").strip()
         target_host, rewritten = _normalize_connect_host(host)
@@ -103,6 +105,8 @@ class OnlineSessionClient(QObject):
 
     def _on_disconnected(self) -> None:
         self._player_id = None
+        # Drop any partial frame bytes from the previous socket lifetime.
+        self._decoder = FrameDecoder()
         self.disconnected_from_server.emit()
         self.log_line.emit("[INFO] Disconnected from host")
 

@@ -973,8 +973,8 @@ def test_joining_player_session_stops_existing_host_controller(dungeon_widget):
         def disconnect(self):
             self.disconnected = True
 
-        def connect_to_host(self, host, port, name):
-            self.connect_args = (host, port, name)
+        def connect_to_host(self, host, port, name, persistent_player_id=None):
+            self.connect_args = (host, port, name, persistent_player_id)
 
     host_stub = _HostStub()
     client_stub = _ClientStub()
@@ -985,7 +985,12 @@ def test_joining_player_session_stops_existing_host_controller(dungeon_widget):
 
     assert host_stub.stopped is True
     assert client_stub.disconnected is True
-    assert client_stub.connect_args == ("192.168.1.10", 8765, "Mira")
+    assert client_stub.connect_args == (
+        "192.168.1.10",
+        8765,
+        "Mira",
+        dungeon_widget._persistent_local_player_id,
+    )
 
 
 def test_clear_online_runtime_cache_uses_shared_runtime_cleanup(dungeon_widget, monkeypatch):

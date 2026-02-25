@@ -419,6 +419,7 @@ class CompactNavTree(QWidget):
         self._data = []
         for world in loaded:
             world_entry = {
+                "id": world.get("id"),
                 "name": world.get("name", ""),
                 "icon": world.get("icon") or self._default_world_icon,
                 "campaigns": [],
@@ -429,12 +430,15 @@ class CompactNavTree(QWidget):
                     if isinstance(group, dict):
                         group_name = group.get("name", "")
                         group_icon = group.get("icon") or self._default_group_icon
+                        group_id = group.get("id")
                     else:
                         group_name = str(group)
                         group_icon = self._default_group_icon
+                        group_id = None
                     if group_name:
-                        groups.append({"name": group_name, "icon": group_icon})
+                        groups.append({"id": group_id, "name": group_name, "icon": group_icon})
                 world_entry["campaigns"].append({
+                    "id": campaign.get("id"),
                     "name": campaign.get("name", ""),
                     "icon": campaign.get("icon") or self._default_campaign_icon,
                     "groups": groups,
@@ -530,10 +534,10 @@ class CompactNavTree(QWidget):
                 if pixmap:
                     campaign_item.setIcon(0, QIcon(pixmap))
                 
-                for group in campaign.get("groups", []):
+                for group_idx, group in enumerate(campaign.get("groups", [])):
                     group_item = QTreeWidgetItem()
                     group_item.setText(0, group["name"])
-                    group_item.setData(0, Qt.ItemDataRole.UserRole, ("group", world_idx, campaign_idx, group["name"]))
+                    group_item.setData(0, Qt.ItemDataRole.UserRole, ("group", world_idx, campaign_idx, group_idx))
                     group_item.setData(0, Qt.ItemDataRole.UserRole + 1, group["name"])
                     
                     pixmap = _load_icon(group.get("icon"), COMPACT_ICON_SIZE)
@@ -618,15 +622,15 @@ class CompactNavTree(QWidget):
                     menu.addSeparator()
                     self._add_menu_action(
                         menu, EDIT_ICON, "Edit World",
-                        lambda w=world["name"]: self._edit_world(w)
+                        lambda idx=world_idx: self._edit_world(idx)
                     )
                     self._add_menu_action(
                         menu, MINUS_ICON, "Remove World",
-                        lambda w=world["name"]: self._remove_world(w)
+                        lambda idx=world_idx: self._remove_world(idx)
                     )
                     self._add_menu_action(
                         menu, DISINTEGRATE_ICON, "Disintegrate World",
-                        lambda w=world["name"]: self._disintegrate_world(w)
+                        lambda idx=world_idx: self._disintegrate_world(idx)
                     )
                     menu.addSeparator()
                     self._add_menu_action(menu, REVIVE_ICON, "Revive World", self._revive_world)
@@ -650,15 +654,15 @@ class CompactNavTree(QWidget):
                     menu.addSeparator()
                     self._add_menu_action(
                         menu, EDIT_ICON, "Edit Campaign",
-                        lambda w=world_idx, c=campaign["name"]: self._edit_campaign(w, c)
+                        lambda w=world_idx, c=campaign_idx: self._edit_campaign(w, c)
                     )
                     self._add_menu_action(
                         menu, MINUS_ICON, "Remove Campaign",
-                        lambda w=world_idx, c=campaign["name"]: self._remove_campaign(w, c)
+                        lambda w=world_idx, c=campaign_idx: self._remove_campaign(w, c)
                     )
                     self._add_menu_action(
                         menu, DISINTEGRATE_ICON, "Disintegrate Campaign",
-                        lambda w=world_idx, c=campaign["name"]: self._disintegrate_campaign(w, c)
+                        lambda w=world_idx, c=campaign_idx: self._disintegrate_campaign(w, c)
                     )
                     menu.addSeparator()
                     self._add_menu_action(
@@ -667,7 +671,7 @@ class CompactNavTree(QWidget):
                     )
             
             elif item_type == "group":
-                world_idx, campaign_idx, group_name = data[1], data[2], data[3]
+                world_idx, campaign_idx, group_idx = data[1], data[2], data[3]
                 world = self._data[world_idx] if world_idx < len(self._data) else None
                 campaign = None
                 if world and campaign_idx < len(world.get("campaigns", [])):
@@ -681,15 +685,15 @@ class CompactNavTree(QWidget):
                     menu.addSeparator()
                     self._add_menu_action(
                         menu, EDIT_ICON, "Edit Group",
-                        lambda w=world_idx, c=campaign_idx, g=group_name: self._edit_group(w, c, g)
+                        lambda w=world_idx, c=campaign_idx, g=group_idx: self._edit_group(w, c, g)
                     )
                     self._add_menu_action(
                         menu, MINUS_ICON, "Remove Group",
-                        lambda w=world_idx, c=campaign_idx, g=group_name: self._remove_group(w, c, g)
+                        lambda w=world_idx, c=campaign_idx, g=group_idx: self._remove_group(w, c, g)
                     )
                     self._add_menu_action(
                         menu, DISINTEGRATE_ICON, "Disintegrate Group",
-                        lambda w=world_idx, c=campaign_idx, g=group_name: self._disintegrate_group(w, c, g)
+                        lambda w=world_idx, c=campaign_idx, g=group_idx: self._disintegrate_group(w, c, g)
                     )
                     menu.addSeparator()
                     self._add_menu_action(
@@ -705,6 +709,42 @@ class CompactNavTree(QWidget):
         pixmap = _load_icon(icon_path, 16)
         action = menu.addAction(QIcon(pixmap) if pixmap else QIcon(), text)
         action.triggered.connect(lambda checked=False: callback())
+
+    def _resolve_world_index(self, world_ref: int | str) -> Optional[int]:
+        if isinstance(world_ref, int):
+            if 0 <= world_ref < len(self._data):
+                return world_ref
+            return None
+        for idx, world in enumerate(self._data):
+            if world.get("name") == world_ref:
+                return idx
+        return None
+
+    def _resolve_campaign_index(self, world: dict, campaign_ref: int | str) -> Optional[int]:
+        campaigns = world.get("campaigns", [])
+        if not isinstance(campaigns, list):
+            return None
+        if isinstance(campaign_ref, int):
+            if 0 <= campaign_ref < len(campaigns):
+                return campaign_ref
+            return None
+        for idx, campaign in enumerate(campaigns):
+            if isinstance(campaign, dict) and campaign.get("name") == campaign_ref:
+                return idx
+        return None
+
+    def _resolve_group_index(self, campaign: dict, group_ref: int | str) -> Optional[int]:
+        groups = campaign.get("groups", [])
+        if not isinstance(groups, list):
+            return None
+        if isinstance(group_ref, int):
+            if 0 <= group_ref < len(groups):
+                return group_ref
+            return None
+        for idx, group in enumerate(groups):
+            if isinstance(group, dict) and group.get("name") == group_ref:
+                return idx
+        return None
     
     # ----------------------------------------------------------------
     # World operations
@@ -725,11 +765,13 @@ class CompactNavTree(QWidget):
         self._save_data()
         self._rebuild_tree()
     
-    def _edit_world(self, old_name: str) -> None:
+    def _edit_world(self, world_ref: int | str) -> None:
         """Edit an existing world."""
-        world = next((w for w in self._data if w["name"] == old_name), None)
-        if not world:
+        world_idx = self._resolve_world_index(world_ref)
+        if world_idx is None:
             return
+        world = self._data[world_idx]
+        old_name = str(world.get("name") or "")
         new_name, icon = self._prompt_name_icon(
             "Edit World", "New world name:", old_name, world.get("icon")
         )
@@ -740,24 +782,30 @@ class CompactNavTree(QWidget):
         self._save_data()
         self._rebuild_tree()
     
-    def _remove_world(self, name: str) -> None:
+    def _remove_world(self, world_ref: int | str) -> None:
         """Remove a world (move to trash)."""
-        world = next((w for w in self._data if w["name"] == name), None)
-        if not world:
+        world_idx = self._resolve_world_index(world_ref)
+        if world_idx is None:
             return
+        world = self._data[world_idx]
         self._move_to_trash("world", world)
-        self._data = [w for w in self._data if w["name"] != name]
+        del self._data[world_idx]
         self._save_data()
         self._rebuild_tree()
     
-    def _disintegrate_world(self, name: str) -> None:
+    def _disintegrate_world(self, world_ref: int | str) -> None:
         """Permanently delete a world."""
+        world_idx = self._resolve_world_index(world_ref)
+        if world_idx is None:
+            return
+        world = self._data[world_idx]
+        world_name = str(world.get("name") or "")
         if not self._confirm_disintegrate(
             "Disintegrate World",
-            f"Type CONFIRM to permanently delete '{name}'. This cannot be undone."
+            f"Type CONFIRM to permanently delete '{world_name}'. This cannot be undone."
         ):
             return
-        self._data = [w for w in self._data if w["name"] != name]
+        del self._data[world_idx]
         self._save_data()
         self._rebuild_tree()
     
@@ -807,14 +855,16 @@ class CompactNavTree(QWidget):
         self._rebuild_tree()
         self._expand_world_campaign_path(world_idx, campaign_idx)
     
-    def _edit_campaign(self, world_idx: int, old_name: str) -> None:
+    def _edit_campaign(self, world_idx: int, campaign_ref: int | str) -> None:
         """Edit an existing campaign."""
         if world_idx >= len(self._data):
             return
         world = self._data[world_idx]
-        campaign = next((c for c in world["campaigns"] if c["name"] == old_name), None)
-        if not campaign:
+        campaign_idx = self._resolve_campaign_index(world, campaign_ref)
+        if campaign_idx is None:
             return
+        campaign = world["campaigns"][campaign_idx]
+        old_name = str(campaign.get("name") or "")
         new_name, icon = self._prompt_name_icon(
             "Edit Campaign", "New campaign name:", old_name, campaign.get("icon")
         )
@@ -825,30 +875,36 @@ class CompactNavTree(QWidget):
         self._save_data()
         self._rebuild_tree()
     
-    def _remove_campaign(self, world_idx: int, name: str) -> None:
+    def _remove_campaign(self, world_idx: int, campaign_ref: int | str) -> None:
         """Remove a campaign (move to trash)."""
         if world_idx >= len(self._data):
             return
         world = self._data[world_idx]
-        campaign = next((c for c in world["campaigns"] if c["name"] == name), None)
-        if not campaign:
+        campaign_idx = self._resolve_campaign_index(world, campaign_ref)
+        if campaign_idx is None:
             return
+        campaign = world["campaigns"][campaign_idx]
         self._move_to_trash("campaign", campaign, parent={"world": world["name"]})
-        world["campaigns"] = [c for c in world["campaigns"] if c["name"] != name]
+        del world["campaigns"][campaign_idx]
         self._save_data()
         self._rebuild_tree()
     
-    def _disintegrate_campaign(self, world_idx: int, name: str) -> None:
+    def _disintegrate_campaign(self, world_idx: int, campaign_ref: int | str) -> None:
         """Permanently delete a campaign."""
         if world_idx >= len(self._data):
             return
+        world = self._data[world_idx]
+        campaign_idx = self._resolve_campaign_index(world, campaign_ref)
+        if campaign_idx is None:
+            return
+        campaign = world["campaigns"][campaign_idx]
+        campaign_name = str(campaign.get("name") or "")
         if not self._confirm_disintegrate(
             "Disintegrate Campaign",
-            f"Type CONFIRM to permanently delete '{name}'. This cannot be undone."
+            f"Type CONFIRM to permanently delete '{campaign_name}'. This cannot be undone."
         ):
             return
-        world = self._data[world_idx]
-        world["campaigns"] = [c for c in world["campaigns"] if c["name"] != name]
+        del world["campaigns"][campaign_idx]
         self._save_data()
         self._rebuild_tree()
     
@@ -904,7 +960,7 @@ class CompactNavTree(QWidget):
         self._rebuild_tree()
         self._expand_world_campaign_path(world_idx, campaign_idx)
     
-    def _edit_group(self, world_idx: int, campaign_idx: int, old_name: str) -> None:
+    def _edit_group(self, world_idx: int, campaign_idx: int, group_ref: int | str) -> None:
         """Edit an existing group."""
         if world_idx >= len(self._data):
             return
@@ -912,9 +968,11 @@ class CompactNavTree(QWidget):
         if campaign_idx >= len(world.get("campaigns", [])):
             return
         campaign = world["campaigns"][campaign_idx]
-        group = next((g for g in campaign["groups"] if g["name"] == old_name), None)
-        if not group:
+        group_idx = self._resolve_group_index(campaign, group_ref)
+        if group_idx is None:
             return
+        group = campaign["groups"][group_idx]
+        old_name = str(group.get("name") or "")
         new_name, icon = self._prompt_name_icon(
             "Edit Group", "New group name:", old_name, group.get("icon")
         )
@@ -925,7 +983,7 @@ class CompactNavTree(QWidget):
         self._save_data()
         self._rebuild_tree()
     
-    def _remove_group(self, world_idx: int, campaign_idx: int, name: str) -> None:
+    def _remove_group(self, world_idx: int, campaign_idx: int, group_ref: int | str) -> None:
         """Remove a group (move to trash)."""
         if world_idx >= len(self._data):
             return
@@ -933,31 +991,37 @@ class CompactNavTree(QWidget):
         if campaign_idx >= len(world.get("campaigns", [])):
             return
         campaign = world["campaigns"][campaign_idx]
-        group = next((g for g in campaign["groups"] if g["name"] == name), None)
-        if not group:
+        group_idx = self._resolve_group_index(campaign, group_ref)
+        if group_idx is None:
             return
+        group = campaign["groups"][group_idx]
         self._move_to_trash(
             "group", group,
             parent={"world": world["name"], "campaign": campaign["name"]}
         )
-        campaign["groups"] = [g for g in campaign["groups"] if g["name"] != name]
+        del campaign["groups"][group_idx]
         self._save_data()
         self._rebuild_tree()
     
-    def _disintegrate_group(self, world_idx: int, campaign_idx: int, name: str) -> None:
+    def _disintegrate_group(self, world_idx: int, campaign_idx: int, group_ref: int | str) -> None:
         """Permanently delete a group."""
         if world_idx >= len(self._data):
             return
         world = self._data[world_idx]
         if campaign_idx >= len(world.get("campaigns", [])):
             return
+        campaign = world["campaigns"][campaign_idx]
+        group_idx = self._resolve_group_index(campaign, group_ref)
+        if group_idx is None:
+            return
+        group = campaign["groups"][group_idx]
+        group_name = str(group.get("name") or "")
         if not self._confirm_disintegrate(
             "Disintegrate Group",
-            f"Type CONFIRM to permanently delete '{name}'. This cannot be undone."
+            f"Type CONFIRM to permanently delete '{group_name}'. This cannot be undone."
         ):
             return
-        campaign = world["campaigns"][campaign_idx]
-        campaign["groups"] = [g for g in campaign["groups"] if g["name"] != name]
+        del campaign["groups"][group_idx]
         self._save_data()
         self._rebuild_tree()
     

@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
 )
 
 from dmt_package import read_dmt_package_info, write_dmt_package
-from navigate_widget import WORLD_DATA
+from navigate_widget import load_navigation_data
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
 from unique_ids import generate_probabilistic_unique_id
 
@@ -527,7 +527,7 @@ class NPCDialog(QDialog):
 class NPCDatabaseWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self._world_data = WORLD_DATA
+        self._world_data = load_navigation_data()
         self._storage_path = npc_storage_path()
         self._manager = NPCManager(entries=self._load_entries())
         self._current_entry: Optional[NPCEntry] = None

@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 from dmt_package import list_dmt_package_assets, read_dmt_package_asset, read_dmt_package_info, write_dmt_package
-from navigate_widget import WORLD_DATA, move_to_trash
+from navigate_widget import load_navigation_data, move_to_trash
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
@@ -382,7 +382,9 @@ class MapDialog(QDialog):
         entry: Optional[MapAsset] = None,
     ) -> None:
         super().__init__(parent)
-        self._world_data = world_data if isinstance(world_data, list) else WORLD_DATA
+        self._world_data = (
+            world_data if isinstance(world_data, list) else load_navigation_data()
+        )
         self._entry: Optional[MapAsset] = None
         self._original_entry = entry
         self._source_image_path: Optional[str] = None
@@ -797,7 +799,7 @@ class MapViewPanel(QGraphicsView):
 class MapsWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self._world_data = WORLD_DATA
+        self._world_data = load_navigation_data()
         self._storage_path = maps_storage_path()
         self._load_entries_error = ""
         self._manager = MapsManager(entries=self._load_entries())

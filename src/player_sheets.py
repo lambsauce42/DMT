@@ -87,7 +87,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-from navigate_widget import WORLD_DATA, move_to_trash
+from navigate_widget import load_navigation_data, move_to_trash
 from loot_applet import (
     LootItem,
     LootPreviewTooltip,
@@ -1672,24 +1672,43 @@ def _unique_in_order(items: Iterable[str]) -> List[str]:
 
 
 def list_worlds(world_data: list[dict]) -> List[str]:
-    return [world["name"] for world in world_data if world.get("name")]
+    worlds: List[str] = []
+    for world in world_data:
+        if isinstance(world, dict):
+            name = str(world.get("name") or "").strip()
+        else:
+            name = str(world or "").strip()
+        if name:
+            worlds.append(name)
+    return _unique_in_order(worlds)
 
 
 def list_campaigns(world_data: list[dict], world: Optional[str] = None) -> List[str]:
     if world:
         for world_entry in world_data:
+            if not isinstance(world_entry, dict):
+                continue
             if world_entry.get("name") == world:
-                return [
-                    campaign["name"]
-                    for campaign in world_entry.get("campaigns", [])
-                    if campaign.get("name")
-                ]
+                campaigns: List[str] = []
+                for campaign in world_entry.get("campaigns", []):
+                    if isinstance(campaign, dict):
+                        name = str(campaign.get("name") or "").strip()
+                    else:
+                        name = str(campaign or "").strip()
+                    if name:
+                        campaigns.append(name)
+                return campaigns
         return []
 
     campaigns: List[str] = []
     for world_entry in world_data:
+        if not isinstance(world_entry, dict):
+            continue
         for campaign in world_entry.get("campaigns", []):
-            name = campaign.get("name")
+            if isinstance(campaign, dict):
+                name = str(campaign.get("name") or "").strip()
+            else:
+                name = str(campaign or "").strip()
             if name:
                 campaigns.append(name)
     return _unique_in_order(campaigns)
@@ -1702,12 +1721,20 @@ def list_groups(
 ) -> List[str]:
     groups: List[str] = []
     for world_entry in world_data:
+        if not isinstance(world_entry, dict):
+            continue
         if world and world_entry.get("name") != world:
             continue
         for campaign_entry in world_entry.get("campaigns", []):
+            if not isinstance(campaign_entry, dict):
+                continue
             if campaign and campaign_entry.get("name") != campaign:
                 continue
-            for group_name in campaign_entry.get("groups", []):
+            for group_entry in campaign_entry.get("groups", []):
+                if isinstance(group_entry, dict):
+                    group_name = str(group_entry.get("name") or "").strip()
+                else:
+                    group_name = str(group_entry or "").strip()
                 if group_name:
                     groups.append(group_name)
     return _unique_in_order(groups)
@@ -2699,7 +2726,7 @@ class EquipmentSlotWidget(QFrame):
 class PlayerSheetsWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self._world_data = WORLD_DATA
+        self._world_data = load_navigation_data()
         self._storage_path = player_sheets_storage_path()
         self._manager = PlayerSheetsManager(entries=self._load_entries())
         self._current_entry: Optional[PlayerSheetEntry] = None
