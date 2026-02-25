@@ -1,12 +1,12 @@
 import os
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QSlider, QLineEdit, QSizePolicy, QVBoxLayout
-from PyQt6.QtCore import Qt, pyqtSignal, QLocale, QSize
-from PyQt6.QtGui import QIntValidator, QDoubleValidator
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QSlider, QLineEdit, QSizePolicy, QVBoxLayout
+from PySide6.QtCore import Qt, Signal, QLocale, QSize
+from PySide6.QtGui import QIntValidator, QDoubleValidator
 
 
 class SliderSpinBox(QWidget):
-    valueChanged = pyqtSignal(object) 
-    editingFinished = pyqtSignal()
+    valueChanged = Signal(object) 
+    editingFinished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

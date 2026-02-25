@@ -20,9 +20,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon, QImage, QPainter, QPixmap
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
@@ -44,7 +44,7 @@ from PyQt6.QtWidgets import (
 )
 
 try:
-    from PyQt6.QtSvg import QSvgRenderer
+    from PySide6.QtSvg import QSvgRenderer
     SVG_AVAILABLE = True
 except Exception:
     SVG_AVAILABLE = False
@@ -352,7 +352,7 @@ class CompactNavTree(QWidget):
     """
     
     # Signals
-    session_launched = pyqtSignal(str, str, str)  # world, campaign, group
+    session_launched = Signal(str, str, str)  # world, campaign, group
     
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)

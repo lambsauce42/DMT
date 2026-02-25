@@ -8,9 +8,9 @@ from pathlib import Path
 import shutil
 from typing import Iterable, List, Optional
 
-from PyQt6.QtCore import Qt, QUrl, QSize, QPoint, QPointF, QRectF, pyqtSignal, QTimer
-from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap, QPainter
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QUrl, QSize, QPoint, QPointF, QRectF, Signal, QTimer
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap, QPainter
+from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -578,7 +578,7 @@ class MapDialog(QDialog):
 
 
 class MapViewPanel(QGraphicsView):
-    zoomChanged = pyqtSignal(int)
+    zoomChanged = Signal(int)
 
     def __init__(self, parent: Optional[QWidget] = None, placeholder: str = "No map selected.") -> None:
         super().__init__(parent)

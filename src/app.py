@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QSize, QTimer
-from PyQt6.QtGui import (
+from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtGui import (
     QColor,
     QIcon,
     QImage,
@@ -18,7 +18,7 @@ from PyQt6.QtGui import (
     QTextCharFormat,
     QTextCursor,
 )
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QDialog,
@@ -67,7 +67,7 @@ from ui.encounter_panel import EncounterPanel
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
 
 try:
-    from PyQt6.QtSvg import QSvgRenderer
+    from PySide6.QtSvg import QSvgRenderer
 
     SVG_AVAILABLE = True
 except Exception:  # pragma: no cover - optional SVG support

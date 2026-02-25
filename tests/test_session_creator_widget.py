@@ -12,9 +12,9 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QTextListFormat
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QTextListFormat
+from PySide6.QtWidgets import QApplication
 
 from dmt_package import read_dmt_package_info, write_dmt_package
 import session_creator

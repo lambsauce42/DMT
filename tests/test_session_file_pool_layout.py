@@ -7,8 +7,8 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtGui import QImage
-from PyQt6.QtWidgets import QApplication, QPushButton
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication, QPushButton
 
 import session_creator
 from session_creator import SessionCreatorWidget

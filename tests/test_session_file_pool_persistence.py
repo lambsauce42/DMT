@@ -7,7 +7,7 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 from dmt_package import list_dmt_package_assets, read_dmt_package_asset, read_dmt_package_info
 import session_creator
 from session_creator import SessionCreatorWidget, session_file_path

@@ -20,7 +20,7 @@ from character_archive import (
     write_character_archive,
 )
 
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     Qt,
     QUrl,
     QItemSelectionModel,
@@ -33,9 +33,9 @@ from PyQt6.QtCore import (
     QPoint,
     QMimeData,
     QObject,
-    pyqtSignal,
+    Signal,
 )
-from PyQt6.QtGui import (
+from PySide6.QtGui import (
     QDesktopServices,
     QKeySequence,
     QShortcut,
@@ -52,7 +52,7 @@ from PyQt6.QtGui import (
     QDrag,
     QCursor,
 )
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
@@ -295,7 +295,7 @@ def character_sheet_cache_dir() -> Path:
 
 
 class PlayerSheetEvents(QObject):
-    inventorySaved = pyqtSignal(str, dict)
+    inventorySaved = Signal(str, dict)
 
 
 PLAYER_SHEET_EVENTS = PlayerSheetEvents()
@@ -2396,7 +2396,7 @@ class CharacterSheetListDelegate(QStyledItemDelegate):
 
 
 class InventoryListWidget(QListWidget):
-    equipmentDropped = pyqtSignal(dict)
+    equipmentDropped = Signal(dict)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -2495,9 +2495,9 @@ class InventoryListWidget(QListWidget):
 
 
 class EquipmentSlotWidget(QFrame):
-    itemDropped = pyqtSignal(str, dict)
-    slotSelected = pyqtSignal(str)
-    itemHovered = pyqtSignal(str, object)
+    itemDropped = Signal(str, dict)
+    slotSelected = Signal(str)
+    itemHovered = Signal(str, object)
 
     def __init__(self, slot_id: str, label: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)

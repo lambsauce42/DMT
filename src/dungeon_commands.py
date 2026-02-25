@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from PyQt6.QtGui import QUndoCommand, QPainterPath
-from PyQt6.QtWidgets import QGraphicsScene, QGraphicsItem
-from PyQt6.QtCore import QPointF, QRectF
+from PySide6.QtGui import QUndoCommand, QPainterPath
+from PySide6.QtWidgets import QGraphicsScene, QGraphicsItem
+from PySide6.QtCore import QPointF, QRectF
 
 class CreateItemCommand(QUndoCommand):
     def __init__(self, scene: QGraphicsScene, item: QGraphicsItem, description: str):

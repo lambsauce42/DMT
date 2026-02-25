@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt6.QtCore import QEasingCurve, QPointF, Qt, QTimer, QSize, QVariantAnimation
-from PyQt6.QtGui import (
+from PySide6.QtCore import QEasingCurve, QPointF, Qt, QTimer, QSize, QVariantAnimation
+from PySide6.QtGui import (
     QAction,
     QIcon,
     QColor,
@@ -26,8 +26,8 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPen,
 )
-from PyQt6.QtCore import QUrl
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QUrl
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QAbstractSpinBox,

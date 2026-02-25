@@ -1,6 +1,9 @@
 import os
 import socket
 import sys
+import time
+
+from PySide6.QtWidgets import QApplication
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -16,6 +19,12 @@ def _free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def _spin_for(milliseconds: int) -> None:
+    deadline = time.monotonic() + (max(0, int(milliseconds)) / 1000.0)
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
 
 
 def test_client_rewrites_wildcard_host_to_loopback_and_connects(qtbot):
@@ -75,7 +84,7 @@ def test_client_reconnect_preserves_player_identity_with_session_token(qtbot):
         assert first_token
 
         client.disconnect()
-        qtbot.wait(120)
+        _spin_for(120)
         client.connect_to_host("127.0.0.1", port, "Mira")
         qtbot.waitUntil(lambda: client.player_id is not None, timeout=4000)
         assert str(client.player_id) == first_id
@@ -123,7 +132,7 @@ def test_persistent_player_id_cannot_take_over_connected_identity(qtbot):
         assert first.is_connected()
 
         second.connect_to_host("127.0.0.1", port, "Mallory", persistent_player_id=persistent_id)
-        qtbot.wait(250)
+        _spin_for(250)
 
         assert first.is_connected()
         assert str(first.player_id) == first_id

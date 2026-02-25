@@ -1,8 +1,8 @@
 import sys
 import os
 import unittest
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
 
 # Ensure src is in path
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QTextEdit, QLineEdit, QSizePolicy
-from PyQt6.QtGui import QTextCursor, QTextCharFormat, QColor
-from PyQt6.QtCore import Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QTextEdit, QLineEdit, QSizePolicy
+from PySide6.QtGui import QTextCursor, QTextCharFormat, QColor
+from PySide6.QtCore import Qt
 from terminal_logic import build_terminal_response
 
 class TerminalWidget(QWidget):

@@ -7,9 +7,9 @@ import types
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QPixmap
-from PyQt6.QtWidgets import QApplication, QDialog, QGraphicsScene, QLabel, QLineEdit, QListWidget, QPushButton
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtWidgets import QApplication, QDialog, QGraphicsScene, QLabel, QLineEdit, QListWidget, QPushButton
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")

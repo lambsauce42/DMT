@@ -8,9 +8,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QImage, QPainter, QPixmap
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, Signal
+from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
+from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -26,14 +26,13 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QToolButton,
-    QWIDGETSIZE_MAX,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 try:
-    from PyQt6.QtSvg import QSvgRenderer
+    from PySide6.QtSvg import QSvgRenderer
 
     SVG_AVAILABLE = True
 except Exception:
@@ -47,6 +46,8 @@ LARGE_ROW_PADDING_Y = 12
 CARET_ICON_SIZE = 12
 ACTION_ICON_SIZE = 14
 ANIMATION_MS = 180
+# Qt's internal "unbounded" widget dimension sentinel.
+WIDGET_SIZE_MAX = 16777215
 CARET_DOWN_ICON = os.path.join(ICON_DIR, "caret_down.svg")
 CARET_UP_ICON = os.path.join(ICON_DIR, "caret_up.svg")
 PLUS_ICON = os.path.join(ICON_DIR, "plus.svg")
@@ -429,11 +430,11 @@ class IconListDialog(QDialog):
 
 
 class DashedHeaderRow(QWidget):
-    add_clicked = pyqtSignal()
-    edit_clicked = pyqtSignal()
-    remove_clicked = pyqtSignal()
-    disintegrate_clicked = pyqtSignal()
-    revive_clicked = pyqtSignal()
+    add_clicked = Signal()
+    edit_clicked = Signal()
+    remove_clicked = Signal()
+    disintegrate_clicked = Signal()
+    revive_clicked = Signal()
 
     def __init__(self, title: str, add_tooltip: str, remove_tooltip: str) -> None:
         super().__init__()
@@ -492,7 +493,7 @@ class DashedHeaderRow(QWidget):
 
 
 class NavRow(QFrame):
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(
         self,
@@ -665,7 +666,7 @@ class CollapsibleSection(QWidget):
             self._animation.stop()
             self._content.setMaximumHeight(target)
             if expanded:
-                self._content.setMaximumHeight(QWIDGETSIZE_MAX)
+                self._content.setMaximumHeight(WIDGET_SIZE_MAX)
             return
         self._animation.stop()
         if expanded:
@@ -682,7 +683,7 @@ class CollapsibleSection(QWidget):
 
     def _on_animation_finished(self) -> None:
         if self._expanded:
-            self._content.setMaximumHeight(QWIDGETSIZE_MAX)
+            self._content.setMaximumHeight(WIDGET_SIZE_MAX)
         else:
             self._content.setMaximumHeight(0)
 

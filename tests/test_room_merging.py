@@ -1,9 +1,9 @@
 import sys
 import os
 import pytest
-from PyQt6.QtCore import Qt, QPointF, QRectF
-from PyQt6.QtWidgets import QApplication, QGraphicsRectItem
-from PyQt6.QtGui import QPainterPath
+from PySide6.QtCore import Qt, QPointF, QRectF
+from PySide6.QtWidgets import QApplication, QGraphicsRectItem
+from PySide6.QtGui import QPainterPath
 
 # Adjust import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
@@ -50,9 +50,9 @@ def test_room_merging_with_shift(dungeon_widget, qtbot):
     
     qtbot.keyPress(canvas, Qt.Key.Key_Shift)
     qtbot.mouseMove(v, canvas.mapFromScene(p3))
-    qtbot.mousePress(v, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(p3), modifier=Qt.KeyboardModifier.ShiftModifier)
+    qtbot.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=canvas.mapFromScene(p3))
     qtbot.mouseMove(v, canvas.mapFromScene(p4))
-    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(p4), modifier=Qt.KeyboardModifier.ShiftModifier)
+    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=canvas.mapFromScene(p4))
     qtbot.keyRelease(canvas, Qt.Key.Key_Shift)
     
     QApplication.processEvents()
@@ -110,7 +110,7 @@ def test_room_merging_on_move(dungeon_widget, qtbot):
     
     qtbot.keyPress(canvas, Qt.Key.Key_Shift)
     qtbot.mouseMove(v, canvas.mapFromScene(new_center))
-    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(new_center), modifier=Qt.KeyboardModifier.ShiftModifier)
+    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=canvas.mapFromScene(new_center))
     qtbot.keyRelease(canvas, Qt.Key.Key_Shift)
     
     QApplication.processEvents()
@@ -159,8 +159,8 @@ def test_room_merging_on_move_when_shift_pressed_at_release(dungeon_widget, qtbo
     qtbot.mouseRelease(
         v,
         Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
         pos=canvas.mapFromScene(new_center),
-        modifier=Qt.KeyboardModifier.ShiftModifier,
     )
     qtbot.keyRelease(canvas, Qt.Key.Key_Shift)
     QApplication.processEvents()
@@ -193,9 +193,9 @@ def test_partial_room_merging(dungeon_widget, qtbot):
     
     qtbot.keyPress(canvas, Qt.Key.Key_Shift)
     qtbot.mouseMove(v, canvas.mapFromScene(p3))
-    qtbot.mousePress(v, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(p3), modifier=Qt.KeyboardModifier.ShiftModifier)
+    qtbot.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=canvas.mapFromScene(p3))
     qtbot.mouseMove(v, canvas.mapFromScene(p4))
-    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(p4), modifier=Qt.KeyboardModifier.ShiftModifier)
+    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=canvas.mapFromScene(p4))
     qtbot.keyRelease(canvas, Qt.Key.Key_Shift)
     
     QApplication.processEvents()
@@ -230,9 +230,9 @@ def test_ellipse_room_merging(dungeon_widget, qtbot):
     
     qtbot.keyPress(canvas, Qt.Key.Key_Shift)
     qtbot.mouseMove(v, canvas.mapFromScene(p3))
-    qtbot.mousePress(v, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(p3), modifier=Qt.KeyboardModifier.ShiftModifier)
+    qtbot.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=canvas.mapFromScene(p3))
     qtbot.mouseMove(v, canvas.mapFromScene(p4))
-    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(p4), modifier=Qt.KeyboardModifier.ShiftModifier)
+    qtbot.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=canvas.mapFromScene(p4))
     qtbot.keyRelease(canvas, Qt.Key.Key_Shift)
     
     QApplication.processEvents()

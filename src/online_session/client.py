@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
 
 from .protocol import FrameDecoder, encode_message
 
@@ -18,11 +18,11 @@ def _normalize_connect_host(host: str) -> tuple[str, bool]:
 
 
 class OnlineSessionClient(QObject):
-    log_line = pyqtSignal(str)
-    connected_to_server = pyqtSignal()
-    disconnected_from_server = pyqtSignal()
-    hello_ack = pyqtSignal(str)
-    message_received = pyqtSignal(dict)
+    log_line = Signal(str)
+    connected_to_server = Signal()
+    disconnected_from_server = Signal()
+    hello_ack = Signal(str)
+    message_received = Signal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)

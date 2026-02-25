@@ -9,9 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QPen, QBrush
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtGui import QFont, QIcon, QColor, QPainter, QPen, QBrush
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -37,8 +37,8 @@ ENCOUNTER_FILE_FORMAT = "dmtencounter.v1"
 class EncounterCard(QFrame):
     """A single encounter card showing encounter preview info."""
     
-    clicked = pyqtSignal(Path)
-    double_clicked = pyqtSignal(Path)
+    clicked = Signal(Path)
+    double_clicked = Signal(Path)
     
     def __init__(self, path: Path, data: dict, parent: QWidget = None) -> None:
         super().__init__(parent)

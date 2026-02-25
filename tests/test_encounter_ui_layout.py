@@ -2,7 +2,7 @@
 import pytest
 import sys
 import os
-from PyQt6.QtWidgets import QLabel, QBoxLayout, QHBoxLayout, QApplication
+from PySide6.QtWidgets import QLabel, QBoxLayout, QHBoxLayout, QApplication
 
 # Adjust import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))

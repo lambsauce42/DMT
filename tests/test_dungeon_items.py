@@ -3,9 +3,9 @@
 import sys
 import os
 import pytest
-from PyQt6.QtCore import QPointF, QRectF
-from PyQt6.QtGui import QImage, QPainter
-from PyQt6.QtWidgets import QApplication, QGraphicsScene
+from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtGui import QImage, QPainter
+from PySide6.QtWidgets import QApplication, QGraphicsScene
 
 # Adjust import path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
@@ -124,7 +124,7 @@ class TestEntityItem:
         """EntityItem snaps to cell center on mouse release."""
         import math
         from unittest.mock import patch
-        from PyQt6.QtWidgets import QGraphicsItem
+        from PySide6.QtWidgets import QGraphicsItem
         
         # Initial pos (not snapped yet)
         pos = QPointF(150, 200)

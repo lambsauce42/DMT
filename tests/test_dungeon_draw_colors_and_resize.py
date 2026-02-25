@@ -2,9 +2,9 @@ import os
 import sys
 
 import pytest
-from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QColor, QPixmap
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtWidgets import QApplication
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -169,8 +169,8 @@ def test_room_resize_snaps_to_grid_unless_alt(dungeon_widget, qtbot):
     qtbot.mouseRelease(
         viewport,
         Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.AltModifier,
         pos=canvas.mapFromScene(unsnapped_target),
-        modifier=Qt.KeyboardModifier.AltModifier,
     )
     qtbot.keyRelease(canvas, Qt.Key.Key_Alt)
     QApplication.processEvents()
@@ -216,8 +216,8 @@ def test_room_resize_near_corner_respects_drag_direction_without_jump(dungeon_wi
     qtbot.mouseRelease(
         viewport,
         Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.AltModifier,
         pos=canvas.mapFromScene(tiny_outward_drag),
-        modifier=Qt.KeyboardModifier.AltModifier,
     )
     qtbot.keyRelease(canvas, Qt.Key.Key_Alt)
     QApplication.processEvents()
@@ -316,15 +316,15 @@ def test_merged_room_resize_does_not_flip_anchor_corner(dungeon_widget, qtbot):
     qtbot.mousePress(
         viewport,
         Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
         pos=canvas.mapFromScene(p3),
-        modifier=Qt.KeyboardModifier.ShiftModifier,
     )
     qtbot.mouseMove(viewport, canvas.mapFromScene(p4))
     qtbot.mouseRelease(
         viewport,
         Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
         pos=canvas.mapFromScene(p4),
-        modifier=Qt.KeyboardModifier.ShiftModifier,
     )
     qtbot.keyRelease(canvas, Qt.Key.Key_Shift)
     QApplication.processEvents()

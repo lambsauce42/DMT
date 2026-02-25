@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal, QSize
-from PyQt6.QtGui import QKeySequence, QShortcut, QIcon
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal, QSize
+from PySide6.QtGui import QKeySequence, QShortcut, QIcon
+from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -54,10 +54,10 @@ class PageSpinBox(QSpinBox):
 class CharacterSheetPanel(QWidget):
     """Toolbar + scrollable PDF viewer for character sheets."""
 
-    unsavedChanged = pyqtSignal(bool)
-    statusMessage = pyqtSignal(str)
-    pdfPathSelected = pyqtSignal(str)
-    expandToggled = pyqtSignal(bool)
+    unsavedChanged = Signal(bool)
+    statusMessage = Signal(str)
+    pdfPathSelected = Signal(str)
+    expandToggled = Signal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)

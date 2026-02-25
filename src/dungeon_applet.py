@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum, auto
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, 
     QVBoxLayout, 
     QHBoxLayout, 
@@ -50,13 +50,13 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
 )
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     Qt,
     QRect,
     QRectF,
     QPoint,
     QPointF,
-    pyqtSignal,
+    Signal,
     QSize,
     QEvent,
     QTimer,
@@ -64,10 +64,10 @@ from PyQt6.QtCore import (
     QAbstractAnimation,
     QParallelAnimationGroup,
     QEasingCurve,
-    pyqtProperty,
+    Property,
     QSignalBlocker,
 )
-from PyQt6.QtGui import (
+from PySide6.QtGui import (
     QPainter,
     QColor,
     QPen,
@@ -512,7 +512,7 @@ LOOT_RESULT_EXTENSION = ".dmtloot"
 
 
 class SessionChatPanel(QFrame):
-    messageSubmitted = pyqtSignal(str)
+    messageSubmitted = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -613,40 +613,44 @@ class SessionPanelsToggleButton(QAbstractButton):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        width = float(self.width())
-        height = float(self.height())
-        center_x = width / 2.0
-        center_y = height / 2.0
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            width = float(self.width())
+            height = float(self.height())
+            center_x = width / 2.0
+            center_y = height / 2.0
 
-        caret_color = QColor(229, 231, 235, 212 if self._hovered else 160)
-        caret_pen = QPen(caret_color, 2.2)
-        caret_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        caret_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(caret_pen)
+            caret_color = QColor(229, 231, 235, 212 if self._hovered else 160)
+            caret_pen = QPen(caret_color, 2.2)
+            caret_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            caret_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(caret_pen)
 
-        half = min(28.0, width * 0.30)
-        if self._expanded:
-            left = QPointF(center_x - half, center_y - 2.4)
-            middle = QPointF(center_x, center_y + 2.4)
-            right = QPointF(center_x + half, center_y - 2.4)
-        else:
-            left = QPointF(center_x - half, center_y + 2.4)
-            middle = QPointF(center_x, center_y - 2.4)
-            right = QPointF(center_x + half, center_y + 2.4)
+            half = min(28.0, width * 0.30)
+            if self._expanded:
+                left = QPointF(center_x - half, center_y - 2.4)
+                middle = QPointF(center_x, center_y + 2.4)
+                right = QPointF(center_x + half, center_y - 2.4)
+            else:
+                left = QPointF(center_x - half, center_y + 2.4)
+                middle = QPointF(center_x, center_y - 2.4)
+                right = QPointF(center_x + half, center_y + 2.4)
 
-        caret_path = QPainterPath()
-        caret_path.moveTo(left)
-        caret_path.lineTo(middle)
-        caret_path.lineTo(right)
-        painter.drawPath(caret_path)
+            caret_path = QPainterPath()
+            caret_path.moveTo(left)
+            caret_path.lineTo(middle)
+            caret_path.lineTo(right)
+            painter.drawPath(caret_path)
+        finally:
+            if painter.isActive():
+                painter.end()
 
 class DungeonCanvas(QGraphicsView):
-    mouseMoved = pyqtSignal(QPointF)
-    zoomChanged = pyqtSignal(float)
-    viewChanged = pyqtSignal(QPointF)
-    toolChanged = pyqtSignal(ToolType)
-    pingPlaced = pyqtSignal(QPointF)
+    mouseMoved = Signal(QPointF)
+    zoomChanged = Signal(float)
+    viewChanged = Signal(QPointF)
+    toolChanged = Signal(ToolType)
+    pingPlaced = Signal(QPointF)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -937,7 +941,7 @@ class DungeonCanvas(QGraphicsView):
 
     def get_encounter_data(self):
         """Prompt user to select an encounter using the custom selector dialog."""
-        from PyQt6.QtWidgets import QMessageBox, QDialog
+        from PySide6.QtWidgets import QMessageBox, QDialog
         from ui.encounter_selector_dialog import EncounterSelectorDialog
         
         dialog = EncounterSelectorDialog(self)
@@ -1249,7 +1253,7 @@ class ToolButton(QPushButton):
         """)
 
 class DrawColorButton(QPushButton):
-    colorPicked = pyqtSignal(QColor)
+    colorPicked = Signal(QColor)
 
     def __init__(self, color: QColor, parent=None):
         super().__init__(parent)
@@ -1269,7 +1273,7 @@ class DrawColorButton(QPushButton):
         self._reveal_progress = max(0.0, min(1.0, float(value)))
         self.update()
 
-    revealProgress = pyqtProperty(float, fget=_get_reveal_progress, fset=_set_reveal_progress)
+    revealProgress = Property(float, fget=_get_reveal_progress, fset=_set_reveal_progress)
 
     @property
     def color(self) -> QColor:
@@ -1300,31 +1304,35 @@ class DrawColorButton(QPushButton):
         if self._reveal_progress <= 0.001:
             return
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        base_alpha = int(255 * self._reveal_progress)
-        edge_alpha = int(170 * self._reveal_progress)
-        center = QPointF(self.width() / 2.0, self.height() / 2.0)
-        max_radius = max(2.0, (min(self.width(), self.height()) / 2.0) - 5.2)
-        radius = max_radius * self._reveal_progress
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            base_alpha = int(255 * self._reveal_progress)
+            edge_alpha = int(170 * self._reveal_progress)
+            center = QPointF(self.width() / 2.0, self.height() / 2.0)
+            max_radius = max(2.0, (min(self.width(), self.height()) / 2.0) - 5.2)
+            radius = max_radius * self._reveal_progress
 
-        fill = QColor(self._color)
-        fill.setAlpha(base_alpha)
-        edge = QColor(255, 255, 255, edge_alpha)
-        if self._hovered:
-            edge = QColor(255, 255, 255, min(255, edge_alpha + 45))
-        painter.setBrush(fill)
-        painter.setPen(QPen(edge, 1.2))
-        painter.drawEllipse(center, radius, radius)
+            fill = QColor(self._color)
+            fill.setAlpha(base_alpha)
+            edge = QColor(255, 255, 255, edge_alpha)
+            if self._hovered:
+                edge = QColor(255, 255, 255, min(255, edge_alpha + 45))
+            painter.setBrush(fill)
+            painter.setPen(QPen(edge, 1.2))
+            painter.drawEllipse(center, radius, radius)
 
-        if self._selected:
-            ring = QColor(147, 197, 253, int(220 * self._reveal_progress))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(ring, 2.2))
-            painter.drawEllipse(center, radius + 2.2, radius + 2.2)
+            if self._selected:
+                ring = QColor(147, 197, 253, int(220 * self._reveal_progress))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(ring, 2.2))
+                painter.drawEllipse(center, radius + 2.2, radius + 2.2)
+        finally:
+            if painter.isActive():
+                painter.end()
 
 
 class DrawColorRail(QWidget):
-    colorChanged = pyqtSignal(QColor)
+    colorChanged = Signal(QColor)
     _ANIM_SLOWDOWN = 1.35
 
     def __init__(self, parent=None):
@@ -1479,17 +1487,17 @@ class ActionButton(QPushButton):
         """)
 
 class FloatingToolPanel(QWidget):
-    toolChanged = pyqtSignal(ToolType)
-    drawColorChanged = pyqtSignal(QColor)
-    fogFillRequested = pyqtSignal()
-    fogClearRequested = pyqtSignal()
-    viewModeChanged = pyqtSignal(str) # "dm" or "player"
-    undoRequested = pyqtSignal()
-    redoRequested = pyqtSignal()
-    deleteRequested = pyqtSignal()
-    layerChanged = pyqtSignal(str) # "foreground" or "background"
-    lootPoolRequested = pyqtSignal()
-    lootAddItemsRequested = pyqtSignal()
+    toolChanged = Signal(ToolType)
+    drawColorChanged = Signal(QColor)
+    fogFillRequested = Signal()
+    fogClearRequested = Signal()
+    viewModeChanged = Signal(str) # "dm" or "player"
+    undoRequested = Signal()
+    redoRequested = Signal()
+    deleteRequested = Signal()
+    layerChanged = Signal(str) # "foreground" or "background"
+    lootPoolRequested = Signal()
+    lootAddItemsRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1826,13 +1834,13 @@ class FloatingToolPanel(QWidget):
         self.updateGeometry()
 
 class ClickableLabel(QLabel):
-    clicked = pyqtSignal()
+    clicked = Signal()
     def mouseReleaseEvent(self, ev):
         if ev.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
 
 class EditableStat(QWidget):
-    valueChanged = pyqtSignal(int)
+    valueChanged = Signal(int)
     
     def __init__(self, value: int, min_val=0, max_val=99, parent=None):
         super().__init__(parent)
@@ -2005,42 +2013,46 @@ class ShieldWidget(QWidget):
         
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        w = self.width()
-        h = self.height()
-        
-        # Shield path
-        shield_path = QPainterPath()
-        margin = 1
-        x = margin
-        y = margin
-        sw = w - 2*margin
-        sh = h - 2*margin
-        
-        cx = x + sw / 2
-        
-        # Shield geometry
-        shield_path.moveTo(cx, y)
-        shield_path.quadTo(x + sw, y, x + sw, y + sh * 0.3)
-        shield_path.lineTo(x + sw, y + sh * 0.6)
-        shield_path.lineTo(cx, y + sh)
-        shield_path.lineTo(x, y + sh * 0.6)
-        shield_path.lineTo(x, y + sh * 0.3)
-        shield_path.quadTo(x, y, cx, y)
-        shield_path.closeSubpath()
-        
-        # Fill
-        painter.setPen(QPen(QColor("#52525b"), 1))
-        painter.setBrush(QColor("#3f3f46"))
-        painter.drawPath(shield_path)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            w = self.width()
+            h = self.height()
+
+            # Shield path
+            shield_path = QPainterPath()
+            margin = 1
+            x = margin
+            y = margin
+            sw = w - 2 * margin
+            sh = h - 2 * margin
+
+            cx = x + sw / 2
+
+            # Shield geometry
+            shield_path.moveTo(cx, y)
+            shield_path.quadTo(x + sw, y, x + sw, y + sh * 0.3)
+            shield_path.lineTo(x + sw, y + sh * 0.6)
+            shield_path.lineTo(cx, y + sh)
+            shield_path.lineTo(x, y + sh * 0.6)
+            shield_path.lineTo(x, y + sh * 0.3)
+            shield_path.quadTo(x, y, cx, y)
+            shield_path.closeSubpath()
+
+            # Fill
+            painter.setPen(QPen(QColor("#52525b"), 1))
+            painter.setBrush(QColor("#3f3f46"))
+            painter.drawPath(shield_path)
+        finally:
+            if painter.isActive():
+                painter.end()
 
 
 class EntityInspectorPanel(QWidget):
-    entityEdited = pyqtSignal()
-    ownerChanged = pyqtSignal(str)
-    iconPathSelected = pyqtSignal(str)
-    linkCharacterRequested = pyqtSignal()
+    entityEdited = Signal()
+    ownerChanged = Signal(str)
+    iconPathSelected = Signal(str)
+    linkCharacterRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2433,7 +2445,7 @@ class EntityInspectorPanel(QWidget):
         self._set_token_controls_expanded(False)
         
         # Apply shadow
-        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(20)
         shadow.setColor(QColor(0, 0, 0, 100))
@@ -2813,7 +2825,7 @@ class EntityInspectorPanel(QWidget):
 
 
 class DungeonShapePreview(QWidget):
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -3141,31 +3153,35 @@ class DungeonCollapseButton(QAbstractButton):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        width = float(self.width())
-        height = float(self.height())
-        bar_rect = QRectF(0.0, 0.0, width, height)
+            width = float(self.width())
+            height = float(self.height())
+            bar_rect = QRectF(0.0, 0.0, width, height)
 
-        fill = QColor(OVERLAY_BG_COLOR)
-        if self._hovered:
-            fill = fill.lighter(112)
-        painter.setPen(QPen(OVERLAY_BORDER_COLOR, 1.0))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(bar_rect, 6.0, 6.0)
+            fill = QColor(OVERLAY_BG_COLOR)
+            if self._hovered:
+                fill = fill.lighter(112)
+            painter.setPen(QPen(OVERLAY_BORDER_COLOR, 1.0))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(bar_rect, 6.0, 6.0)
 
-        caret_pen = QPen(QColor("#e5e7eb"), 2.0)
-        caret_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        caret_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(caret_pen)
-        caret_half = min(20.0, width * 0.2)
-        center_x = width / 2.0
-        center_y = height / 2.0
-        caret_path = QPainterPath()
-        caret_path.moveTo(center_x - caret_half, center_y + 4.0)
-        caret_path.lineTo(center_x, center_y - 4.0)
-        caret_path.lineTo(center_x + caret_half, center_y + 4.0)
-        painter.drawPath(caret_path)
+            caret_pen = QPen(QColor("#e5e7eb"), 2.0)
+            caret_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            caret_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(caret_pen)
+            caret_half = min(20.0, width * 0.2)
+            center_x = width / 2.0
+            center_y = height / 2.0
+            caret_path = QPainterPath()
+            caret_path.moveTo(center_x - caret_half, center_y + 4.0)
+            caret_path.lineTo(center_x, center_y - 4.0)
+            caret_path.lineTo(center_x + caret_half, center_y + 4.0)
+            painter.drawPath(caret_path)
+        finally:
+            if painter.isActive():
+                painter.end()
 
 class InlineRenameLineEdit(QLineEdit):
     def __init__(self, parent=None) -> None:
@@ -3184,7 +3200,7 @@ class InlineRenameLineEdit(QLineEdit):
 
     def setFontWeight(self, weight: int) -> None:
         font = self.font()
-        font.setWeight(weight)
+        font.setWeight(QFont.Weight(weight))
         self.setFont(font)
 
     def start_edit(self, select_all: bool = True, cursor_pos: int | None = None) -> None:
@@ -3227,9 +3243,9 @@ class InlineRenameLineEdit(QLineEdit):
 
 
 class DungeonTileWidget(QWidget):
-    clicked = pyqtSignal(str)
-    nameChanged = pyqtSignal(str, str)
-    nameCommitted = pyqtSignal(str, str)
+    clicked = Signal(str)
+    nameChanged = Signal(str, str)
+    nameCommitted = Signal(str, str)
 
     def __init__(self, dungeon_id: str, name: str, preview: QPixmap, icon_size: QSize, parent=None) -> None:
         super().__init__(parent)
@@ -3369,16 +3385,20 @@ class DungeonTileWidget(QWidget):
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        frame_rect = QRectF(self.preview_frame.geometry()).adjusted(-1.0, -1.0, 1.0, 1.0)
-        border_color = QColor(255, 255, 255, 140)
-        if self._hovered or self._selected:
-            border_color = QColor("#60a5fa")
-        if self._placement_mode and self._hovered:
-            border_color = QColor("#f59e0b")
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(border_color, 2.0))
-        painter.drawRoundedRect(frame_rect, 6.0, 6.0)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            frame_rect = QRectF(self.preview_frame.geometry()).adjusted(-1.0, -1.0, 1.0, 1.0)
+            border_color = QColor(255, 255, 255, 140)
+            if self._hovered or self._selected:
+                border_color = QColor("#60a5fa")
+            if self._placement_mode and self._hovered:
+                border_color = QColor("#f59e0b")
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(border_color, 2.0))
+            painter.drawRoundedRect(frame_rect, 6.0, 6.0)
+        finally:
+            if painter.isActive():
+                painter.end()
 
     def _position_player_badges(self) -> None:
         badge_margin = 6
@@ -3414,16 +3434,16 @@ class DungeonTileWidget(QWidget):
         return super().eventFilter(watched, event)
 
 class DungeonSelectionWidget(QWidget):
-    saveRequested = pyqtSignal()
-    saveAsRequested = pyqtSignal()
-    loadRequested = pyqtSignal()
-    addRequested = pyqtSignal()
-    deleteRequested = pyqtSignal()
-    carouselLayoutChanged = pyqtSignal(int, int)
-    expandedChanged = pyqtSignal(bool)
-    collectionRenameRequested = pyqtSignal(str)
-    playerPlacementToggled = pyqtSignal(bool)
-    autosaveToggled = pyqtSignal(bool)
+    saveRequested = Signal()
+    saveAsRequested = Signal()
+    loadRequested = Signal()
+    addRequested = Signal()
+    deleteRequested = Signal()
+    carouselLayoutChanged = Signal(int, int)
+    expandedChanged = Signal(bool)
+    collectionRenameRequested = Signal(str)
+    playerPlacementToggled = Signal(bool)
+    autosaveToggled = Signal(bool)
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -3918,7 +3938,7 @@ class DungeonSelectionWidget(QWidget):
         self._expand_progress = max(0.0, min(1.0, float(value)))
         self._apply_progress()
 
-    expandProgress = pyqtProperty(float, fget=getExpandProgress, fset=setExpandProgress)
+    expandProgress = Property(float, fget=getExpandProgress, fset=setExpandProgress)
 
     def set_header_text(self, text: str) -> None:
         self._header_text = text
@@ -4188,6 +4208,7 @@ class DungeonAppletWidget(QWidget):
         self._dungeons: list[dict] = []
         self._active_dungeon_id: str | None = None
         self._players_dungeon_id: str | None = None
+        self._scene_item_refs: list[QGraphicsItem] = []
         self._collection_expanded = False
         self._suppress_change_tracking = False
         self._suppress_list_edits = False
@@ -4508,6 +4529,7 @@ class DungeonAppletWidget(QWidget):
         self.canvas.pingPlaced.connect(self._on_local_ping_placed)
         self.canvas.scene().selectionChanged.connect(self._on_selection_changed)
         self.canvas.scene().changed.connect(self._on_scene_changed_for_online_sync)
+        self.canvas.scene().changed.connect(self._refresh_scene_item_references)
         
         # FoW connections
         self.tool_panel.fogFillRequested.connect(self.canvas.fill_fog)
@@ -6875,7 +6897,7 @@ class DungeonAppletWidget(QWidget):
         self._session_panel_height = max(0.0, float(value))
         self._position_session_overlay()
 
-    sessionPanelHeight = pyqtProperty(
+    sessionPanelHeight = Property(
         float,
         fget=_get_session_panel_height,
         fset=_set_session_panel_height,
@@ -7272,6 +7294,11 @@ class DungeonAppletWidget(QWidget):
             return
         self._host_scene_sync_pending = True
         self._host_scene_sync_timer.start()
+
+    def _refresh_scene_item_references(self, _regions: object = None) -> None:
+        # PySide can drop wrappers for Python-defined QGraphicsItems loaded
+        # from serialized state unless we keep references on the Python side.
+        self._scene_item_refs = list(self.canvas.scene().items())
 
     def _flush_host_scene_sync(self, *, force: bool = False) -> None:
         if not force and not self._host_scene_sync_pending:
@@ -9557,6 +9584,7 @@ class DungeonAppletWidget(QWidget):
         self._host_scene_sync_timer.stop()
         self._host_scene_watchdog_timer.stop()
         self._loot_claim_reservation_timer.stop()
+        self._scene_item_refs = []
         super().closeEvent(event)
 
     def _local_profile_path(self) -> Path:
@@ -11001,6 +11029,7 @@ class DungeonAppletWidget(QWidget):
             self.canvas.fog_item = fog_item
             self.canvas.set_view_mode(self._view_mode)
             self.canvas.undo_stack.clear()
+            self._refresh_scene_item_references()
         finally:
             self._suppress_change_tracking = was_suppressed
         self._refresh_entity_duplicate_badges()

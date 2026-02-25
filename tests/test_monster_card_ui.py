@@ -10,7 +10,7 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel
 from ui.widgets.monster_card import MonsterCard
 from encounter_engine import Monster
 

@@ -5,9 +5,9 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QSize, QTimer, QPointF, QRectF, pyqtSignal
-from PyQt6.QtGui import QCursor, QImage, QPainter
-from PyQt6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtCore import Qt, QSize, QTimer, QPointF, QRectF, Signal
+from PySide6.QtGui import QCursor, QImage, QPainter
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
@@ -32,10 +32,10 @@ class PdfiumViewerWidget(QWidget):
     and request repaints via callbacks.
     """
 
-    pageChanged = pyqtSignal(int, int)
-    zoomChanged = pyqtSignal(float)
-    unsavedChanged = pyqtSignal(bool)
-    statusMessage = pyqtSignal(str)
+    pageChanged = Signal(int, int)
+    zoomChanged = Signal(float)
+    unsavedChanged = Signal(bool)
+    statusMessage = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)

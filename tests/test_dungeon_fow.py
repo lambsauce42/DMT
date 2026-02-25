@@ -2,9 +2,9 @@
 import sys
 import os
 import pytest
-from PyQt6.QtCore import Qt, QPointF
-from PyQt6.QtGui import QPainterPath, QPen, QColor
-from PyQt6.QtWidgets import QApplication, QGraphicsPathItem
+from PySide6.QtCore import Qt, QPointF
+from PySide6.QtGui import QPainterPath, QPen, QColor
+from PySide6.QtWidgets import QApplication, QGraphicsPathItem
 
 # Adjust import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))

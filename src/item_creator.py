@@ -5,8 +5,8 @@ import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QEvent
-from PyQt6.QtGui import (
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QEvent
+from PySide6.QtGui import (
     QColor,
     QFontMetrics,
     QIcon,
@@ -18,7 +18,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QShortcut,
 )
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
@@ -106,7 +106,7 @@ class _IconGridContainer(QWidget):
 
 
 class ItemPreviewWidget(QWidget):
-    hitboxClicked = pyqtSignal(str)
+    hitboxClicked = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)

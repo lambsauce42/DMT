@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from .client import OnlineSessionClient
 from .server import OnlineSessionServer
@@ -42,11 +42,11 @@ class _PendingCommand:
 
 
 class HostSessionController(QObject):
-    log_line = pyqtSignal(str)
-    players_changed = pyqtSignal(dict)
-    chat_received = pyqtSignal(str, str, bool)
-    command_received = pyqtSignal(str, dict)
-    snapshot_requested = pyqtSignal(str)
+    log_line = Signal(str)
+    players_changed = Signal(dict)
+    chat_received = Signal(str, str, bool)
+    command_received = Signal(str, dict)
+    snapshot_requested = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -207,15 +207,15 @@ class HostSessionController(QObject):
 
 
 class ClientSessionController(QObject):
-    log_line = pyqtSignal(str)
-    connected = pyqtSignal()
-    disconnected = pyqtSignal()
-    players_changed = pyqtSignal(dict)
-    chat_received = pyqtSignal(str, str, bool)
-    snapshot_received = pyqtSignal(dict)
-    command_result = pyqtSignal(dict)
-    icon_asset_received = pyqtSignal(str, str, str)
-    ping_received = pyqtSignal(float, float, str)
+    log_line = Signal(str)
+    connected = Signal()
+    disconnected = Signal()
+    players_changed = Signal(dict)
+    chat_received = Signal(str, str, bool)
+    snapshot_received = Signal(dict)
+    command_result = Signal(dict)
+    icon_asset_received = Signal(str, str, str)
+    ping_received = Signal(float, float, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)

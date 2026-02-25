@@ -8,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QSize, QTimer
-from PyQt6.QtGui import (
+from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtGui import (
     QIcon,
     QTextCursor,
     QTextListFormat,
@@ -19,7 +19,7 @@ from PyQt6.QtGui import (
     QCursor,
     QTextDocument,
 )
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication,
     QAbstractSpinBox,
     QCheckBox,

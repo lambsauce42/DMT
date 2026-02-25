@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt, pyqtProperty
-from PyQt6.QtGui import QColor, QPainter
-from PyQt6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Property
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
 class EncounterProgressBar(QWidget):
@@ -46,7 +46,7 @@ class EncounterProgressBar(QWidget):
         self._target_xp = max(0, target_xp)
         self.update()
 
-    value = pyqtProperty(float, fget=get_value, fset=_set_value)
+    value = Property(float, fget=get_value, fset=_set_value)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)

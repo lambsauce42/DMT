@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from PyQt6.QtCore import Qt, QSize, QPoint, QObject, QEvent
-from PyQt6.QtGui import (
+from PySide6.QtCore import Qt, QSize, QPoint, QObject, QEvent
+from PySide6.QtGui import (
     QBrush,
     QColor,
     QCursor,
@@ -22,7 +22,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QRadialGradient,
 )
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,

@@ -4,9 +4,9 @@ import math
 import uuid
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QCursor, QPainterPath, QPen, QPixmap, QPolygonF
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QCursor, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QGraphicsEllipseItem,
@@ -1159,7 +1159,7 @@ class EraserState(CanvasState):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         icon_path = os.path.join(base_dir, "..", "assets", "icons", "eraser.svg")
         if os.path.exists(icon_path):
-            from PyQt6.QtGui import QCursor, QPixmap
+            from PySide6.QtGui import QCursor, QPixmap
             pixmap = QPixmap(icon_path).scaled(24, 24)
             self.canvas.setCursor(QCursor(pixmap, 0, 24))  # Hotspot at bottom-left
         else:

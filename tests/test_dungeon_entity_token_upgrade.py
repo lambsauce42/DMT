@@ -2,8 +2,8 @@ import json
 import os
 import sys
 
-from PyQt6.QtCore import QPointF
-from PyQt6.QtWidgets import QGraphicsScene
+from PySide6.QtCore import QPointF
+from PySide6.QtWidgets import QGraphicsScene
 
 # Adjust import path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))

@@ -1,4 +1,4 @@
 Online transfer stabilisieren (Items und Character).
 navigation zu den files attachen
 UI cleanup
-pyside6 statt pyqt6
+pyside6 migration

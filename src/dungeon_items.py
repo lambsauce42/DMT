@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QGraphicsLineItem, 
     QGraphicsEllipseItem, 
     QGraphicsItem, 
@@ -18,8 +18,8 @@ from PyQt6.QtWidgets import (
     QMenu,
     QApplication
 )
-from PyQt6.QtGui import QPen, QColor, QPainter, QPainterPath, QPolygonF, QBrush, QPainterPathStroker, QPixmap
-from PyQt6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
+from PySide6.QtGui import QPen, QColor, QPainter, QPainterPath, QPolygonF, QBrush, QPainterPathStroker, QPixmap
+from PySide6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
 from dungeon_constants import GRID_SIZE, FLOOR_COLOR, WALL_COLOR, WALL_WIDTH, ROLE_LABEL, ROLE_ENTITY_ID
 
 

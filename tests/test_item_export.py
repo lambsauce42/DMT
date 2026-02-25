@@ -3,7 +3,7 @@ import os
 import sys
 import pytest
 from unittest.mock import patch
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 from PIL import Image
 
 # Adjust import path
@@ -76,7 +76,7 @@ def test_export_pdf_respects_chosen_path(qtbot, tmp_path):
     chosen_path = str(export_dir / "my_item.pdf")
     
     # Mock QFileDialog.getSaveFileName to return our chosen path
-    with patch("PyQt6.QtWidgets.QFileDialog.getSaveFileName", return_value=(chosen_path, "PDF (*.pdf)")):
+    with patch("PySide6.QtWidgets.QFileDialog.getSaveFileName", return_value=(chosen_path, "PDF (*.pdf)")):
         # Mock save_item_card_pdf to avoid actual rendering but check the path
         with patch("item_creator.save_item_card_pdf") as mock_save:
             widget._export_pdf()
@@ -96,7 +96,7 @@ def test_export_png_respects_chosen_path(qtbot, tmp_path):
     chosen_path = str(export_dir / "my_item.png")
     
     # Mock QFileDialog.getSaveFileName to return our chosen path
-    with patch("PyQt6.QtWidgets.QFileDialog.getSaveFileName", return_value=(chosen_path, "PNG (*.png)")):
+    with patch("PySide6.QtWidgets.QFileDialog.getSaveFileName", return_value=(chosen_path, "PNG (*.png)")):
         # Mock save_item_card_png to avoid actual rendering but check the path
         with patch("item_creator.save_item_card_png") as mock_save:
             widget._export_png()

@@ -2,8 +2,8 @@ import sys
 import os
 import pytest
 from unittest.mock import patch, MagicMock
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QPushButton, QLineEdit
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QPushButton, QLineEdit
 
 # Adjust import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))

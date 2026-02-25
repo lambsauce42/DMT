@@ -1,15 +1,15 @@
 import os
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QLineEdit, QSizePolicy
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QLocale, QSize
-from PyQt6.QtGui import QIntValidator, QDoubleValidator, QIcon
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QLineEdit, QSizePolicy
+from PySide6.QtCore import Qt, Signal, QTimer, QLocale, QSize
+from PySide6.QtGui import QIntValidator, QDoubleValidator, QIcon
 
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "icons"))
 
 class PlusMinusSpinBox(QWidget):
     # Emit object to support both int and float
-    valueChanged = pyqtSignal(object) 
-    editingFinished = pyqtSignal()
+    valueChanged = Signal(object) 
+    editingFinished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

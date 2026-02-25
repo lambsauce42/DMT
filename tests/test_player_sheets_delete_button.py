@@ -13,7 +13,7 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 import player_sheets
 from player_sheets import PlayerSheetsWidget
@@ -328,8 +328,12 @@ class PlayerSheetsDeleteButtonTests(unittest.TestCase):
 
                     image = pixmap.toImage()
                     ptr = image.bits()
-                    ptr.setsize(image.sizeInBytes())
-                    hashes.add(hashlib.sha256(bytes(ptr)).hexdigest())
+                    if hasattr(ptr, "setsize"):
+                        ptr.setsize(image.sizeInBytes())
+                        raw = bytes(ptr)
+                    else:
+                        raw = memoryview(ptr).tobytes()[: image.sizeInBytes()]
+                    hashes.add(hashlib.sha256(raw).hexdigest())
 
                 self.assertEqual(len(hashes), 1)
                 widget.close()

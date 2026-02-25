@@ -1,7 +1,7 @@
 import sys
 import os
 import pytest
-from PyQt6.QtWidgets import QPushButton, QSlider, QWidget
+from PySide6.QtWidgets import QPushButton, QSlider, QWidget
 
 # Adjust import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))

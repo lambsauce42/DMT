@@ -1,9 +1,8 @@
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -16,9 +15,7 @@ from loot_applet import LootItem, RARITY_ORDER
 app = QApplication.instance() or QApplication(sys.argv)
 
 class TestLootRelativeWeights(unittest.TestCase):
-    @patch("loot_applet.LootAppletWidget._load_item_library")
-    @patch("loot_applet.LootAppletWidget._load_presets")
-    def setUp(self, mock_presets, mock_library):
+    def setUp(self):
         self.widget = loot_applet.LootAppletWidget()
         # Common and Legendary items
         self.legendary_item = LootItem(

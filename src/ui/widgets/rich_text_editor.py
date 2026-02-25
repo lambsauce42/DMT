@@ -3,15 +3,15 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QSize, QTimer
-from PyQt6.QtGui import (
+from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtGui import (
     QIcon,
     QTextListFormat,
     QTextCharFormat,
     QTextBlockFormat,
     QFont,
 )
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QFrame,
     QHBoxLayout,

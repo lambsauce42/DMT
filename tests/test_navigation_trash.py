@@ -14,8 +14,8 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtCore import QPoint
-from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QLabel, QLineEdit
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QLabel, QLineEdit
 
 import compact_nav_tree
 

@@ -5,8 +5,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
 
 from .protocol import FrameDecoder, encode_message
 
@@ -34,10 +34,10 @@ class _IdentityState:
 
 
 class OnlineSessionServer(QObject):
-    log_line = pyqtSignal(str)
-    player_connected = pyqtSignal(str, str)
-    player_disconnected = pyqtSignal(str, str)
-    message_received = pyqtSignal(str, dict)
+    log_line = Signal(str)
+    player_connected = Signal(str, str)
+    player_disconnected = Signal(str, str)
+    message_received = Signal(str, dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)

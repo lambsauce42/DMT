@@ -11,8 +11,8 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtWidgets import QApplication
 
 from viewer.pdfium_viewer_widget import PdfiumViewerWidget
 import viewer.pdfium_viewer_widget as pdfium_viewer_widget

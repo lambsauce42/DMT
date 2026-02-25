@@ -1,10 +1,10 @@
 import sys
 import os
 import pytest
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QToolButton, QMessageBox, QInputDialog, QDialog
 )
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 # Adjust import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))

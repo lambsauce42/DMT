@@ -9,10 +9,10 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QResizeEvent
-from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QResizeEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 
 from ui.character_sheet_panel import CharacterSheetPanel
 

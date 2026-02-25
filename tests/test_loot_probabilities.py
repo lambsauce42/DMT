@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -10,15 +10,13 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 import loot_applet
 
 app = QApplication.instance() or QApplication(sys.argv)
 
 class TestLootProbabilities(unittest.TestCase):
-    @patch("loot_applet.LootAppletWidget._load_item_library")
-    @patch("loot_applet.LootAppletWidget._load_presets")
-    def setUp(self, mock_presets, mock_library):
+    def setUp(self):
         self.widget = loot_applet.LootAppletWidget()
 
     def tearDown(self):
