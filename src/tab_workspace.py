@@ -86,6 +86,8 @@ class DetachableTabBar(QTabBar):
         self._tab_widget = tab_widget
         self._press_pos = QPoint()
         self._press_index = -1
+        self._width_lock_active = False
+        self._locked_width_by_id: Dict[int, int] = {}
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
@@ -150,6 +152,19 @@ class DetachableTabBar(QTabBar):
                 return index
         return self.count()
 
+    def tabSizeHint(self, index: int) -> QSize:  # type: ignore[override]
+        base = super().tabSizeHint(index)
+        if not self._width_lock_active:
+            return base
+        identity = self.tabData(index)
+        if identity is None:
+            return base
+        width = self._locked_width_by_id.get(int(identity))
+        if width is None:
+            return base
+        base.setWidth(int(width))
+        return base
+
     def owner_window(self) -> WorkspaceWindow:
         return self._owner_window
 
@@ -162,8 +177,32 @@ class DetachableTabBar(QTabBar):
     def insertion_index_for_global_pos(self, global_pos: QPoint) -> int:
         return self._insertion_index_from_pos(self.mapFromGlobal(global_pos))
 
+    def begin_external_drag_width_lock(self) -> None:
+        self._locked_width_by_id = {}
+        for index in range(self.count()):
+            identity = self.tabData(index)
+            if identity is None:
+                continue
+            rect = self.tabRect(index)
+            width = rect.width() if rect.width() > 0 else super().tabSizeHint(index).width()
+            self._locked_width_by_id[int(identity)] = int(width)
+        self._width_lock_active = True
+        self.updateGeometry()
+        self.update()
+
+    def end_external_drag_width_lock(self) -> None:
+        if not self._width_lock_active and not self._locked_width_by_id:
+            return
+        self._width_lock_active = False
+        self._locked_width_by_id = {}
+        self.updateGeometry()
+        self.update()
+
 
 class TabWorkspaceController(QObject):
+    _DROP_TARGET_TOP_SLOP_PX = 4
+    _DROP_TARGET_BOTTOM_SLOP_PX = 12
+
     def __init__(self) -> None:
         super().__init__()
         self.tab_by_key: Dict[str, QWidget] = {}
@@ -257,6 +296,7 @@ class TabWorkspaceController(QObject):
             self._register_widget(key, widget, window, title)
             tabs = window.workspace_tabs()
             index = tabs.addTab(widget, title)
+            tabs.tabBar().setTabData(index, int(id(widget)))
             if focus_if_new:
                 tabs.setCurrentIndex(index)
             self.sync_tab_bar_extent(window)
@@ -323,19 +363,29 @@ class TabWorkspaceController(QObject):
         widget = tabs.widget(index)
         if widget is None or self.is_home_widget(widget):
             return False
+        try:
+            closed = bool(widget.close())
+        except RuntimeError:
+            closed = True
+        if not closed:
+            key = self.key_by_widget.get(widget, "")
+            self._debug_log("close_tab_veto", key=str(key))
+            return False
         key = self.key_by_widget.pop(widget, None)
         if key:
             self.tab_by_key.pop(key, None)
         self.title_by_widget.pop(widget, None)
         self.window_by_widget.pop(widget, None)
-        title = tabs.tabText(index)
-        tabs.removeTab(index)
+        current_index = tabs.indexOf(widget)
+        title = tabs.tabText(current_index if current_index != -1 else index)
+        if current_index != -1:
+            tabs.removeTab(current_index)
         self.sync_tab_bar_extent(window)
         self._debug_log("close_tab", key=str(key or ""), title=title)
         try:
-            widget.close()
-        finally:
             widget.deleteLater()
+        except RuntimeError:
+            pass
         if auto_close_window and not window.is_primary_window() and tabs.count() == 0:
             if hasattr(window, "close"):
                 window.close()
@@ -349,9 +399,9 @@ class TabWorkspaceController(QObject):
                 widget = tabs.widget(index)
                 if self.is_home_widget(widget):
                     continue
-                self.close_tab_by_index(window, index, auto_close_window=False)
-                closed_any = True
-                break
+                if self.close_tab_by_index(window, index, auto_close_window=False):
+                    closed_any = True
+                    break
             if not closed_any:
                 break
 
@@ -392,6 +442,7 @@ class TabWorkspaceController(QObject):
         target_tabs = target_window.workspace_tabs()
         insert_at = max(0, min(int(target_index), target_tabs.count()))
         target_tabs.insertTab(insert_at, widget, title)
+        target_tabs.tabBar().setTabData(insert_at, int(id(widget)))
         self.window_by_widget[widget] = target_window
         self.sync_tab_bar_extent(source_window)
         self.sync_tab_bar_extent(target_window)
@@ -421,7 +472,11 @@ class TabWorkspaceController(QObject):
             new_window.move(global_pos.x(), global_pos.y())
         if hasattr(new_window, "show"):
             new_window.show()
-        moved = self.move_widget_to_window(widget, new_window, target_index=0, focus=True)
+        current_owner = self.window_by_widget.get(widget)
+        if current_owner is None:
+            moved = self._attach_floating_widget_to_window(widget, new_window, target_index=0, focus=True)
+        else:
+            moved = self.move_widget_to_window(widget, new_window, target_index=0, focus=True)
         if not moved:
             if hasattr(new_window, "close"):
                 new_window.close()
@@ -490,6 +545,7 @@ class TabWorkspaceController(QObject):
             hot_spot=centered_hot_spot,
             ghost=ghost,
         )
+        self._set_external_drag_width_lock(True)
         QApplication.setOverrideCursor(Qt.CursorShape.ClosedHandCursor)
         self._ensure_drag_event_filter()
         self.update_external_tab_drag(global_pos)
@@ -501,19 +557,37 @@ class TabWorkspaceController(QObject):
         if state is None:
             return
         target_bar = self._tab_bar_from_global_pos(global_pos)
+        current_owner = self.window_by_widget.get(state.widget)
         if target_bar is not None:
             target_window = target_bar.owner_window()
             target_index = target_bar.insertion_index_for_global_pos(global_pos)
-            self.move_widget_to_window(
-                state.widget,
-                target_window,
-                target_index=int(target_index),
-                focus=False,
-                auto_close_source_if_empty=True,
-            )
-            state.current_host_window = target_window
+            moved = False
+            if current_owner is None:
+                moved = self._attach_floating_widget_to_window(
+                    state.widget,
+                    target_window,
+                    target_index=int(target_index),
+                    focus=False,
+                )
+            else:
+                moved = self.move_widget_to_window(
+                    state.widget,
+                    target_window,
+                    target_index=int(target_index),
+                    focus=False,
+                    auto_close_source_if_empty=True,
+                )
+            if moved:
+                state.current_host_window = target_window
             self._hide_drag_ghost(state)
             return
+        if current_owner is not None:
+            removed = self._remove_widget_from_window_for_drag(
+                state.widget,
+                close_empty_window=True,
+            )
+            if removed is not None:
+                state.current_host_window = state.source_window
         self._show_drag_ghost(state, global_pos)
 
     def finish_external_tab_drag(self, global_pos: QPoint, *, detach_on_invalid_drop: bool = True) -> bool:
@@ -532,11 +606,11 @@ class TabWorkspaceController(QObject):
                 self._debug_log("drag_detach_finish", key=str(self.key_by_widget.get(state.widget, "")))
         elif current_owner is not None:
             moved = True
-            self.focus_widget(current_owner, state.widget)
             if target_bar is not None:
                 self._debug_log("drag_attach", key=str(self.key_by_widget.get(state.widget, "")))
         self._hide_drag_ghost(state)
         self._destroy_drag_ghost(state)
+        self._set_external_drag_width_lock(False)
         QApplication.restoreOverrideCursor()
         self._external_drag = None
         self._remove_drag_event_filter()
@@ -552,11 +626,13 @@ class TabWorkspaceController(QObject):
         event_type = event.type()
         if event_type == QEvent.Type.MouseMove:
             buttons = getattr(event, "buttons", lambda: Qt.MouseButton.NoButton)()
+            global_pos = self._event_global_pos(event) or QCursor.pos()
             if not (buttons & Qt.MouseButton.LeftButton):
+                # If release happened outside app widgets, finalize when pointer re-enters.
+                self._debug_log("drag_finish_no_button")
+                self.finish_external_tab_drag(global_pos)
                 return False
-            global_pos = self._event_global_pos(event)
-            if global_pos is not None:
-                self.update_external_tab_drag(global_pos)
+            self.update_external_tab_drag(global_pos)
             return False
         if event_type == QEvent.Type.MouseButtonRelease:
             button = getattr(event, "button", lambda: Qt.MouseButton.NoButton)()
@@ -616,6 +692,54 @@ class TabWorkspaceController(QObject):
         ghost.deleteLater()
         state.ghost = None
 
+    def _remove_widget_from_window_for_drag(
+        self,
+        widget: QWidget,
+        *,
+        close_empty_window: bool,
+    ) -> Optional[WorkspaceWindow]:
+        source_window = self.window_by_widget.get(widget)
+        if source_window is None:
+            return None
+        source_tabs = source_window.workspace_tabs()
+        source_index = source_tabs.indexOf(widget)
+        if source_index != -1:
+            source_tabs.removeTab(source_index)
+            self.sync_tab_bar_extent(source_window)
+            self._enforce_home_pinned(source_window)
+        self.window_by_widget.pop(widget, None)
+        if (
+            close_empty_window
+            and not source_window.is_primary_window()
+            and source_tabs.count() == 0
+            and hasattr(source_window, "close")
+        ):
+            source_window.close()
+        return source_window
+
+    def _attach_floating_widget_to_window(
+        self,
+        widget: QWidget,
+        target_window: WorkspaceWindow,
+        *,
+        target_index: int,
+        focus: bool,
+    ) -> bool:
+        if self.is_home_widget(widget):
+            return False
+        target_tabs = target_window.workspace_tabs()
+        insert_at = max(0, min(int(target_index), target_tabs.count()))
+        title = self.title_by_widget.get(widget, "")
+        target_tabs.insertTab(insert_at, widget, title)
+        target_tabs.tabBar().setTabData(insert_at, int(id(widget)))
+        self.window_by_widget[widget] = target_window
+        self.sync_tab_bar_extent(target_window)
+        self._enforce_home_pinned(target_window)
+        if focus:
+            target_tabs.setCurrentWidget(widget)
+            self.focus_widget(target_window, widget)
+        return True
+
     def _tab_bar_from_global_pos(
         self,
         global_pos: QPoint,
@@ -624,7 +748,11 @@ class TabWorkspaceController(QObject):
     ) -> Optional[DetachableTabBar]:
         _ = exclude_window
         for window in list(self.registered_windows):
+            if hasattr(window, "isVisible") and not bool(window.isVisible()):
+                continue
             tabs = window.workspace_tabs()
+            if tabs.count() <= 0:
+                continue
             bar = tabs.tabBar()
             if not isinstance(bar, DetachableTabBar):
                 continue
@@ -632,12 +760,29 @@ class TabWorkspaceController(QObject):
                 continue
             top_left = bar.mapToGlobal(QPoint(0, 0))
             global_rect = QRect(top_left, bar.size())
-            tabs = window.workspace_tabs()
-            strip_top_left = tabs.mapToGlobal(QPoint(0, 0))
-            strip_rect = QRect(strip_top_left, QSize(tabs.width(), bar.height()))
+            strip_width = tabs.width()
+            if strip_width <= 0:
+                continue
+            strip_top_left = bar.mapToGlobal(QPoint(0, 0))
+            strip_origin = strip_top_left - QPoint(0, self._DROP_TARGET_TOP_SLOP_PX)
+            strip_height = (
+                bar.height() + self._DROP_TARGET_TOP_SLOP_PX + self._DROP_TARGET_BOTTOM_SLOP_PX
+            )
+            strip_rect = QRect(strip_origin, QSize(strip_width, max(1, strip_height)))
             if global_rect.contains(global_pos) or strip_rect.contains(global_pos):
                 return bar
         return None
+
+    def _set_external_drag_width_lock(self, enabled: bool) -> None:
+        for window in list(self.registered_windows):
+            tabs = window.workspace_tabs()
+            bar = tabs.tabBar()
+            if not isinstance(bar, DetachableTabBar):
+                continue
+            if enabled:
+                bar.begin_external_drag_width_lock()
+            else:
+                bar.end_external_drag_width_lock()
 
     def _register_widget(
         self,
