@@ -231,6 +231,7 @@ class ClientSessionController(QObject):
         self._connect_host: str = ""
         self._connect_port: int = 0
         self._connect_name: str = ""
+        self._connect_persistent_player_id: str = ""
         self._manual_disconnect = False
         self._reconnect_attempt = 0
 
@@ -268,13 +269,14 @@ class ClientSessionController(QObject):
         self._connect_host = str(host or "")
         self._connect_port = int(port)
         self._connect_name = str(name or "").strip()
+        self._connect_persistent_player_id = str(persistent_player_id or "").strip()
         self._manual_disconnect = False
         self._reconnect_timer.stop()
         self.client.connect_to_host(
             host,
             port,
             name,
-            persistent_player_id=persistent_player_id,
+            persistent_player_id=self._connect_persistent_player_id,
         )
 
     def disconnect(self) -> None:
@@ -443,6 +445,7 @@ class ClientSessionController(QObject):
             self._connect_host,
             int(self._connect_port),
             self._connect_name,
+            persistent_player_id=self._connect_persistent_player_id,
         )
 
     def _resend_pending_commands(self) -> None:

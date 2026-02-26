@@ -8539,6 +8539,21 @@ class DungeonAppletWidget(QWidget):
                 request_id=request_id,
             )
             return
+        if kind != "player":
+            self._debug_log(
+                "host_initiative_update_denied",
+                player_id=str(player_id or ""),
+                kind=str(kind),
+                row_id=str(entry_id),
+                reason="non-player-row",
+            )
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Initiative entry is not owned by this player.",
+                request_id=request_id,
+            )
+            return
         raw_value = payload.get("initiative")
         value: int | None = None
         if raw_value is not None:
@@ -8546,33 +8561,57 @@ class DungeonAppletWidget(QWidget):
                 value = int(raw_value)
             except (TypeError, ValueError):
                 value = None
-        target = self._initiative_state.setdefault("player_entries" if kind == "player" else "entity_entries", {})
+        target = self._initiative_state.get("player_entries", {})
         if not isinstance(target, dict):
             target = {}
-            self._initiative_state["player_entries" if kind == "player" else "entity_entries"] = target
+            self._initiative_state["player_entries"] = target
         row = target.get(entry_id)
         if not isinstance(row, dict):
-            row = {}
-            if kind == "entity":
-                target[entry_id] = row
-        if kind == "player":
-            row_player_id = str(row.get("player_id") or "").strip()
-            if not row_player_id or row_player_id != player_id:
-                self._host_controller.send_command_result(
-                    player_id,
-                    ok=False,
-                    message="Initiative entry is not owned by this player.",
-                    request_id=request_id,
-                )
-                return
-            target[entry_id] = row
-        if kind == "player":
-            player_name = self._connected_players.get(player_id, player_id)
-            entity_name = str(row.get("name") or "")
-            if entity_name and " - " in entity_name:
-                row["name"] = entity_name
-            else:
-                row["name"] = str(row.get("name") or player_name)
+            self._debug_log(
+                "host_initiative_update_denied",
+                player_id=str(player_id or ""),
+                kind=str(kind),
+                row_id=str(entry_id),
+                reason="missing-row",
+            )
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Initiative entry is not owned by this player.",
+                request_id=request_id,
+            )
+            return
+        row_player_id = str(row.get("player_id") or "").strip()
+        row_entity_id = str(row.get("entity_id") or "").strip()
+        expected_row_id = f"{row_player_id}:{row_entity_id}" if row_player_id and row_entity_id else ""
+        if (
+            not row_player_id
+            or row_player_id != player_id
+            or not row_entity_id
+            or expected_row_id != entry_id
+        ):
+            self._debug_log(
+                "host_initiative_update_denied",
+                player_id=str(player_id or ""),
+                kind=str(kind),
+                row_id=str(entry_id),
+                row_player_id=str(row_player_id),
+                row_entity_id=str(row_entity_id),
+                reason="ownership-mismatch",
+            )
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Initiative entry is not owned by this player.",
+                request_id=request_id,
+            )
+            return
+        player_name = self._connected_players.get(player_id, player_id)
+        entity_name = str(row.get("name") or "")
+        if entity_name and " - " in entity_name:
+            row["name"] = entity_name
+        else:
+            row["name"] = str(row.get("name") or player_name)
         row["initiative"] = value
         self._debug_log(
             "host_initiative_update_applied",

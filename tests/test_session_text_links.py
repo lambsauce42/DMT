@@ -293,6 +293,34 @@ def test_item_suggestions_load_saved_items(tmp_path: Path) -> None:
     assert suggestions[0].display_label == "Steel Sword"
 
 
+def test_suggestion_ranking_prefers_prefix_matches_over_plain_substring(tmp_path: Path) -> None:
+    base_dir = tmp_path / "DMT"
+    items_dir = base_dir / "items"
+    items_dir.mkdir(parents=True, exist_ok=True)
+    entries = [
+        ("acat_blade", "Acat Blade"),
+        ("cat_blade", "Cat Blade"),
+        ("wildcat_blade", "Wildcat Blade"),
+    ]
+    for file_stem, title in entries:
+        item_path = items_dir / f"{file_stem}{ITEM_FILE_EXTENSION}"
+        item_path.write_text(
+            json.dumps(
+                {
+                    "format": ITEM_FILE_FORMAT,
+                    "payload": {"title": title, "rarity": "common"},
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    suggestions = load_link_suggestions("item", "cat", base_dir=base_dir)
+    labels = [suggestion.display_label for suggestion in suggestions]
+    assert labels[0] == "Cat Blade"
+
+
 def test_character_suggestions_include_all_saved_entries(monkeypatch) -> None:
     entries = [
         PlayerSheetEntry(name="Alyra", pdf_path=""),

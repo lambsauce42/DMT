@@ -20,6 +20,7 @@ from session_text_links import (
 
 class SessionTextLinkController(QObject):
     _ESCAPED_SLASH_PROP = int(QTextFormat.Property.UserProperty) + 791
+    _COMMAND_SUGGESTION_KIND = "__command__"
 
     def __init__(
         self,
@@ -33,9 +34,13 @@ class SessionTextLinkController(QObject):
         self._suggestion_provider = suggestion_provider
         self._link_activated = link_activated
         self._current_trigger: Optional[SlashTrigger] = None
+        self._command_popup_start: Optional[int] = None
+        self._command_popup_end: Optional[int] = None
+        self._popup_mode = "link"
         self._suggestions: list[LinkSuggestion] = []
         self._is_applying = False
         self._format_normalizing = False
+        self._last_non_link_char_format: Optional[QTextCharFormat] = None
         self._prefer_plain_after_link = False
         self._force_plain_next_text_input = False
         self._navigation_format_change_guard = False
@@ -44,6 +49,10 @@ class SessionTextLinkController(QObject):
         self._mouse_press_pos: Optional[QPoint] = None
         self._mouse_press_anchor: str = ""
         self._mouse_dragged = False
+        self._popup_refresh_timer = QTimer(self)
+        self._popup_refresh_timer.setSingleShot(True)
+        self._popup_refresh_timer.setInterval(30)
+        self._popup_refresh_timer.timeout.connect(self._refresh_popup)
 
         self._popup = QListWidget(editor)
         self._popup.setWindowFlags(
@@ -84,8 +93,8 @@ class SessionTextLinkController(QObject):
         editor.installEventFilter(self)
         editor.viewport().installEventFilter(self)
         editor.viewport().setMouseTracking(True)
-        editor.textChanged.connect(self._refresh_popup)
-        editor.cursorPositionChanged.connect(self._refresh_popup)
+        editor.textChanged.connect(self._schedule_popup_refresh)
+        editor.cursorPositionChanged.connect(self._schedule_popup_refresh)
         editor.cursorPositionChanged.connect(self._normalize_typing_format_near_link)
         editor.currentCharFormatChanged.connect(self._on_current_char_format_changed)
         editor.destroyed.connect(self._on_editor_destroyed)
@@ -102,8 +111,12 @@ class SessionTextLinkController(QObject):
         self._hide_popup()
 
     def _on_escape_shortcut(self) -> None:
-        self._escape_current_trigger()
         self._hide_popup()
+
+    def _schedule_popup_refresh(self) -> None:
+        if self._is_applying:
+            return
+        self._popup_refresh_timer.start()
 
     def is_popup_visible(self) -> bool:
         return self._popup.isVisible()
@@ -158,21 +171,21 @@ class SessionTextLinkController(QObject):
         typed_text = str(event.text() or "")
         if typed_text:
             if self._editor is not None and self._force_plain_next_text_input:
-                plain = QTextCharFormat(self._editor.currentCharFormat())
+                current = QTextCharFormat(self._editor.currentCharFormat())
+                plain = QTextCharFormat(current)
                 plain.setAnchor(False)
                 plain.setAnchorHref("")
-                plain.setFontUnderline(False)
                 plain.setForeground(self._editor.palette().text().color())
                 self._set_editor_current_char_format(plain)
                 self._force_plain_next_text_input = False
             if self._insert_text_safely_near_link(typed_text, event.modifiers()):
                 return True
             if self._editor is not None and self._prefer_plain_after_link:
-                fmt = QTextCharFormat(self._editor.currentCharFormat())
-                fmt.setAnchor(False)
-                fmt.setAnchorHref("")
-                fmt.setFontUnderline(False)
-                fmt.setForeground(self._editor.palette().text().color())
+                current = QTextCharFormat(self._editor.currentCharFormat())
+                fmt = self._preferred_non_link_format(
+                    current,
+                    font_point_size=current.fontPointSize(),
+                )
                 self._set_editor_current_char_format(fmt)
                 self._prefer_plain_after_link = False
             self._recent_text_input = True
@@ -181,15 +194,14 @@ class SessionTextLinkController(QObject):
             if self._apply_command_completion():
                 return True
             if self._popup.isVisible():
-                row = self._popup.currentRow()
-                if row < 0:
-                    row = 0
                 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    row = self._popup.currentRow()
+                    if row < 0:
+                        row = 0
                     row = (row - 1) % max(1, self._popup.count())
-                else:
-                    row = (row + 1) % max(1, self._popup.count())
-                self._popup.setCurrentRow(row)
-                return True
+                    self._popup.setCurrentRow(row)
+                    return True
+                return self._accept_popup_selection(self._popup.currentRow())
             return False
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if not self._popup.isVisible():
@@ -198,18 +210,8 @@ class SessionTextLinkController(QObject):
                 return self._accept_popup_selection(self._popup.currentRow())
             return False
         if key == Qt.Key.Key_Space:
-            if not self._popup.isVisible():
-                self._refresh_popup()
-            trigger = self._current_trigger
-            if trigger is None:
-                return False
-            if not str(trigger.query or "").strip():
-                return False
-            if self._popup.isVisible():
-                return self._accept_popup_selection(self._popup.currentRow())
             return False
         if key == Qt.Key.Key_Escape:
-            self._escape_current_trigger()
             self._hide_popup()
             return True
         if key == Qt.Key.Key_Backspace and self._popup.isVisible():
@@ -219,7 +221,6 @@ class SessionTextLinkController(QObject):
             return False
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home, Qt.Key.Key_End):
             self._navigation_format_change_guard = True
-            QTimer.singleShot(0, self._normalize_typing_format_near_link)
         if not self._popup.isVisible():
             return False
         if key == Qt.Key.Key_Down:
@@ -256,14 +257,14 @@ class SessionTextLinkController(QObject):
         cleaned = QTextCharFormat(current)
         cleaned.setAnchor(False)
         cleaned.setAnchorHref("")
+        cleaned.setForeground(self._editor.palette().text().color())
         if self._force_plain_next_text_input or self._prefer_plain_after_link:
-            cleaned.setForeground(self._editor.palette().text().color())
-            cleaned.setFontUnderline(False)
             self._prefer_plain_after_link = False
             self._force_plain_next_text_input = False
         cursor.insertText(text, cleaned)
         self._editor.setTextCursor(cursor)
         self._set_editor_current_char_format(cleaned)
+        self._last_non_link_char_format = QTextCharFormat(cleaned)
         self._recent_text_input = True
         return True
 
@@ -407,11 +408,11 @@ class SessionTextLinkController(QObject):
         if left_anchor == right_anchor:
             return
         self._prefer_plain_after_link = True
-        fmt = QTextCharFormat(self._editor.currentCharFormat())
-        fmt.setAnchor(False)
-        fmt.setAnchorHref("")
-        fmt.setFontUnderline(False)
-        fmt.setForeground(self._editor.palette().text().color())
+        current = QTextCharFormat(self._editor.currentCharFormat())
+        fmt = self._preferred_non_link_format(
+            current,
+            font_point_size=current.fontPointSize(),
+        )
         self._set_editor_current_char_format(fmt)
 
     def _set_editor_current_char_format(self, fmt: QTextCharFormat) -> None:
@@ -433,28 +434,27 @@ class SessionTextLinkController(QObject):
         current_underline = bool(fmt.fontUnderline())
         if self._navigation_format_change_guard:
             self._navigation_format_change_guard = False
+            self._normalize_typing_format_near_link()
             return
         if self._force_plain_next_text_input and not self._recent_text_input:
             self._force_plain_next_text_input = False
         self._last_seen_underline = current_underline
         if not fmt.isAnchor():
+            self._last_non_link_char_format = QTextCharFormat(fmt)
             if self._prefer_plain_after_link:
-                cleaned_plain = QTextCharFormat(fmt)
-                cleaned_plain.setFontUnderline(False)
-                cleaned_plain.setForeground(self._editor.palette().text().color())
+                cleaned_plain = self._preferred_non_link_format(
+                    fmt,
+                    font_point_size=fmt.fontPointSize(),
+                )
                 self._prefer_plain_after_link = False
-                if (
-                    cleaned_plain.fontUnderline() != fmt.fontUnderline()
-                    or cleaned_plain.foreground().color() != fmt.foreground().color()
-                ):
+                if cleaned_plain != fmt:
                     self._set_editor_current_char_format(cleaned_plain)
             return
-        cleaned = QTextCharFormat(fmt)
-        cleaned.setAnchor(False)
-        cleaned.setAnchorHref("")
+        cleaned = self._preferred_non_link_format(
+            fmt,
+            font_point_size=fmt.fontPointSize(),
+        )
         if self._prefer_plain_after_link:
-            cleaned.setFontUnderline(False)
-            cleaned.setForeground(self._editor.palette().text().color())
             self._prefer_plain_after_link = False
         self._set_editor_current_char_format(cleaned)
 
@@ -488,6 +488,63 @@ class SessionTextLinkController(QObject):
             return None
         return start, pos, best, suffix
 
+    def _command_popup_context(self) -> Optional[tuple[int, int, str]]:
+        if self._editor is None:
+            return None
+        text = self._editor.toPlainText()
+        pos = self._editor.textCursor().position()
+        line_start = text.rfind("\n", 0, pos) + 1
+        segment = text[line_start:pos]
+        if "/" not in segment:
+            return None
+        rel_slash = segment.rfind("/")
+        start = line_start + rel_slash
+        if start > 0 and not text[start - 1].isspace():
+            return None
+        if start > 0 and text[start - 1] == "/":
+            return None
+        token = text[start + 1 : pos]
+        if any(ch.isspace() for ch in token):
+            return None
+        if self._is_escaped_literal_slash(start):
+            return None
+        return start, pos, token.strip().lower()
+
+    def _command_suggestions(self, partial: str) -> list[LinkSuggestion]:
+        clean_partial = str(partial or "").strip().lower()
+        matches = [cmd for cmd in sorted(SUPPORTED_COMMANDS) if not clean_partial or cmd.startswith(clean_partial)]
+        return [
+            LinkSuggestion(
+                kind=self._COMMAND_SUGGESTION_KIND,
+                target_id=command,
+                display_label=command,
+                link_text=command,
+            )
+            for command in matches
+        ]
+
+    def _suggestion_identity(self, suggestion: LinkSuggestion) -> str:
+        if str(suggestion.kind or "") == self._COMMAND_SUGGESTION_KIND:
+            return f"command::{str(suggestion.target_id or '').strip().lower()}"
+        href = str(suggestion.href or "").strip()
+        if href:
+            return f"href::{href}"
+        return f"entry::{str(suggestion.kind or '').strip().lower()}::{str(suggestion.target_id or '').strip()}"
+
+    def _selected_popup_identity(self) -> Optional[str]:
+        row = self._popup.currentRow()
+        if row < 0 or row >= len(self._suggestions):
+            return None
+        return self._suggestion_identity(self._suggestions[row])
+
+    def _row_for_identity(self, identity: Optional[str], suggestions: list[LinkSuggestion]) -> int:
+        if not identity:
+            return 0
+        for index, suggestion in enumerate(suggestions):
+            if self._suggestion_identity(suggestion) == identity:
+                return index
+        return 0
+
     def _position_command_hint(self) -> None:
         if self._editor is None:
             return
@@ -496,7 +553,39 @@ class SessionTextLinkController(QObject):
         y = rect.top()
         self._command_hint_label.move(x, y)
 
+    def _preferred_non_link_format(
+        self,
+        fallback: QTextCharFormat,
+        *,
+        font_point_size: float = 0.0,
+    ) -> QTextCharFormat:
+        if self._editor is None:
+            fmt = QTextCharFormat(fallback)
+            fmt.setAnchor(False)
+            fmt.setAnchorHref("")
+            return fmt
+        source = fallback
+        if fallback.isAnchor() and self._last_non_link_char_format is not None:
+            source = self._last_non_link_char_format
+        fmt = QTextCharFormat(source)
+        fmt.setAnchor(False)
+        fmt.setAnchorHref("")
+        fmt.setForeground(self._editor.palette().text().color())
+        point_size = float(font_point_size or 0.0)
+        if point_size <= 0.0:
+            point_size = float(fallback.fontPointSize() or 0.0)
+        if point_size > 0.0:
+            fmt.setFontPointSize(point_size)
+        return fmt
+
     def _refresh_command_hint(self) -> None:
+        if self._editor is not None:
+            current = QTextCharFormat(self._editor.currentCharFormat())
+            hint_font = current.font() if current.font().family() else self._editor.font()
+            point_size = float(current.fontPointSize() or 0.0)
+            if point_size > 0.0:
+                hint_font.setPointSizeF(point_size)
+            self._command_hint_label.setFont(hint_font)
         completion = self._command_completion()
         if completion is None:
             self._command_hint_label.hide()
@@ -522,6 +611,29 @@ class SessionTextLinkController(QObject):
         cursor.endEditBlock()
         self._editor.setTextCursor(cursor)
         self._command_hint_label.hide()
+        self._refresh_popup()
+        return True
+
+    def _insert_command_from_popup(self, command: str) -> bool:
+        if self._editor is None:
+            return False
+        start = self._command_popup_start
+        end = self._command_popup_end
+        if start is None or end is None:
+            context = self._command_popup_context()
+            if context is None:
+                return False
+            start, end, _partial = context
+        clean_command = str(command or "").strip().lower()
+        if not clean_command:
+            return False
+        cursor = self._editor.textCursor()
+        cursor.beginEditBlock()
+        cursor.setPosition(start)
+        cursor.setPosition(end, cursor.MoveMode.KeepAnchor)
+        cursor.insertText(f"/{clean_command} ")
+        cursor.endEditBlock()
+        self._editor.setTextCursor(cursor)
         self._refresh_popup()
         return True
 
@@ -719,9 +831,11 @@ class SessionTextLinkController(QObject):
             row = 0
         if row < 0 or row >= len(self._suggestions):
             return False
+        suggestion = self._suggestions[row]
+        if str(suggestion.kind or "") == self._COMMAND_SUGGESTION_KIND:
+            return self._insert_command_from_popup(suggestion.target_id)
         if self._current_trigger is None:
             return False
-        suggestion = self._suggestions[row]
         trigger = self._current_trigger
         cursor = self._editor.textCursor()
         base_fmt = QTextCharFormat(self._editor.currentCharFormat())
@@ -742,19 +856,18 @@ class SessionTextLinkController(QObject):
                 fmt = QTextCharFormat(base_fmt)
                 fmt.setAnchor(True)
                 fmt.setAnchorHref(href)
-                fmt.setFontUnderline(True)
+                fmt.setFontUnderline(bool(base_fmt.fontUnderline()))
                 fmt.setForeground(QColor("#58a6ff"))
                 cursor.insertText(link_text, fmt)
-                reset_fmt = QTextCharFormat(base_fmt)
-                reset_fmt.setAnchor(False)
-                reset_fmt.setAnchorHref("")
-                reset_fmt.setForeground(self._editor.palette().text().color())
-                if not base_fmt.fontUnderline():
-                    reset_fmt.setFontUnderline(False)
+                reset_fmt = self._preferred_non_link_format(
+                    base_fmt,
+                    font_point_size=base_fmt.fontPointSize(),
+                )
                 cursor.setCharFormat(reset_fmt)
                 cursor.mergeCharFormat(reset_fmt)
                 self._editor.setCurrentCharFormat(reset_fmt)
                 self._editor.mergeCurrentCharFormat(reset_fmt)
+                self._last_non_link_char_format = QTextCharFormat(reset_fmt)
             elif suggestion.markdown:
                 cursor.insertText(suggestion.markdown)
             elif link_text:
@@ -774,19 +887,29 @@ class SessionTextLinkController(QObject):
             return
         if self._is_applying:
             return
+        previous_identity = self._selected_popup_identity()
         text = self._editor.toPlainText()
         cursor_pos = self._editor.textCursor().position()
         trigger = detect_slash_trigger(text, cursor_pos)
         self._current_trigger = trigger
+        self._command_popup_start = None
+        self._command_popup_end = None
+        self._popup_mode = "link"
         self._refresh_command_hint()
-        if trigger is None:
-            self._hide_popup()
-            return
-        if self._is_escaped_literal_slash(trigger.start):
-            self._hide_popup()
-            return
-
-        suggestions = self._suggestion_provider(trigger.command, trigger.query)
+        suggestions: list[LinkSuggestion] = []
+        if trigger is not None:
+            if self._is_escaped_literal_slash(trigger.start):
+                self._hide_popup()
+                return
+            suggestions = self._suggestion_provider(trigger.command, trigger.query)
+        else:
+            context = self._command_popup_context()
+            if context is not None:
+                start, end, partial = context
+                self._command_popup_start = start
+                self._command_popup_end = end
+                self._popup_mode = "command"
+                suggestions = self._command_suggestions(partial)
         self._suggestions = suggestions
         if not suggestions:
             self._hide_popup()
@@ -797,11 +920,13 @@ class SessionTextLinkController(QObject):
         for suggestion in suggestions:
             item = QListWidgetItem(suggestion.display_label)
             self._popup.addItem(item)
-        self._popup.setCurrentRow(0)
+        selected_row = self._row_for_identity(previous_identity, suggestions)
+        self._popup.setCurrentRow(selected_row)
         self._popup.blockSignals(False)
         self._position_popup()
         self._popup.show()
         self._popup.raise_()
+        self._refresh_command_hint()
 
     def _position_popup(self) -> None:
         if self._editor is None:
@@ -821,3 +946,6 @@ class SessionTextLinkController(QObject):
         self._popup.clear()
         self._suggestions = []
         self._current_trigger = None
+        self._command_popup_start = None
+        self._command_popup_end = None
+        self._popup_mode = "link"

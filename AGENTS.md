@@ -14,6 +14,25 @@ Put logging and any other debug artifacts in debug folder.
 - Add new tests to the most specific existing location.
 - Create new focused files when needed to allow parallel agent work with minimal merge conflicts.
 
+## Test Tiers
+
+- Every test must belong to exactly one tier: `tier0`, `tier1`, or `tier2`.
+- `tier0`: fast logic/unit checks.
+- `tier1`: standard feature/widget integration checks.
+- `tier2`: heavy/slow/full-flow checks (online flows, long UI interactions, large integration scenarios).
+- Run selection:
+  - Small local logic change: `pytest --tier-max=0`
+  - Normal bugfix/feature change: `pytest --tier-max=1` (default)
+  - Cross-cutting/risky UI+network+persistence change: `pytest --tier-max=2`
+- Explicit subset when needed: `pytest --tiers 0,2`
+- New test files must be tiered explicitly (`@pytest.mark.tier0|tier1|tier2`) or registered in `tests/conftest.py`.
+
+## Test Save Data
+
+- Test save data should be temporary/isolated by default.
+- If persistent fixture save files are required, keep them very small and few.
+- Never let tests accumulate generated save files across runs.
+
 
 ## Testing Discipline (Multi-Agent Environment)
 

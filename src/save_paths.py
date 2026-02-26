@@ -23,6 +23,9 @@ def _in_test_env() -> bool:
 
 def default_dnd_save_dir() -> str:
     if _in_test_env():
+        override = str(os.environ.get("DMT_TEST_SAVE_DIR") or "").strip()
+        if override:
+            return str(Path(override))
         return str(Path.cwd() / "tests" / "test_saves" / "DMT")
     
     home = os.path.expanduser("~")

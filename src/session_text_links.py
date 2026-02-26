@@ -196,6 +196,39 @@ def _matches_query(query: str, *fields: str) -> bool:
     return all(token in haystack for token in parts)
 
 
+def _word_tokens(text: str) -> list[str]:
+    return [token for token in re.split(r"[^a-z0-9]+", str(text or "").strip().lower()) if token]
+
+
+def _suggestion_rank(query: str, label: str, *fields: str) -> tuple:
+    lowered_label = str(label or "").strip().lower()
+    clean_query = str(query or "").strip().lower()
+    tokens = _tokens(clean_query)
+    if not tokens:
+        return (0, 0, 0, 0, lowered_label)
+
+    label_words = _word_tokens(lowered_label)
+    full_prefix_penalty = 0 if clean_query and lowered_label.startswith(clean_query) else 1
+    word_prefix_misses = 0
+    first_pos_total = 0
+    for token in tokens:
+        has_word_prefix = any(word.startswith(token) for word in label_words)
+        if not has_word_prefix:
+            word_prefix_misses += 1
+        pos = lowered_label.find(token)
+        first_pos_total += pos if pos >= 0 else 999
+
+    field_haystack = " ".join(str(field or "").strip().lower() for field in fields)
+    field_prefix_penalty = 0 if clean_query and field_haystack.startswith(clean_query) else 1
+    return (
+        full_prefix_penalty,
+        word_prefix_misses,
+        first_pos_total,
+        field_prefix_penalty,
+        lowered_label,
+    )
+
+
 def _read_payload(path: Path, expected_format: str) -> Optional[tuple[dict, dict]]:
     try:
         info = read_dmt_package_info(path)
@@ -415,7 +448,7 @@ def load_link_suggestions(
     else:
         entries = _load_character_entries(root)
 
-    filtered: list[LinkSuggestion] = []
+    ranked: list[tuple[tuple, LinkSuggestion]] = []
     for entry in entries:
         if clean_command in {"npc", "map"}:
             if world and entry.world != world:
@@ -442,20 +475,28 @@ def load_link_suggestions(
             display_label=label,
             collection_path=entry.collection_path or None,
         )
-        filtered.append(
-            LinkSuggestion(
-                kind=entry.kind,
-                target_id=entry.target_id,
-                display_label=label,
-                markdown=markdown,
-                href=href,
-                link_text=label,
-                world=entry.world or None,
-                campaign=entry.campaign or None,
-                group=entry.group or None,
-                collection_path=entry.collection_path or None,
-            )
+        suggestion = LinkSuggestion(
+            kind=entry.kind,
+            target_id=entry.target_id,
+            display_label=label,
+            markdown=markdown,
+            href=href,
+            link_text=label,
+            world=entry.world or None,
+            campaign=entry.campaign or None,
+            group=entry.group or None,
+            collection_path=entry.collection_path or None,
         )
-
-    filtered.sort(key=lambda suggestion: suggestion.display_label.lower())
-    return filtered[:target_limit]
+        rank_key = _suggestion_rank(
+            query,
+            label,
+            entry.name,
+            entry.collection_name,
+            entry.collection_path,
+            entry.world,
+            entry.campaign,
+            entry.group,
+        )
+        ranked.append((rank_key, suggestion))
+    ranked.sort(key=lambda item: item[0])
+    return [suggestion for _, suggestion in ranked[:target_limit]]

@@ -63,6 +63,7 @@ from npc_database import NPCDatabaseWidget
 from player_sheets import PlayerSheetsWidget, refresh_character_sheet_index_cache
 from session_creator import SessionCreatorWidget
 from save_paths import dungeon_collections_dir, clear_all_online_runtime_caches
+from tab_workspace import TabWorkspaceController
 from ui.encounter_panel import EncounterPanel
 
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
@@ -1360,28 +1361,74 @@ class AppletLoadingOverlay(QWidget):
         self._position_card()
 
 
-class MainLauncherWindow(QMainWindow):
-    def __init__(self) -> None:
+def build_applet_widget(parent: QWidget, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
+    if str(key).startswith("online_host::"):
+        widget = DungeonAppletWidget(parent)
+        online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
+        port = int(online_cfg.get("port", 8765))
+        collection_path = str(online_cfg.get("collection_path") or "").strip()
+        started = widget.start_online_host(port, collection_path or None)
+        if not started:
+            widget.deleteLater()
+            return None
+        return widget
+    if str(key).startswith("online_join::"):
+        widget = DungeonAppletWidget(parent)
+        online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
+        host_ip = str(online_cfg.get("host_ip") or "").strip()
+        port = int(online_cfg.get("port", 8765))
+        player_name = str(online_cfg.get("player_name") or "Player").strip() or "Player"
+        widget.join_online_session(host_ip, port, player_name)
+        return widget
+    if key == "item_creator":
+        return ItemCreatorWidget(parent)
+    if key == "map_library":
+        return MapsWidget(parent)
+    if key == "player_sheets":
+        return PlayerSheetsWidget(parent)
+    if key == "session_creator":
+        return SessionCreatorWidget(parent)
+    if key == "loot_table_generator":
+        return LootAppletWidget(parent)
+    if key == "npc_database":
+        return NPCDatabaseWidget(parent)
+    if key == "encounter_creator":
+        return EncounterPanel(parent)
+    if key == "dungeon_creator":
+        return DungeonAppletWidget(parent)
+    return AppletWidget(
+        applet["title"],
+        applet["actions"],
+        applet["panels"],
+        parent,
+    )
+
+
+class _WorkspaceTabWindow(QMainWindow):
+    def __init__(self, workspace_controller: TabWorkspaceController, *, primary: bool, title: str) -> None:
         super().__init__()
-        self.setWindowTitle("AIO-Hub | D&D Management Toolkit")
+        self._workspace_controller = workspace_controller
+        self._workspace_primary = bool(primary)
+        self.setWindowTitle(title)
         self.setMinimumSize(1200, 700)
-        self._tab_by_key: Dict[str, QWidget] = {}
-        self._loading_tabs: set[str] = set()
 
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(False)
-        self.tabs.setTabsClosable(True)
-        self.tabs.tabCloseRequested.connect(self._close_tab)
-
-        home = HomeWidget(APPLET_DEFINITIONS, self.open_applet)
-        self._home = home
-        home_index = self.tabs.addTab(home, "Home")
-        self._disable_tab_close(home_index)
-
         self.setCentralWidget(self.tabs)
+
         self._loading_overlay = AppletLoadingOverlay(self.tabs)
         self._loading_overlay.setGeometry(self.tabs.rect())
         self._loading_overlay.hide()
+
+        self._workspace_controller.register_window(self, primary=self._workspace_primary)
+        self._tab_by_key = self._workspace_controller.tab_by_key
+        self._loading_tabs = self._workspace_controller.loading_keys
+
+    def workspace_tabs(self) -> QTabWidget:
+        return self.tabs
+
+    def is_primary_window(self) -> bool:
+        return self._workspace_primary
 
     def _disable_tab_close(self, index: int) -> None:
         bar = self.tabs.tabBar()
@@ -1392,6 +1439,8 @@ class MainLauncherWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_loading_overlay"):
             self._loading_overlay.setGeometry(self.tabs.rect())
+        if hasattr(self, "_workspace_controller"):
+            self._workspace_controller.sync_tab_bar_extent(self)
 
     def _show_applet_loading_overlay(self, message: str) -> None:
         self._loading_overlay.setGeometry(self.tabs.rect())
@@ -1414,100 +1463,51 @@ class MainLauncherWindow(QMainWindow):
             loop.exec()
 
     def _build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
-        if str(key).startswith("online_host::"):
-            widget = DungeonAppletWidget(self.tabs)
-            online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
-            port = int(online_cfg.get("port", 8765))
-            collection_path = str(online_cfg.get("collection_path") or "").strip()
-            started = widget.start_online_host(port, collection_path or None)
-            if not started:
-                widget.deleteLater()
-                return None
-            return widget
-        if str(key).startswith("online_join::"):
-            widget = DungeonAppletWidget(self.tabs)
-            online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
-            host_ip = str(online_cfg.get("host_ip") or "").strip()
-            port = int(online_cfg.get("port", 8765))
-            player_name = str(online_cfg.get("player_name") or "Player").strip() or "Player"
-            widget.join_online_session(host_ip, port, player_name)
-            return widget
-        if key == "item_creator":
-            return ItemCreatorWidget(self.tabs)
-        if key == "map_library":
-            return MapsWidget(self.tabs)
-        if key == "player_sheets":
-            return PlayerSheetsWidget(self.tabs)
-        if key == "session_creator":
-            return SessionCreatorWidget(self.tabs)
-        if key == "loot_table_generator":
-            return LootAppletWidget(self.tabs)
-        if key == "npc_database":
-            return NPCDatabaseWidget(self.tabs)
-        if key == "encounter_creator":
-            return EncounterPanel(self.tabs)
-        if key == "dungeon_creator":
-            return DungeonAppletWidget(self.tabs)
-        return AppletWidget(
-            applet["title"],
-            applet["actions"],
-            applet["panels"],
-            self.tabs,
-        )
+        return build_applet_widget(self.tabs, key, applet)
 
     def open_applet(self, applet: Dict[str, object], focus_if_new: bool = True) -> None:
-        key = str(applet["key"])
-        
-        # Guard against world selector or existing tabs
-        if key == "world_selector":
-            self.tabs.setCurrentIndex(0)
-            if hasattr(self, "_home"):
-                self._home.open_navigate()
-            return
-            
-        existing = self._tab_by_key.get(key)
-        if existing:
-            index = self.tabs.indexOf(existing)
-            if index != -1:
-                self.tabs.setCurrentIndex(index)
-                return
-
-        if key in self._loading_tabs:
-            return
-
-        self._loading_tabs.add(key)
-        self._show_applet_loading_overlay(f"Loading {applet.get('title', 'applet')}...")
-        self._warmup_loading_overlay()
-        self._loading_overlay.repaint()
-        self.tabs.repaint()
-
-        try:
-            widget = self._build_applet_widget(key, applet)
-            if widget is None:
-                return
-            self._tab_by_key[key] = widget
-            index = self.tabs.addTab(widget, applet.get("tab", applet["title"]))
-            if focus_if_new:
-                self.tabs.setCurrentIndex(index)
-        finally:
-            self._loading_tabs.discard(key)
-            if not self._loading_tabs:
-                self._hide_applet_loading_overlay()
+        self._workspace_controller.open_applet(self, applet, focus_if_new=focus_if_new)
 
     def _close_tab(self, index: int) -> None:
-        if index == 0:
-            return
-        widget = self.tabs.widget(index)
-        key_to_remove = None
-        for key, value in self._tab_by_key.items():
-            if value is widget:
-                key_to_remove = key
-                break
-        if key_to_remove:
-            del self._tab_by_key[key_to_remove]
-        self.tabs.removeTab(index)
+        self._workspace_controller.close_tab_by_index(self, index)
+
+
+class DetachedTabWindow(_WorkspaceTabWindow):
+    def __init__(self, workspace_controller: TabWorkspaceController) -> None:
+        super().__init__(
+            workspace_controller,
+            primary=False,
+            title="AIO-Hub | Detached Tabs",
+        )
 
     def closeEvent(self, event) -> None:
+        self._workspace_controller.prepare_window_close(self)
+        self._workspace_controller.unregister_window(self)
+        super().closeEvent(event)
+
+
+class MainLauncherWindow(_WorkspaceTabWindow):
+    def __init__(self) -> None:
+        self._workspace_controller = TabWorkspaceController()
+        super().__init__(
+            self._workspace_controller,
+            primary=True,
+            title="AIO-Hub | D&D Management Toolkit",
+        )
+        self._workspace_controller.set_detached_window_factory(
+            lambda: DetachedTabWindow(self._workspace_controller)
+        )
+        home = HomeWidget(APPLET_DEFINITIONS, self.open_applet)
+        self._home = home
+        home_index = self.tabs.addTab(home, "Home")
+        self._disable_tab_close(home_index)
+        self._workspace_controller.set_home_widget(home)
+        self.tabs.setCurrentIndex(0)
+
+    def closeEvent(self, event) -> None:
+        self._workspace_controller.begin_primary_shutdown(self)
+        self._workspace_controller.prepare_window_close(self)
+        self._workspace_controller.unregister_window(self)
         clear_all_online_runtime_caches()
         super().closeEvent(event)
 

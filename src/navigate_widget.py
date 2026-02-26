@@ -795,7 +795,7 @@ class NavigateContentWidget(QWidget):
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
-    def remove_world(self, name: Optional[str] = None) -> None:
+    def remove_world(self, name: Optional[int | str] = None) -> None:
         if not self._data:
             if name is not None:
                 return
@@ -807,16 +807,20 @@ class NavigateContentWidget(QWidget):
                 "Click a world to remove it.",
                 [(world["name"], world.get("icon")) for world in self._data],
             )
-        if not name:
+        if name is None:
+            return
+        if isinstance(name, str) and not name.strip():
             return
         expansion_state = self._capture_expansion_state()
-        world = next((item for item in self._data if item["name"] == name), None)
-        if world is None:
+        world_index = self._resolve_world_index(name)
+        if world_index is None:
             return
+        world = self._data[world_index]
+        world_name = str(world.get("name", ""))
         self._move_to_trash("world", world)
-        self._data = [world for world in self._data if world["name"] != name]
+        del self._data[world_index]
         save_navigation_data(self._data)
-        expansion_state.get("worlds", {}).pop(name, None)
+        expansion_state.get("worlds", {}).pop(world_name, None)
         self._rebuild(expansion_state)
 
     def edit_world(self, old_name: Optional[str] = None, new_name: Optional[str] = None) -> None:
@@ -868,7 +872,7 @@ class NavigateContentWidget(QWidget):
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
-    def disintegrate_world(self, name: Optional[str] = None) -> None:
+    def disintegrate_world(self, name: Optional[int | str] = None) -> None:
         if not self._data:
             QMessageBox.information(self, "No Worlds", "There are no worlds to delete.")
             return
@@ -878,7 +882,9 @@ class NavigateContentWidget(QWidget):
                 "Click a world to delete permanently.",
                 [(world["name"], world.get("icon")) for world in self._data],
             )
-        if not name:
+        if name is None:
+            return
+        if isinstance(name, str) and not name.strip():
             return
         if not self._confirm_disintegrate(
             "Disintegrate World",
@@ -886,9 +892,13 @@ class NavigateContentWidget(QWidget):
         ):
             return
         expansion_state = self._capture_expansion_state()
-        self._data = [world for world in self._data if world["name"] != name]
+        world_index = self._resolve_world_index(name)
+        if world_index is None:
+            return
+        world_name = str(self._data[world_index].get("name", ""))
+        del self._data[world_index]
         save_navigation_data(self._data)
-        expansion_state.get("worlds", {}).pop(name, None)
+        expansion_state.get("worlds", {}).pop(world_name, None)
         self._rebuild(expansion_state)
 
     def revive_world(self, name: Optional[str] = None) -> None:
@@ -955,7 +965,7 @@ class NavigateContentWidget(QWidget):
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
-    def _remove_campaign(self, world_index: int, name: Optional[str] = None) -> None:
+    def _remove_campaign(self, world_index: int, name: Optional[int | str] = None) -> None:
         world = self._get_world(world_index)
         if world is None:
             return
@@ -969,18 +979,24 @@ class NavigateContentWidget(QWidget):
                 "Click a campaign to remove it.",
                 [(camp["name"], camp.get("icon")) for camp in campaigns],
             )
-        if not name:
+        if name is None:
+            return
+        if isinstance(name, str) and not name.strip():
             return
         expansion_state = self._capture_expansion_state()
-        campaign = next((camp for camp in campaigns if camp["name"] == name), None)
+        campaign_index = self._resolve_campaign_index(world, name)
+        if campaign_index is None:
+            return
+        campaign = campaigns[campaign_index]
+        campaign_name = str(campaign.get("name", ""))
         if campaign:
             self._move_to_trash(
                 "campaign",
                 campaign,
                 parent={"world": world["name"]},
             )
-        world["campaigns"] = [camp for camp in campaigns if camp["name"] != name]
-        expansion_state.get("campaigns", {}).pop((world["name"], name), None)
+        del world["campaigns"][campaign_index]
+        expansion_state.get("campaigns", {}).pop((world["name"], campaign_name), None)
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
@@ -1036,7 +1052,7 @@ class NavigateContentWidget(QWidget):
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
-    def _disintegrate_campaign(self, world_index: int, name: Optional[str] = None) -> None:
+    def _disintegrate_campaign(self, world_index: int, name: Optional[int | str] = None) -> None:
         world = self._get_world(world_index)
         if world is None:
             return
@@ -1050,7 +1066,9 @@ class NavigateContentWidget(QWidget):
                 "Click a campaign to delete permanently.",
                 [(camp["name"], camp.get("icon")) for camp in campaigns],
             )
-        if not name:
+        if name is None:
+            return
+        if isinstance(name, str) and not name.strip():
             return
         if not self._confirm_disintegrate(
             "Disintegrate Campaign",
@@ -1058,8 +1076,12 @@ class NavigateContentWidget(QWidget):
         ):
             return
         expansion_state = self._capture_expansion_state()
-        world["campaigns"] = [camp for camp in campaigns if camp["name"] != name]
-        expansion_state.get("campaigns", {}).pop((world["name"], name), None)
+        campaign_index = self._resolve_campaign_index(world, name)
+        if campaign_index is None:
+            return
+        campaign_name = str(campaigns[campaign_index].get("name", ""))
+        del world["campaigns"][campaign_index]
+        expansion_state.get("campaigns", {}).pop((world["name"], campaign_name), None)
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
@@ -1139,7 +1161,7 @@ class NavigateContentWidget(QWidget):
         self,
         world_index: int,
         campaign_index: int,
-        name: Optional[str] = None,
+        name: Optional[int | str] = None,
     ) -> None:
         campaign = self._get_campaign(world_index, campaign_index)
         if campaign is None:
@@ -1154,10 +1176,15 @@ class NavigateContentWidget(QWidget):
                 "Click a group to remove it.",
                 [(group["name"], group.get("icon")) for group in groups],
             )
-        if not name:
+        if name is None:
+            return
+        if isinstance(name, str) and not name.strip():
             return
         expansion_state = self._capture_expansion_state()
-        group = next((g for g in groups if g["name"] == name), None)
+        group_index = self._resolve_group_index(campaign, name)
+        if group_index is None:
+            return
+        group = groups[group_index]
         world = self._get_world(world_index)
         if group and world:
             self._move_to_trash(
@@ -1165,7 +1192,7 @@ class NavigateContentWidget(QWidget):
                 group,
                 parent={"world": world["name"], "campaign": campaign["name"]},
             )
-        campaign["groups"] = [group for group in groups if group["name"] != name]
+        del campaign["groups"][group_index]
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
@@ -1220,7 +1247,7 @@ class NavigateContentWidget(QWidget):
         self,
         world_index: int,
         campaign_index: int,
-        name: Optional[str] = None,
+        name: Optional[int | str] = None,
     ) -> None:
         campaign = self._get_campaign(world_index, campaign_index)
         if campaign is None:
@@ -1235,7 +1262,9 @@ class NavigateContentWidget(QWidget):
                 "Click a group to delete permanently.",
                 [(group["name"], group.get("icon")) for group in groups],
             )
-        if not name:
+        if name is None:
+            return
+        if isinstance(name, str) and not name.strip():
             return
         if not self._confirm_disintegrate(
             "Disintegrate Group",
@@ -1243,7 +1272,10 @@ class NavigateContentWidget(QWidget):
         ):
             return
         expansion_state = self._capture_expansion_state()
-        campaign["groups"] = [group for group in groups if group["name"] != name]
+        group_index = self._resolve_group_index(campaign, name)
+        if group_index is None:
+            return
+        del campaign["groups"][group_index]
         save_navigation_data(self._data)
         self._rebuild(expansion_state)
 
@@ -1509,6 +1541,45 @@ class NavigateContentWidget(QWidget):
             return None
         return self._data[world_index]
 
+    def _resolve_world_index(self, world_ref: int | str) -> Optional[int]:
+        if isinstance(world_ref, int):
+            return world_ref if 0 <= world_ref < len(self._data) else None
+        target = str(world_ref or "").strip()
+        if not target:
+            return None
+        for idx, world in enumerate(self._data):
+            if str(world.get("name") or "") == target:
+                return idx
+        return None
+
+    def _resolve_campaign_index(self, world: dict, campaign_ref: int | str) -> Optional[int]:
+        campaigns = world.get("campaigns", [])
+        if not isinstance(campaigns, list):
+            return None
+        if isinstance(campaign_ref, int):
+            return campaign_ref if 0 <= campaign_ref < len(campaigns) else None
+        target = str(campaign_ref or "").strip()
+        if not target:
+            return None
+        for idx, campaign in enumerate(campaigns):
+            if str(campaign.get("name") or "") == target:
+                return idx
+        return None
+
+    def _resolve_group_index(self, campaign: dict, group_ref: int | str) -> Optional[int]:
+        groups = campaign.get("groups", [])
+        if not isinstance(groups, list):
+            return None
+        if isinstance(group_ref, int):
+            return group_ref if 0 <= group_ref < len(groups) else None
+        target = str(group_ref or "").strip()
+        if not target:
+            return None
+        for idx, group in enumerate(groups):
+            if str(group.get("name") or "") == target:
+                return idx
+        return None
+
     def _get_campaign(self, world_index: int, campaign_index: int) -> Optional[dict]:
         world = self._get_world(world_index)
         if world is None:
@@ -1549,8 +1620,8 @@ class NavigateContentWidget(QWidget):
             )
             world_section.set_context_actions(
                 lambda checked=False, name=world["name"]: self.edit_world(old_name=name),
-                lambda checked=False, name=world["name"]: self.remove_world(name=name),
-                lambda checked=False, name=world["name"]: self.disintegrate_world(name=name),
+                lambda checked=False, idx=world_index: self.remove_world(name=idx),
+                lambda checked=False, idx=world_index: self.disintegrate_world(name=idx),
             )
             campaign_header = DashedHeaderRow(
                 "Campaigns",
@@ -1587,11 +1658,11 @@ class NavigateContentWidget(QWidget):
                     lambda checked=False, w_idx=world_index, name=campaign["name"]: self._edit_campaign(
                         w_idx, old_name=name
                     ),
-                    lambda checked=False, w_idx=world_index, name=campaign["name"]: self._remove_campaign(
-                        w_idx, name=name
+                    lambda checked=False, w_idx=world_index, c_idx=campaign_index: self._remove_campaign(
+                        w_idx, name=c_idx
                     ),
-                    lambda checked=False, w_idx=world_index, name=campaign["name"]: self._disintegrate_campaign(
-                        w_idx, name=name
+                    lambda checked=False, w_idx=world_index, c_idx=campaign_index: self._disintegrate_campaign(
+                        w_idx, name=c_idx
                     ),
                 )
                 groups_header = DashedHeaderRow("Groups", "Add group", "Delete group (30 days)")
@@ -1621,7 +1692,7 @@ class NavigateContentWidget(QWidget):
                     )
                 )
                 campaign_section.add_widget(groups_header)
-                for group in campaign["groups"]:
+                for group_index, group in enumerate(campaign["groups"]):
                     group_row = NavItemRow(
                         group["name"],
                         group.get("icon") or self._default_group_icon,
@@ -1645,11 +1716,11 @@ class NavigateContentWidget(QWidget):
                         lambda checked=False, w_idx=world_index, c_idx=campaign_index, name=group["name"]: self._edit_group(
                             w_idx, c_idx, old_name=name
                         ),
-                        lambda checked=False, w_idx=world_index, c_idx=campaign_index, name=group["name"]: self._remove_group(
-                            w_idx, c_idx, name=name
+                        lambda checked=False, w_idx=world_index, c_idx=campaign_index, g_idx=group_index: self._remove_group(
+                            w_idx, c_idx, name=g_idx
                         ),
-                        lambda checked=False, w_idx=world_index, c_idx=campaign_index, name=group["name"]: self._disintegrate_group(
-                            w_idx, c_idx, name=name
+                        lambda checked=False, w_idx=world_index, c_idx=campaign_index, g_idx=group_index: self._disintegrate_group(
+                            w_idx, c_idx, name=g_idx
                         ),
                     )
                     campaign_section.add_widget(group_row)

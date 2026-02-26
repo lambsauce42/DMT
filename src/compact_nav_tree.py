@@ -417,29 +417,78 @@ class CompactNavTree(QWidget):
         """Load navigation data from storage."""
         loaded = load_navigation_data()
         self._data = []
-        for world in loaded:
+        if not isinstance(loaded, list):
+            print(
+                f"[WARN] Ignoring navigation payload with unsupported type: {type(loaded).__name__}",
+                file=sys.stderr,
+            )
+            return
+        for world_idx, world in enumerate(loaded):
+            if not isinstance(world, dict):
+                print(
+                    f"[WARN] Skipping malformed world entry at index {world_idx}: "
+                    f"{type(world).__name__}",
+                    file=sys.stderr,
+                )
+                continue
+            world_name = str(world.get("name", "")).strip()
+            if not world_name:
+                print(
+                    f"[WARN] Skipping world entry with missing name at index {world_idx}",
+                    file=sys.stderr,
+                )
+                continue
             world_entry = {
                 "id": world.get("id"),
-                "name": world.get("name", ""),
+                "name": world_name,
                 "icon": world.get("icon") or self._default_world_icon,
                 "campaigns": [],
             }
-            for campaign in world.get("campaigns", []):
+            campaigns_payload = world.get("campaigns", [])
+            if not isinstance(campaigns_payload, list):
+                print(
+                    f"[WARN] World '{world_name}' has non-list campaigns payload; skipping campaigns",
+                    file=sys.stderr,
+                )
+                campaigns_payload = []
+            for campaign_idx, campaign in enumerate(campaigns_payload):
+                if not isinstance(campaign, dict):
+                    print(
+                        f"[WARN] Skipping malformed campaign entry at "
+                        f"{world_name}[{campaign_idx}]: {type(campaign).__name__}",
+                        file=sys.stderr,
+                    )
+                    continue
+                campaign_name = str(campaign.get("name", "")).strip()
+                if not campaign_name:
+                    print(
+                        f"[WARN] Skipping campaign with missing name at "
+                        f"{world_name}[{campaign_idx}]",
+                        file=sys.stderr,
+                    )
+                    continue
                 groups = []
-                for group in campaign.get("groups", []):
+                groups_payload = campaign.get("groups", [])
+                if not isinstance(groups_payload, list):
+                    print(
+                        f"[WARN] Campaign '{campaign_name}' has non-list groups payload; skipping groups",
+                        file=sys.stderr,
+                    )
+                    groups_payload = []
+                for group in groups_payload:
                     if isinstance(group, dict):
-                        group_name = group.get("name", "")
+                        group_name = str(group.get("name", "")).strip()
                         group_icon = group.get("icon") or self._default_group_icon
                         group_id = group.get("id")
                     else:
-                        group_name = str(group)
+                        group_name = str(group).strip()
                         group_icon = self._default_group_icon
                         group_id = None
                     if group_name:
                         groups.append({"id": group_id, "name": group_name, "icon": group_icon})
                 world_entry["campaigns"].append({
                     "id": campaign.get("id"),
-                    "name": campaign.get("name", ""),
+                    "name": campaign_name,
                     "icon": campaign.get("icon") or self._default_campaign_icon,
                     "groups": groups,
                 })

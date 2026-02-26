@@ -57,8 +57,8 @@ class OnlineSessionClient(QObject):
         self._player_id = None
         # Always start each transport connection with a fresh frame buffer.
         self._decoder = FrameDecoder()
-        if persistent_player_id is not None:
-            self._persistent_player_id = str(persistent_player_id or "").strip()
+        # Reset per-call so stale values from previous joins are never reused.
+        self._persistent_player_id = str(persistent_player_id or "").strip()
         target_host, rewritten = _normalize_connect_host(host)
         if rewritten:
             self.log_line.emit(

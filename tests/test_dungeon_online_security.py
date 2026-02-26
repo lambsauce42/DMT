@@ -285,6 +285,133 @@ def test_player_state_update_rejects_non_players_dungeon(dungeon_widget):
     assert "assigned players dungeon" in result["message"]
 
 
+def test_player_cannot_update_dm_entity_initiative_rows(dungeon_widget, monkeypatch):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._connected_players = {"player-1": "Alice"}
+    dungeon_widget._initiative_state = {
+        "active": True,
+        "collapsed": False,
+        "player_entries": {},
+        "entity_entries": {"npc-1": {"name": "Goblin", "initiative": 5}},
+    }
+    monkeypatch.setattr(dungeon_widget, "_render_initiative_overlay", lambda: None)
+    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: None)
+
+    print("[debug] initiative_before", dungeon_widget._initiative_state["entity_entries"]["npc-1"])
+    dungeon_widget._handle_host_initiative_update(
+        "player-1",
+        {"kind": "entity", "id": "npc-1", "initiative": 20},
+        request_id="req-initiative-entity",
+    )
+    print("[debug] initiative_after", dungeon_widget._initiative_state["entity_entries"]["npc-1"])
+    result = dungeon_widget._host_controller.results[-1][1]
+    print("[debug] initiative_result", result)
+
+    assert result["ok"] is False
+    assert "not owned" in str(result.get("message") or "").lower()
+    assert dungeon_widget._initiative_state["entity_entries"]["npc-1"]["initiative"] == 5
+
+
+def test_player_can_update_own_assigned_entity_initiative_row(dungeon_widget, monkeypatch):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._connected_players = {"player-1": "Alice"}
+    dungeon_widget._initiative_state = {
+        "active": True,
+        "collapsed": False,
+        "player_entries": {
+            "player-1:entity-1": {
+                "player_id": "player-1",
+                "entity_id": "entity-1",
+                "name": "Alice - Ranger",
+                "initiative": 7,
+            }
+        },
+        "entity_entries": {},
+    }
+    monkeypatch.setattr(dungeon_widget, "_render_initiative_overlay", lambda: None)
+    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: None)
+
+    print("[debug] own_row_before", dungeon_widget._initiative_state["player_entries"]["player-1:entity-1"])
+    dungeon_widget._handle_host_initiative_update(
+        "player-1",
+        {"kind": "player", "id": "player-1:entity-1", "initiative": 19},
+        request_id="req-initiative-own",
+    )
+    print("[debug] own_row_after", dungeon_widget._initiative_state["player_entries"]["player-1:entity-1"])
+    result = dungeon_widget._host_controller.results[-1][1]
+    print("[debug] own_row_result", result)
+
+    assert result["ok"] is True
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:entity-1"]["initiative"] == 19
+
+
+def test_player_cannot_update_other_players_assigned_entity_initiative_row(dungeon_widget, monkeypatch):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._connected_players = {"player-1": "Alice", "player-2": "Bob"}
+    dungeon_widget._initiative_state = {
+        "active": True,
+        "collapsed": False,
+        "player_entries": {
+            "player-2:entity-9": {
+                "player_id": "player-2",
+                "entity_id": "entity-9",
+                "name": "Bob - Fighter",
+                "initiative": 11,
+            }
+        },
+        "entity_entries": {},
+    }
+    monkeypatch.setattr(dungeon_widget, "_render_initiative_overlay", lambda: None)
+    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: None)
+
+    print("[debug] other_row_before", dungeon_widget._initiative_state["player_entries"]["player-2:entity-9"])
+    dungeon_widget._handle_host_initiative_update(
+        "player-1",
+        {"kind": "player", "id": "player-2:entity-9", "initiative": 3},
+        request_id="req-initiative-other",
+    )
+    print("[debug] other_row_after", dungeon_widget._initiative_state["player_entries"]["player-2:entity-9"])
+    result = dungeon_widget._host_controller.results[-1][1]
+    print("[debug] other_row_result", result)
+
+    assert result["ok"] is False
+    assert "not owned" in str(result.get("message") or "").lower()
+    assert dungeon_widget._initiative_state["player_entries"]["player-2:entity-9"]["initiative"] == 11
+
+
 def test_host_snapshot_request_sends_only_players_dungeon_to_player(dungeon_widget):
     class _HostStub:
         def __init__(self):

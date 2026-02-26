@@ -1328,10 +1328,21 @@ class SessionCreatorWidget(QWidget):
                 return
             self._on_session_list_changed(selected_item, None)
 
+    def _new_session_id(self, default_name: str) -> str:
+        base_id = sanitize_filename(f"{default_name}_{_now_timestamp()}")
+        existing_ids = {str(session.id) for session in self.manager.sessions}
+        storage_root = session_storage_path().parent
+        candidate = base_id
+        suffix = 2
+        while candidate in existing_ids or session_file_path(candidate, storage_root).exists():
+            candidate = sanitize_filename(f"{base_id}_{suffix}")
+            suffix += 1
+        return candidate
+
     def _create_session(self) -> None:
         default_name = "Untitled Session"
         session = Session(
-            id=sanitize_filename(f"{default_name}_{_now_timestamp()}"),
+            id=self._new_session_id(default_name),
             name=default_name,
             session_date=datetime.now().strftime("%Y-%m-%d"),
         )

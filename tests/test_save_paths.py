@@ -23,9 +23,16 @@ class TestSavePaths(unittest.TestCase):
 
     def test_default_dnd_save_dir_test_mode(self):
         """In test environment, save dir should point to tests/test_saves/DMT."""
-        save_dir = save_paths.default_dnd_save_dir()
-        expected = str(Path.cwd() / "tests" / "test_saves" / "DMT")
-        self.assertEqual(save_dir, expected)
+        with patch.dict(os.environ, {"DMT_TEST_SAVE_DIR": ""}, clear=False):
+            save_dir = save_paths.default_dnd_save_dir()
+            expected = str(Path.cwd() / "tests" / "test_saves" / "DMT")
+            self.assertEqual(save_dir, expected)
+
+    def test_default_dnd_save_dir_test_mode_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(os.environ, {"DMT_TEST_SAVE_DIR": td}, clear=False):
+                save_dir = save_paths.default_dnd_save_dir()
+            self.assertEqual(save_dir, td)
 
     @patch("save_paths._in_test_env")
     @patch("os.path.expanduser")
