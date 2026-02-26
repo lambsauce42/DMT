@@ -216,7 +216,7 @@ def test_external_drag_shows_ghost_off_tab_bar_and_hides_it_on_valid_tab_bar(qtb
     on_bar = bar.mapToGlobal(bar.tabRect(max(0, tabs.count() - 1)).center())
     controller.update_external_tab_drag(on_bar)
     qtbot.wait(20)
-    assert state.ghost.isVisible() is False
+    assert state.ghost.isVisible() is True
 
 
 def test_external_drag_ghost_is_centered_under_cursor(qtbot) -> None:
@@ -364,7 +364,7 @@ def test_non_home_tabs_keep_close_buttons_visible(qtbot) -> None:
         ), f"close button missing for tab index {index}"
 
 
-def test_drop_target_covers_full_tab_row_even_when_tabbar_is_narrow(qtbot) -> None:
+def test_drop_target_uses_real_tab_bar_width_when_tabbar_is_narrow(qtbot) -> None:
     window = MainLauncherWindow()
     qtbot.addWidget(window)
     window.resize(1400, 900)
@@ -376,9 +376,13 @@ def test_drop_target_covers_full_tab_row_even_when_tabbar_is_narrow(qtbot) -> No
     bar = tabs.tabBar()
     assert bar.width() < tabs.width()
 
-    right_strip_global = tabs.mapToGlobal(QPoint(tabs.width() - 8, max(2, bar.height() // 2)))
-    owner = window._workspace_controller._tab_bar_from_global_pos(right_strip_global)
-    assert owner is bar
+    outside_right = tabs.mapToGlobal(QPoint(tabs.width() - 8, max(2, bar.height() // 2)))
+    owner_outside = window._workspace_controller._tab_bar_from_global_pos(outside_right)
+    assert owner_outside is None
+
+    inside_bar = bar.mapToGlobal(QPoint(max(2, bar.width() - 6), max(2, bar.height() // 2)))
+    owner_inside = window._workspace_controller._tab_bar_from_global_pos(inside_bar)
+    assert owner_inside is bar
 
 
 def test_small_vertical_exit_drag_does_not_detach_immediately(qtbot) -> None:
@@ -502,7 +506,7 @@ def test_external_drag_from_detached_reorders_smoothly_near_strip(qtbot) -> None
     for key in hover_keys:
         target_idx = tabs.indexOf(window._tab_by_key[key])
         near_strip = tabs.mapToGlobal(
-            QPoint(bar.tabRect(target_idx).center().x(), bar.height() + 4)
+            QPoint(bar.tabRect(target_idx).center().x(), bar.height() + 20)
         )
         controller.update_external_tab_drag(near_strip)
         qtbot.wait(20)
@@ -542,9 +546,9 @@ def test_vertical_fast_move_after_source_close_does_not_hang_on_target_border(qt
     x = bar.tabRect(target_idx).center().x()
     points = [
         tabs.mapToGlobal(QPoint(x, bar.height() - 1)),
-        tabs.mapToGlobal(QPoint(x, bar.height() + 4)),
+        tabs.mapToGlobal(QPoint(x, bar.height() + 20)),
         tabs.mapToGlobal(QPoint(x, bar.height() - 2)),
-        tabs.mapToGlobal(QPoint(x, bar.height() + 4)),
+        tabs.mapToGlobal(QPoint(x, bar.height() + 20)),
     ]
     for i, point in enumerate(points):
         controller.update_external_tab_drag(point)
@@ -556,6 +560,98 @@ def test_vertical_fast_move_after_source_close_does_not_hang_on_target_border(qt
         )
         assert owner is window
         assert idx != -1
+
+
+def test_external_drag_does_not_attach_when_cursor_is_outside_real_tab_bar_width(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    window.open_applet(_applet("dungeon_creator"), focus_if_new=True)
+
+    controller = window._workspace_controller
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+
+    detached = controller.detach_widget_to_new_window(map_widget, QPoint(560, 220))
+    assert detached is not None
+    start = detached.workspace_tabs().tabBar().mapToGlobal(
+        detached.workspace_tabs().tabBar().tabRect(0).center()
+    )
+    assert controller.start_external_tab_drag(detached, map_widget, start) is True
+
+    controller.update_external_tab_drag(QPoint(-1200, -900))
+    qtbot.wait(20)
+    assert controller.window_by_widget.get(map_widget) is None
+
+    local_x_outside_bar = bar.width() + 24
+    assert local_x_outside_bar < tabs.width()
+    probe = tabs.mapToGlobal(QPoint(local_x_outside_bar, bar.height() + 20))
+    controller.update_external_tab_drag(probe)
+    qtbot.wait(20)
+
+    owner = controller.window_by_widget.get(map_widget)
+    _debug_log(
+        f"outside_bar_hover owner_is_main={owner is window} owner_exists={owner is not None} "
+        f"local_x={local_x_outside_bar} bar_w={bar.width()} tabs_w={tabs.width()}"
+    )
+    assert owner is None
+    assert tabs.indexOf(map_widget) == -1
+
+
+def test_external_drag_same_probe_point_does_not_flip_tab_index(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    window.open_applet(_applet("dungeon_creator"), focus_if_new=True)
+    window.open_applet(_applet("npc_database"), focus_if_new=True)
+
+    controller = window._workspace_controller
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+    session_widget = window._tab_by_key["session_creator"]
+    dungeon_widget = window._tab_by_key["dungeon_creator"]
+
+    detached = controller.detach_widget_to_new_window(map_widget, QPoint(560, 220))
+    assert detached is not None
+    start = detached.workspace_tabs().tabBar().mapToGlobal(
+        detached.workspace_tabs().tabBar().tabRect(0).center()
+    )
+    assert controller.start_external_tab_drag(detached, map_widget, start) is True
+    controller.update_external_tab_drag(QPoint(-1200, -900))
+    qtbot.wait(20)
+
+    session_index = tabs.indexOf(session_widget)
+    attach_pos = bar.mapToGlobal(bar.tabRect(session_index).center())
+    controller.update_external_tab_drag(attach_pos)
+    qtbot.wait(20)
+    assert tabs.indexOf(map_widget) != -1
+
+    session_index = tabs.indexOf(session_widget)
+    dungeon_index = tabs.indexOf(dungeon_widget)
+    session_rect = bar.tabRect(session_index)
+    dungeon_rect = bar.tabRect(dungeon_index)
+    probe_x = (session_rect.center().x() + dungeon_rect.center().x()) // 2
+    probe_y = session_rect.center().y()
+    probe = bar.mapToGlobal(QPoint(probe_x, probe_y))
+
+    observed: list[int] = []
+    for _ in range(14):
+        controller.update_external_tab_drag(probe)
+        qtbot.wait(10)
+        observed.append(tabs.indexOf(map_widget))
+
+    _debug_log(f"same_probe_indices probe_x={probe_x} observed={observed}")
+    tail = observed[4:]
+    assert all(index != -1 for index in observed)
+    assert len(set(tail)) == 1
 
 
 def test_drop_into_window_keeps_existing_active_tab_selected(qtbot) -> None:
@@ -638,3 +734,38 @@ def test_external_drag_reentry_without_left_button_finishes_drag(qtbot) -> None:
 
     assert getattr(controller, "_external_drag") is None
     assert owner is not None
+
+
+def test_external_drag_stays_attached_when_hovering_below_bar_border(qtbot) -> None:
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    window.open_applet(_applet("dungeon_creator"), focus_if_new=True)
+
+    controller = window._workspace_controller
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+    detached = controller.detach_widget_to_new_window(map_widget, QPoint(520, 200))
+    assert detached is not None
+    start = detached.workspace_tabs().tabBar().mapToGlobal(
+        detached.workspace_tabs().tabBar().tabRect(0).center()
+    )
+    assert controller.start_external_tab_drag(detached, map_widget, start) is True
+    controller.update_external_tab_drag(QPoint(-1200, -900))
+    qtbot.wait(20)
+
+    target_idx = tabs.indexOf(window._tab_by_key["session_creator"])
+    attach_pos = tabs.mapToGlobal(QPoint(bar.tabRect(target_idx).center().x(), bar.height() + 20))
+    controller.update_external_tab_drag(attach_pos)
+    qtbot.wait(20)
+    assert controller.window_by_widget.get(map_widget) is window
+
+    below_bar = tabs.mapToGlobal(QPoint(bar.tabRect(target_idx).center().x(), bar.height() + 75))
+    controller.update_external_tab_drag(below_bar)
+    qtbot.wait(20)
+
+    assert controller.window_by_widget.get(map_widget) is window
+    assert tabs.indexOf(map_widget) != -1

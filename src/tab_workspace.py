@@ -28,6 +28,8 @@ class _ExternalTabDragState:
     current_host_window: WorkspaceWindow
     hot_spot: QPoint
     ghost: Optional["_FloatingTabGhost"] = None
+    last_target_window: Optional[WorkspaceWindow] = None
+    last_target_index: Optional[int] = None
 
 
 class _FloatingTabGhost(QWidget):
@@ -107,6 +109,16 @@ class DetachableTabBar(QTabBar):
         current_pos = event.position().toPoint()
         distance = (current_pos - self._press_pos).manhattanLength()
         threshold = max(3, min(int(QApplication.startDragDistance()), 4))
+        self._controller._drag_trace(
+            "bar_mouse_move",
+            owner=self._controller._window_label(self._owner_window),
+            press_index=self._press_index,
+            cursor_x=current_pos.x(),
+            cursor_y=current_pos.y(),
+            distance=distance,
+            threshold=threshold,
+            bar_height=self.height(),
+        )
         if distance < threshold:
             super().mouseMoveEvent(event)
             return
@@ -115,6 +127,13 @@ class DetachableTabBar(QTabBar):
             vertical_pull = -current_pos.y()
         elif current_pos.y() > self.height():
             vertical_pull = current_pos.y() - self.height()
+        self._controller._drag_trace(
+            "bar_vertical_pull",
+            owner=self._controller._window_label(self._owner_window),
+            press_index=self._press_index,
+            vertical_pull=vertical_pull,
+            bar_height=self.height(),
+        )
         if vertical_pull < 24:
             super().mouseMoveEvent(event)
             return
@@ -134,6 +153,14 @@ class DetachableTabBar(QTabBar):
             widget,
             global_pos,
             hot_spot=hot_spot,
+        )
+        self._controller._drag_trace(
+            "bar_start_external_drag",
+            owner=self._controller._window_label(self._owner_window),
+            press_index=self._press_index,
+            started=started,
+            global_x=global_pos.x(),
+            global_y=global_pos.y(),
         )
         self._press_index = -1
         self._press_pos = QPoint()
@@ -201,7 +228,12 @@ class DetachableTabBar(QTabBar):
 
 class TabWorkspaceController(QObject):
     _DROP_TARGET_TOP_SLOP_PX = 4
-    _DROP_TARGET_BOTTOM_SLOP_PX = 12
+    _DROP_TARGET_SIDE_SLOP_PX = 8
+    # Keep a generous lower hit area so fast vertical moves do not bounce a
+    # dragged tab in/out of floating mode while crossing window borders.
+    _DROP_TARGET_BOTTOM_SLOP_PX = 120
+    _DROP_TARGET_STICKY_BOTTOM_SLOP_PX = 120
+    _EXTERNAL_DRAG_INDEX_HYSTERESIS_PX = 10
 
     def __init__(self) -> None:
         super().__init__()
@@ -218,6 +250,12 @@ class TabWorkspaceController(QObject):
         self._drag_filter_installed: bool = False
         self._detached_window_factory: Optional[Callable[[], WorkspaceWindow]] = None
         self._debug_log_path = Path(__file__).resolve().parents[1] / "debug" / "tab_workspace.log"
+        self._drag_trace_enabled = os.environ.get("DMT_TAB_DRAG_DEBUG", "").strip() == "1"
+        self._drag_trace_path = Path(__file__).resolve().parents[1] / "debug" / "tab_workspace_drag_trace.log"
+        self._drag_trace_seq = 0
+        if self._drag_trace_enabled and os.environ.get("DMT_TAB_DRAG_DEBUG_APPEND", "").strip() != "1":
+            self._drag_trace_path.parent.mkdir(parents=True, exist_ok=True)
+            self._drag_trace_path.write_text("", encoding="utf-8")
 
     def set_detached_window_factory(self, factory: Callable[[], WorkspaceWindow]) -> None:
         self._detached_window_factory = factory
@@ -533,6 +571,14 @@ class TabWorkspaceController(QObject):
         source_index = source_tabs.indexOf(widget)
         if source_index < 0:
             return False
+        self._drag_trace(
+            "drag_start_request",
+            source=self._window_label(source_window),
+            widget=self._widget_label(widget),
+            global_x=global_pos.x(),
+            global_y=global_pos.y(),
+            source_index=source_index,
+        )
         title = source_tabs.tabText(source_index) if source_index != -1 else self.title_by_widget.get(widget, "")
         tab_rect = source_tabs.tabBar().tabRect(source_index)
         ghost = _FloatingTabGhost(str(title or ""), tab_rect.size())
@@ -549,6 +595,15 @@ class TabWorkspaceController(QObject):
         QApplication.setOverrideCursor(Qt.CursorShape.ClosedHandCursor)
         self._ensure_drag_event_filter()
         self.update_external_tab_drag(global_pos)
+        self._drag_trace(
+            "drag_start_created",
+            source=self._window_label(source_window),
+            widget=self._widget_label(widget),
+            ghost_w=ghost.width(),
+            ghost_h=ghost.height(),
+            hot_x=centered_hot_spot.x(),
+            hot_y=centered_hot_spot.y(),
+        )
         self._debug_log("drag_begin", key=str(self.key_by_widget.get(widget, "")))
         return True
 
@@ -558,9 +613,28 @@ class TabWorkspaceController(QObject):
             return
         target_bar = self._tab_bar_from_global_pos(global_pos)
         current_owner = self.window_by_widget.get(state.widget)
+        if current_owner is not None and current_owner.workspace_tabs().indexOf(state.widget) == -1:
+            self.window_by_widget.pop(state.widget, None)
+            current_owner = None
+        if target_bar is None and current_owner is not None:
+            target_bar = self._sticky_target_bar_from_owner(current_owner, global_pos)
+        self._drag_trace(
+            "drag_update_begin",
+            widget=self._widget_label(state.widget),
+            global_x=global_pos.x(),
+            global_y=global_pos.y(),
+            current_owner=self._window_label(current_owner),
+            target_owner=self._window_label(target_bar.owner_window() if target_bar is not None else None),
+        )
         if target_bar is not None:
             target_window = target_bar.owner_window()
-            target_index = target_bar.insertion_index_for_global_pos(global_pos)
+            raw_target_index = target_bar.insertion_index_for_global_pos(global_pos)
+            target_index = self._stable_external_target_index(
+                state,
+                target_bar,
+                global_pos,
+                raw_target_index,
+            )
             moved = False
             if current_owner is None:
                 moved = self._attach_floating_widget_to_window(
@@ -579,8 +653,21 @@ class TabWorkspaceController(QObject):
                 )
             if moved:
                 state.current_host_window = target_window
-            self._hide_drag_ghost(state)
+            self._drag_trace(
+                "drag_update_attach",
+                widget=self._widget_label(state.widget),
+                moved=moved,
+                from_owner=self._window_label(current_owner),
+                to_owner=self._window_label(target_window),
+                raw_target_index=raw_target_index,
+                target_index=target_index,
+            )
+            # Keep ghost visible while hovering tab bars so drag motion remains
+            # continuous instead of looking slot-by-slot discrete.
+            self._show_drag_ghost(state, global_pos)
             return
+        state.last_target_window = None
+        state.last_target_index = None
         if current_owner is not None:
             removed = self._remove_widget_from_window_for_drag(
                 state.widget,
@@ -588,12 +675,31 @@ class TabWorkspaceController(QObject):
             )
             if removed is not None:
                 state.current_host_window = state.source_window
+            self._drag_trace(
+                "drag_update_detach_to_ghost",
+                widget=self._widget_label(state.widget),
+                removed_from=self._window_label(removed),
+                close_empty=True,
+            )
         self._show_drag_ghost(state, global_pos)
+        self._drag_trace(
+            "drag_update_show_ghost",
+            widget=self._widget_label(state.widget),
+            ghost_visible=bool(state.ghost is not None and state.ghost.isVisible()),
+        )
 
     def finish_external_tab_drag(self, global_pos: QPoint, *, detach_on_invalid_drop: bool = True) -> bool:
         state = self._external_drag
         if state is None:
             return False
+        self._drag_trace(
+            "drag_finish_begin",
+            widget=self._widget_label(state.widget),
+            global_x=global_pos.x(),
+            global_y=global_pos.y(),
+            detach_on_invalid_drop=detach_on_invalid_drop,
+            current_owner=self._window_label(self.window_by_widget.get(state.widget)),
+        )
         self.update_external_tab_drag(global_pos)
         target_bar = self._tab_bar_from_global_pos(global_pos)
         moved = False
@@ -614,7 +720,60 @@ class TabWorkspaceController(QObject):
         QApplication.restoreOverrideCursor()
         self._external_drag = None
         self._remove_drag_event_filter()
+        self._drag_trace(
+            "drag_finish_end",
+            widget=self._widget_label(state.widget),
+            moved=moved,
+            final_owner=self._window_label(self.window_by_widget.get(state.widget)),
+            target_owner=self._window_label(target_bar.owner_window() if target_bar is not None else None),
+        )
         return moved
+
+    def _stable_external_target_index(
+        self,
+        state: _ExternalTabDragState,
+        target_bar: DetachableTabBar,
+        global_pos: QPoint,
+        raw_index: int,
+    ) -> int:
+        count = target_bar.count()
+        clamped = max(0, min(int(raw_index), count))
+        target_window = target_bar.owner_window()
+        previous_window = state.last_target_window
+        previous_index = state.last_target_index
+        if previous_window is not target_window or previous_index is None:
+            state.last_target_window = target_window
+            state.last_target_index = clamped
+            return clamped
+        if clamped == previous_index:
+            return clamped
+
+        stable_index = clamped
+        local_x = target_bar.mapFromGlobal(global_pos).x()
+        margin = int(self._EXTERNAL_DRAG_INDEX_HYSTERESIS_PX)
+
+        # Demand a small overshoot before switching adjacent insertion slots so
+        # repeated sampling at the same point cannot flap between two indices.
+        if clamped == previous_index + 1 and count > 0 and 0 <= previous_index < count:
+            threshold = target_bar.tabRect(previous_index).center().x() + margin
+            if local_x < threshold:
+                stable_index = previous_index
+        elif clamped + 1 == previous_index and count > 0 and 0 <= clamped < count:
+            threshold = target_bar.tabRect(clamped).center().x() - margin
+            if local_x > threshold:
+                stable_index = previous_index
+
+        state.last_target_window = target_window
+        state.last_target_index = stable_index
+        self._drag_trace(
+            "drag_index_stabilized",
+            widget=self._widget_label(state.widget),
+            previous_index=previous_index,
+            raw_index=clamped,
+            stable_index=stable_index,
+            local_x=local_x,
+        )
+        return stable_index
 
     def active_drag_window(self) -> Optional[WorkspaceWindow]:
         return None
@@ -630,6 +789,11 @@ class TabWorkspaceController(QObject):
             if not (buttons & Qt.MouseButton.LeftButton):
                 # If release happened outside app widgets, finalize when pointer re-enters.
                 self._debug_log("drag_finish_no_button")
+                self._drag_trace(
+                    "drag_event_no_button",
+                    global_x=global_pos.x(),
+                    global_y=global_pos.y(),
+                )
                 self.finish_external_tab_drag(global_pos)
                 return False
             self.update_external_tab_drag(global_pos)
@@ -747,30 +911,101 @@ class TabWorkspaceController(QObject):
         exclude_window: Optional[WorkspaceWindow] = None,
     ) -> Optional[DetachableTabBar]:
         _ = exclude_window
+        scan_parts: list[str] = []
         for window in list(self.registered_windows):
-            if hasattr(window, "isVisible") and not bool(window.isVisible()):
-                continue
+            window_visible = not hasattr(window, "isVisible") or bool(window.isVisible())
             tabs = window.workspace_tabs()
-            if tabs.count() <= 0:
+            count = tabs.count()
+            if not window_visible:
+                scan_parts.append(f"{self._window_label(window)}:hidden")
+                continue
+            if count <= 0:
+                scan_parts.append(f"{self._window_label(window)}:empty")
                 continue
             bar = tabs.tabBar()
             if not isinstance(bar, DetachableTabBar):
+                scan_parts.append(f"{self._window_label(window)}:non-detachable")
                 continue
             if not bar.isVisible():
+                scan_parts.append(f"{self._window_label(window)}:bar-hidden")
                 continue
             top_left = bar.mapToGlobal(QPoint(0, 0))
             global_rect = QRect(top_left, bar.size())
-            strip_width = tabs.width()
+            strip_width = bar.width()
             if strip_width <= 0:
+                scan_parts.append(f"{self._window_label(window)}:zero-width")
                 continue
             strip_top_left = bar.mapToGlobal(QPoint(0, 0))
-            strip_origin = strip_top_left - QPoint(0, self._DROP_TARGET_TOP_SLOP_PX)
+            strip_origin = strip_top_left - QPoint(
+                self._DROP_TARGET_SIDE_SLOP_PX,
+                self._DROP_TARGET_TOP_SLOP_PX,
+            )
             strip_height = (
                 bar.height() + self._DROP_TARGET_TOP_SLOP_PX + self._DROP_TARGET_BOTTOM_SLOP_PX
             )
-            strip_rect = QRect(strip_origin, QSize(strip_width, max(1, strip_height)))
-            if global_rect.contains(global_pos) or strip_rect.contains(global_pos):
+            strip_rect = QRect(
+                strip_origin,
+                QSize(strip_width + (2 * self._DROP_TARGET_SIDE_SLOP_PX), max(1, strip_height)),
+            )
+            in_global = global_rect.contains(global_pos)
+            in_strip = strip_rect.contains(global_pos)
+            scan_parts.append(
+                f"{self._window_label(window)}:g={int(in_global)} s={int(in_strip)} "
+                f"bar=({global_rect.x()},{global_rect.y()},{global_rect.width()},{global_rect.height()}) "
+                f"strip=({strip_rect.x()},{strip_rect.y()},{strip_rect.width()},{strip_rect.height()})"
+            )
+            if in_global or in_strip:
+                self._drag_trace(
+                    "target_lookup",
+                    global_x=global_pos.x(),
+                    global_y=global_pos.y(),
+                    match=self._window_label(window),
+                    scan=" | ".join(scan_parts),
+                )
                 return bar
+        self._drag_trace(
+            "target_lookup",
+            global_x=global_pos.x(),
+            global_y=global_pos.y(),
+            match="none",
+            scan=" | ".join(scan_parts),
+        )
+        return None
+
+    def _sticky_target_bar_from_owner(
+        self,
+        owner_window: WorkspaceWindow,
+        global_pos: QPoint,
+    ) -> Optional[DetachableTabBar]:
+        tabs = owner_window.workspace_tabs()
+        bar = tabs.tabBar()
+        if not isinstance(bar, DetachableTabBar):
+            return None
+        if not bar.isVisible():
+            return None
+        strip_width = bar.width()
+        if strip_width <= 0:
+            return None
+        strip_top_left = bar.mapToGlobal(QPoint(0, 0))
+        strip_origin = strip_top_left - QPoint(
+            self._DROP_TARGET_SIDE_SLOP_PX,
+            self._DROP_TARGET_TOP_SLOP_PX,
+        )
+        strip_height = (
+            bar.height() + self._DROP_TARGET_TOP_SLOP_PX + self._DROP_TARGET_STICKY_BOTTOM_SLOP_PX
+        )
+        sticky_rect = QRect(
+            strip_origin,
+            QSize(strip_width + (2 * self._DROP_TARGET_SIDE_SLOP_PX), max(1, strip_height)),
+        )
+        if sticky_rect.contains(global_pos):
+            self._drag_trace(
+                "target_lookup_sticky_owner",
+                global_x=global_pos.x(),
+                global_y=global_pos.y(),
+                owner=self._window_label(owner_window),
+            )
+            return bar
         return None
 
     def _set_external_drag_width_lock(self, enabled: bool) -> None:
@@ -827,4 +1062,38 @@ class TabWorkspaceController(QObject):
         line = " ".join(f"{key}={value}" for key, value in payload.items())
         self._debug_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self._debug_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+    def _window_label(self, window: Optional[WorkspaceWindow]) -> str:
+        if window is None:
+            return "none"
+        try:
+            tabs = window.workspace_tabs()
+            count = tabs.count()
+            current = tabs.currentIndex()
+            visible = bool(window.isVisible()) if hasattr(window, "isVisible") else False
+            return f"{type(window).__name__}@{id(window):x}[vis={int(visible)} count={count} cur={current}]"
+        except Exception:
+            return f"{type(window).__name__}@{id(window):x}[unavailable]"
+
+    def _widget_label(self, widget: Optional[QWidget]) -> str:
+        if widget is None:
+            return "none"
+        key = self.key_by_widget.get(widget, "")
+        return f"{type(widget).__name__}@{id(widget):x}[key={key}]"
+
+    def _drag_trace(self, event: str, **fields: object) -> None:
+        if not self._drag_trace_enabled:
+            return
+        self._drag_trace_seq += 1
+        payload = {
+            "seq": str(self._drag_trace_seq),
+            "t_ms": str(int(time.time() * 1000)),
+            "event": str(event),
+        }
+        for key in sorted(fields):
+            payload[key] = str(fields[key])
+        line = " ".join(f"{key}={value}" for key, value in payload.items())
+        self._drag_trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._drag_trace_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
