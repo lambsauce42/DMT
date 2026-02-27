@@ -1,11 +1,33 @@
 ## How to handle bugs
-All bugs should first be thoroughly investigated and then be reproduced by tests which fail and reproduce the bug, the goal should be to fix the bug and the test should pass, these tests then serve as regression tests. Important: Make the test BEFORE you fix the bug. It can also be useful to introduce temporary debug logging that trigger during tests.
+Bug fixes should be investigated first. Do **not** require a fail-first test for every bug by default.
 
-For making the bug failing tests: Try to make them as fundamental as possible, dont think something like "maybe function xy is causing this lets make a test that fails when function xy is called": that is cheating. Think what **actually** measures the concrete failure mode and design the test around that - not based on assumptions what could fix the bug. You may sumplement with tests that are based on such assumptions, but for each bug there most be one *fundamental* test.
+Fail-first regression tests are required only for:
+- High-impact bugs (crash, data loss/corruption, security/privacy issues, major broken flow).
+- Persistent/reappearing bugs.
+- Bugs where root cause or fix confidence is low without automated reproduction.
+
+For routine low-risk bug fixes, it is acceptable to:
+- Fix directly without adding a new test.
+- Validate with targeted existing tests and/or manual verification.
+- Add temporary debug logging when it helps inspection.
+
+When a fail-first bug test is required, make it as fundamental as possible. Dont think something like "maybe function xy is causing this lets make a test that fails when function xy is called": that is cheating. Think what **actually** measures the concrete failure mode and design the test around that - not based on assumptions what could fix the bug. You may sumplement with tests that are based on such assumptions, but there should be at least one *fundamental* test for that bug.
 
 You may open the app with a script. Never interact with mouse events, you may use keyborad events. Do not make screenshots. You can introduce temporary debug keys that can be used to navigate the app during the inspection. Each inspection should be accompagnied by debug logs that fire during the test.
 
 Put logging and any other debug artifacts in debug folder.
+
+## Test Gating (Important)
+
+- Do **not** add new tests by default.
+- Add a new test only when at least one of these is true:
+  - The bug/regression is high-impact or persistent.
+  - Behavior/logic changed in a risky way that could realistically break again.
+  - Core flows, data integrity, or cross-module contracts changed.
+- For tiny edits (wording, visual polish, copy changes, simple layout nudge, minor refactor with no behavior change), avoid creating new tests.
+- Do not create speculative tests for "maybe this could fail" cases without concrete evidence.
+- Prefer running existing related tests first; only add tests when current coverage is clearly missing for the actual failure mode.
+- If adding a test is optional and the change is low risk, skip adding it and keep scope focused.
 
 ## Test Organization
 
@@ -60,5 +82,6 @@ In case you get stuck somewhere, you can have a look at quirks.md it contains so
 
 
 ## Small Fix Exception
-If the change is super small (for example tiny visual polish or trivial wording), you usually do not need to write a fail-first test before applying the fix.
+If the change is super small (for example tiny visual polish or trivial wording), you usually should not add a new test.
+Fail-first tests are mainly for high-impact or recurring bugs, not for routine low-risk fixes.
 If a bug is persistent or keeps reappearing, fall back to the fail-first regression-test workflow to lock it down.

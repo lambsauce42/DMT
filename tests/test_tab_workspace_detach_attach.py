@@ -1303,6 +1303,61 @@ def test_internal_drag_over_home_zone_keeps_dragged_text_close_to_tab_rect(qtbot
     assert max(offset_samples) <= 48, "Dragged text shifted too far from its tab while crossing Home zone."
 
 
+def test_internal_drag_over_home_zone_moves_active_indicator_without_moving_home_tab(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    qtbot.wait(20)
+
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+    tabs.setCurrentWidget(map_widget)
+    start = bar.tabRect(tabs.indexOf(map_widget)).center()
+    home_rect = bar.tabRect(0)
+
+    cursor_samples: list[int] = []
+    home_rect_x_samples: list[int] = []
+    indicator_x_samples: list[int] = []
+    qtbot.mousePress(bar, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.wait(12)
+    for x in range(start.x(), max(2, home_rect.left() + 2), -8):
+        probe = QPoint(x, start.y())
+        qtbot.mouseMove(bar, probe)
+        qtbot.wait(8)
+        cursor_samples.append(int(probe.x()))
+        home_rect_x_samples.append(int(bar.tabRect(0).x()))
+        indicator = getattr(bar, "_active_indicator", None)
+        if indicator is None or not indicator.isVisible():
+            continue
+        indicator_x_samples.append(int(indicator.geometry().x()))
+    qtbot.mouseRelease(bar, Qt.MouseButton.LeftButton, pos=QPoint(max(2, home_rect.left() + 2), start.y()))
+    qtbot.wait(20)
+
+    _debug_log(
+        "home_zone_active_indicator_probe "
+        f"home_rect=({home_rect.x()},{home_rect.y()},{home_rect.width()},{home_rect.height()}) "
+        f"cursor_x={cursor_samples} home_rect_x={home_rect_x_samples} indicator_x={indicator_x_samples}"
+    )
+
+    assert cursor_samples, "Did not capture cursor samples while probing Home-zone drag."
+    assert min(cursor_samples) <= home_rect.center().x(), (
+        "Probe did not move cursor far enough into the Home zone."
+    )
+    assert home_rect_x_samples, "Did not capture Home tab geometry samples during drag."
+    assert set(home_rect_x_samples) == {int(home_rect.x())}, (
+        "Home tab shifted position during drag; Home must remain pinned and visually stable."
+    )
+    assert indicator_x_samples, "Did not capture active indicator samples during Home-zone drag."
+    assert min(indicator_x_samples) <= home_rect.center().x(), (
+        "Active indicator stayed pinned right of Home while cursor moved into Home zone."
+    )
+
+
 def test_internal_drag_over_home_zone_moves_selected_tab_indicator(qtbot) -> None:
     _DEBUG_LOG.write_text("", encoding="utf-8")
     window = MainLauncherWindow()

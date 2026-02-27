@@ -713,7 +713,7 @@ QTabBar::tab:hover {{
 }}
 QTabBar::tab:selected {{
     color: transparent;
-    border-bottom: 2px solid #58a6ff;
+    border-bottom: 2px solid transparent;
 }}
 QTabBar::close-button {{
     width: 18px;
