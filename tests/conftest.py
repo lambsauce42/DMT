@@ -126,10 +126,12 @@ _KNOWN_TEST_FILES = frozenset(
         "test_target_xp_sums.py",
         "test_terminal_logic.py",
         "test_terminal_widget_inline_prompt.py",
-        "test_tab_workspace_close_cleanup.py",
-        "test_tab_workspace_close_veto.py",
-        "test_tab_workspace_detach_attach.py",
-        "test_tab_workspace_drag_polling.py",
+        "test_workspace_tabs_close_lifecycle.py",
+        "test_workspace_tabs_detach_attach.py",
+        "test_workspace_tabs_drag_within_window.py",
+        "test_workspace_tabs_geometry.py",
+        "test_workspace_tabs_online_cleanup.py",
+        "test_workspace_tabs_ordering.py",
         "test_test_save_isolation.py",
         "test_tier_registry_integrity.py",
         "test_ui_interactions.py",
@@ -158,6 +160,7 @@ _TIER0_FILES = frozenset(
         "test_suggest_greedy_is_deterministic.py",
         "test_target_xp_sums.py",
         "test_terminal_logic.py",
+        "test_workspace_tabs_geometry.py",
     }
 )
 
@@ -193,7 +196,7 @@ _TIER2_FILES = frozenset(
         "test_session_file_pool_layout.py",
         "test_session_file_pool_preview.py",
         "test_session_text_links.py",
-        "test_tab_workspace_close_cleanup.py",
+        "test_workspace_tabs_online_cleanup.py",
         "test_ui_interactions_expanded.py",
     }
 )

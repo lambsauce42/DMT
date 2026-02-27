@@ -63,7 +63,7 @@ from npc_database import NPCDatabaseWidget
 from player_sheets import PlayerSheetsWidget, refresh_character_sheet_index_cache
 from session_creator import SessionCreatorWidget
 from save_paths import dungeon_collections_dir, clear_all_online_runtime_caches
-from tab_workspace import TabWorkspaceController
+from tab_workspace import TabWorkspaceController, WorkspaceTabsHost
 from ui.encounter_panel import EncounterPanel
 
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
@@ -681,48 +681,18 @@ QToolButton#NavActionButton[action="delete"]:hover, QToolButton#NavActionButton[
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f85149, stop:1 #da3633);
     border-color: #ff7b72;
 }}
-QTabWidget {{
+QWidget#WorkspaceTabHost {{
     background-color: #010409;
     border: 0px;
 }}
-QTabWidget::tab-bar {{
+QWidget#WorkspaceTabStrip {{
+    background-color: transparent;
     border: 0px;
 }}
-QTabWidget::pane {{
+QWidget#WorkspaceTabStack {{
     border: 1px solid #30363d;
     border-radius: 12px;
-    top: -1px;
     background-color: #0d1117;
-}}
-QTabBar {{
-    background-color: transparent;
-    border: 0px;
-}}
-QTabBar::tab {{
-    background-color: transparent;
-    border: none;
-    border-bottom: 2px solid transparent;
-    padding: 10px 20px;
-    margin-right: 8px;
-    color: transparent;
-    font-weight: 600;
-    font-size: 13px;
-}}
-QTabBar::tab:hover {{
-    color: transparent;
-}}
-QTabBar::tab:selected {{
-    color: transparent;
-    border-bottom: 2px solid transparent;
-}}
-QTabBar::close-button {{
-    width: 18px;
-    height: 18px;
-    border-radius: 9px;
-    image: url({CLOSE_ICON_PATH});
-}}
-QTabBar::close-button:hover {{
-    background-color: #30363d;
 }}
 
 /* PlusMinusSpinBox Styles */
@@ -1412,8 +1382,7 @@ class _WorkspaceTabWindow(QMainWindow):
         self.setWindowTitle(title)
         self.setMinimumSize(1200, 700)
 
-        self.tabs = QTabWidget(self)
-        self.tabs.setDocumentMode(False)
+        self.tabs = WorkspaceTabsHost(self)
         self.setCentralWidget(self.tabs)
 
         self._loading_overlay = AppletLoadingOverlay(self.tabs)
@@ -1424,16 +1393,17 @@ class _WorkspaceTabWindow(QMainWindow):
         self._tab_by_key = self._workspace_controller.tab_by_key
         self._loading_tabs = self._workspace_controller.loading_keys
 
-    def workspace_tabs(self) -> QTabWidget:
+    def workspace_host(self) -> WorkspaceTabsHost:
+        return self.tabs
+
+    def workspace_tabs(self) -> WorkspaceTabsHost:
         return self.tabs
 
     def is_primary_window(self) -> bool:
         return self._workspace_primary
 
     def _disable_tab_close(self, index: int) -> None:
-        bar = self.tabs.tabBar()
-        bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
-        bar.setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
+        self.tabs.setTabClosable(index, False)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -1499,7 +1469,7 @@ class MainLauncherWindow(_WorkspaceTabWindow):
         )
         home = HomeWidget(APPLET_DEFINITIONS, self.open_applet)
         self._home = home
-        home_index = self.tabs.addTab(home, "Home")
+        home_index = self.tabs.addTab(home, "Home", closable=False, pinned=True)
         self._disable_tab_close(home_index)
         self._workspace_controller.set_home_widget(home)
         self.tabs.setCurrentIndex(0)
