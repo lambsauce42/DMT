@@ -2,6 +2,8 @@
 
 import sys
 import os
+from datetime import datetime
+from pathlib import Path
 import pytest
 from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QImage, QPainter
@@ -10,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsScene
 # Adjust import path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from dungeon_items import RoomGroup, EntityItem, WallItem, DungeonEllipseItem
+from dungeon_items import RoomGroup, EntityItem, WallItem, DungeonEllipseItem, PingItem
 from dungeon_constants import GRID_SIZE, ROLE_LABEL, ROLE_ENTITY_ID
 
 
@@ -27,6 +29,14 @@ def app():
 def scene(app):
     """Create a QGraphicsScene for testing."""
     return QGraphicsScene()
+
+
+def _debug_log(message: str) -> None:
+    path = Path(__file__).resolve().parents[1] / "debug" / "ping_item_lifecycle.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        ts = datetime.now().isoformat(timespec="seconds")
+        handle.write(f"[{ts}] {message}\n")
 
 
 class TestRoomGroup:
@@ -310,3 +320,20 @@ class TestGridConstants:
     def test_grid_size(self):
         """GRID_SIZE should be 58px."""
         assert GRID_SIZE == 58
+
+
+def test_ping_item_does_not_emit_callbacks_after_scene_clear(qtbot):
+    """Clearing a scene during active ping animation should not trigger deleted-object callbacks."""
+    scene = QGraphicsScene()
+    item = PingItem(QPointF(20, 20))
+    scene.addItem(item)
+    _debug_log("created PingItem and added to scene")
+
+    # This mirrors real lifecycle teardown where scene-owned items are deleted
+    # while animations may still be running.
+    scene.clear()
+    _debug_log("cleared scene while ping animation active")
+
+    # If callback wiring is unsafe, pytest-qt will surface Qt event loop exceptions here.
+    qtbot.wait(950)
+    _debug_log("waited for animation window without Qt callback exceptions")

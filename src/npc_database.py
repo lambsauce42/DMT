@@ -287,6 +287,11 @@ def save_npc_entries_to_storage(entries: List[NPCEntry]) -> None:
             resolved = existing
         if resolved in expected:
             continue
+        info = read_dmt_package_info(existing)
+        if not isinstance(info, dict):
+            continue
+        if str(info.get("format") or "") != NPCS_FILE_FORMAT:
+            continue
         try:
             existing.unlink()
         except Exception:
@@ -338,24 +343,6 @@ def linked_npc_names_by_sheet_id() -> dict[str, list[str]]:
     if changed:
         save_npc_entries_to_storage(entries)
     return result
-
-
-def set_npc_link(npc_id: str, sheet_id: str) -> bool:
-    target_npc_id = str(npc_id or "").strip()
-    target_sheet_id = str(sheet_id or "").strip()
-    if not target_npc_id:
-        return False
-    entries = load_npc_entries_from_storage()
-    for entry in entries:
-        if str(entry.id or "").strip() != target_npc_id:
-            continue
-        if str(entry.linked_sheet_id or "").strip() == target_sheet_id:
-            return False
-        entry.linked_sheet_id = target_sheet_id
-        entry.last_modified = _now_timestamp()
-        save_npc_entries_to_storage(entries)
-        return True
-    return False
 
 
 def set_links_for_sheet(sheet_id: str, selected_npc_ids: set[str]) -> tuple[int, int]:

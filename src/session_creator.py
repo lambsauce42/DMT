@@ -363,6 +363,11 @@ class SessionManager:
             except Exception:
                 existing_resolved = existing
             if existing_resolved not in expected_files:
+                info = read_dmt_package_info(existing)
+                if not isinstance(info, dict):
+                    continue
+                if str(info.get("format") or "") != SESSION_FILE_FORMAT:
+                    continue
                 try:
                     existing.unlink()
                 except Exception:

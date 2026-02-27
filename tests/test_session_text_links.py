@@ -21,6 +21,12 @@ from session_text_links import (
 )
 
 
+def _write_character_base_dir_debug(lines: list[str]) -> None:
+    debug_path = Path(ROOT) / "debug" / "session_text_links_character_base_dir.log"
+    debug_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def test_detects_supported_slash_commands() -> None:
     text = "/npc goblin"
     trigger = detect_slash_trigger(text, len(text))
@@ -331,3 +337,49 @@ def test_character_suggestions_include_all_saved_entries(monkeypatch) -> None:
 
     suggestions = load_link_suggestions("character", "", base_dir=Path("."))
     assert [s.display_label for s in suggestions] == ["Alyra", "Borin", "Cyra"]
+
+
+def test_character_suggestions_respect_explicit_base_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_dir = tmp_path / "env_saves"
+    base_dir = tmp_path / "base_saves"
+    for target_dir, hero_name in ((env_dir, "Env Hero"), (base_dir, "Base Hero")):
+        cache_dir = target_dir / "cache" / "characters"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        payload = [
+            {
+                "name": hero_name,
+                "pdf_path": "missing.pdf",
+                "archive_path": "",
+                "world": "",
+                "campaign": "",
+                "group": "",
+                "tags": [],
+                "inventory": [],
+                "inventory_notes": "",
+                "equipment": {},
+                "gold": 0,
+                "silver": 0,
+                "copper": 0,
+            }
+        ]
+        (cache_dir / "character_sheets.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setenv("DMT_TEST_MODE", "1")
+    monkeypatch.setenv("DMT_TEST_SAVE_DIR", str(env_dir))
+    suggestions = load_link_suggestions("character", "", base_dir=base_dir)
+    labels = [suggestion.display_label for suggestion in suggestions]
+
+    _write_character_base_dir_debug(
+        [
+            f"env_dir={env_dir}",
+            f"base_dir={base_dir}",
+            f"labels={labels}",
+        ]
+    )
+
+    assert labels == ["Base Hero"]

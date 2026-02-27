@@ -4,6 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 from dataclasses import asdict
+from datetime import datetime
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
@@ -12,6 +13,11 @@ from dmt_package import read_dmt_package_asset, read_dmt_package_info
 from session_creator import SessionManager, Session, SessionAttachment, SessionLogEntry
 from npc_database import NPCEntry, entry_to_dict, entry_from_dict, npc_storage_dir
 from maps_applet import MapAsset, entry_to_dict as map_to_dict, entry_from_dict as map_from_dict
+from navigation_storage import (
+    save_navigation_world_data,
+    navigation_objects_dir,
+    WORLD_EXTENSION,
+)
 import player_sheets
 
 class TestPersistence(unittest.TestCase):
@@ -21,6 +27,13 @@ class TestPersistence(unittest.TestCase):
 
     def tearDown(self):
         self.test_dir.cleanup()
+
+    def _debug_log(self, message: str) -> None:
+        path = Path(__file__).resolve().parents[1] / "debug" / "session_persistence_audit.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            ts = datetime.now().isoformat(timespec="seconds")
+            handle.write(f"[{ts}] {message}\n")
 
     def test_session_persistence(self):
         """Test that Session objects can be saved and loaded correctly."""
@@ -134,6 +147,61 @@ class TestPersistence(unittest.TestCase):
         finally:
             player_sheets.default_sheet_save_dir = original_sheet_save_dir
             npc_database.default_sheet_save_dir = original_npc_sheet_save_dir
+
+    def test_session_save_does_not_delete_unreadable_or_future_format_files(self):
+        import session_creator
+        from dmt_package import write_dmt_package
+
+        original_path_func = session_creator.session_storage_path
+        session_creator.session_storage_path = lambda: self.test_path / "sessions.dmtindex"
+        try:
+            future_file = self.test_path / "future_format.dmtsession"
+            write_dmt_package(
+                future_file,
+                info={
+                    "format": "dmtsession.v999",
+                    "object_type": "session",
+                    "object_id": "future",
+                    "payload": {
+                        "id": "future",
+                        "name": "Future Session",
+                        "session_date": "2099-01-01",
+                    },
+                },
+            )
+            self._debug_log(f"created foreign session package at {future_file}")
+
+            manager = SessionManager()
+            self._debug_log(
+                f"loaded SessionManager sessions={len(manager.sessions)} last_error={manager.last_error!r}"
+            )
+            manager.save()
+            self._debug_log("called SessionManager.save() after loading foreign-format file")
+
+            self.assertTrue(
+                future_file.exists(),
+                "Saving sessions should not delete unreadable/unknown-format session files.",
+            )
+        finally:
+            session_creator.session_storage_path = original_path_func
+
+    def test_navigation_save_preserves_unknown_format_packages(self):
+        from dmt_package import write_dmt_package
+
+        worlds_dir = navigation_objects_dir(base_dir=self.test_path) / "worlds"
+        worlds_dir.mkdir(parents=True, exist_ok=True)
+        unknown_world = worlds_dir / f"future{WORLD_EXTENSION}"
+        write_dmt_package(
+            unknown_world,
+            info={
+                "format": "dmtworld.v999",
+                "object_type": "world",
+                "object_id": "future",
+                "name": "Future World",
+            },
+        )
+        save_navigation_world_data([], base_dir=self.test_path)
+        self.assertTrue(unknown_world.exists())
 
 if __name__ == "__main__":
     unittest.main()

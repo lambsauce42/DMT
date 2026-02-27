@@ -1188,6 +1188,11 @@ class MapsWidget(QWidget):
                 resolved_existing = existing
             if resolved_existing in expected_files:
                 continue
+            info = read_dmt_package_info(existing)
+            if not isinstance(info, dict):
+                continue
+            if str(info.get("format") or "") != MAP_FILE_FORMAT:
+                continue
             try:
                 existing.unlink()
             except Exception:

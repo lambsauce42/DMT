@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QAction, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -351,9 +351,6 @@ class CompactNavTree(QWidget):
     Right-click shows context menus with creation and management actions.
     """
     
-    # Signals
-    session_launched = Signal(str, str, str)  # world, campaign, group
-    
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._data: list[dict] = []
@@ -541,6 +538,91 @@ class CompactNavTree(QWidget):
         }
         self._trash.append(trash_entry)
         self._save_trash()
+
+    @staticmethod
+    def _clean_id(value: object) -> str:
+        return str(value or "").strip()
+
+    def _campaign_entry_matches_world(
+        self,
+        entry: dict,
+        world: dict,
+        *,
+        allow_renamed_legacy: bool,
+    ) -> bool:
+        parent = entry.get("parent", {})
+        if not isinstance(parent, dict):
+            parent = {}
+        payload = entry.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+
+        world_id = self._clean_id(world.get("id"))
+        parent_world_id = self._clean_id(parent.get("world_id"))
+        payload_world_id = self._clean_id(payload.get("world_id"))
+        world_name = str(world.get("name") or "").strip()
+        parent_world_name = str(parent.get("world") or "").strip()
+
+        if world_id:
+            for candidate_id in (parent_world_id, payload_world_id):
+                if candidate_id:
+                    return candidate_id == world_id
+            if not allow_renamed_legacy:
+                return not parent_world_name or parent_world_name == world_name
+            return True
+
+        if parent_world_id or payload_world_id:
+            return False
+        if not parent_world_name or parent_world_name == world_name:
+            return True
+        return allow_renamed_legacy
+
+    def _group_entry_matches_campaign(
+        self,
+        entry: dict,
+        world: dict,
+        campaign: dict,
+        *,
+        allow_renamed_legacy: bool,
+    ) -> bool:
+        parent = entry.get("parent", {})
+        if not isinstance(parent, dict):
+            parent = {}
+        payload = entry.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+
+        world_id = self._clean_id(world.get("id"))
+        campaign_id = self._clean_id(campaign.get("id"))
+        parent_world_id = self._clean_id(parent.get("world_id"))
+        parent_campaign_id = self._clean_id(parent.get("campaign_id"))
+        payload_world_id = self._clean_id(payload.get("world_id"))
+        payload_campaign_id = self._clean_id(payload.get("campaign_id"))
+
+        if world_id:
+            for candidate_world_id in (parent_world_id, payload_world_id):
+                if candidate_world_id and candidate_world_id != world_id:
+                    return False
+        elif parent_world_id or payload_world_id:
+            return False
+
+        if campaign_id:
+            for candidate_campaign_id in (parent_campaign_id, payload_campaign_id):
+                if candidate_campaign_id:
+                    return candidate_campaign_id == campaign_id
+            if allow_renamed_legacy:
+                return True
+            campaign_name = str(campaign.get("name") or "").strip()
+            parent_campaign_name = str(parent.get("campaign") or "").strip()
+            return not parent_campaign_name or parent_campaign_name == campaign_name
+
+        if parent_campaign_id or payload_campaign_id:
+            return False
+        campaign_name = str(campaign.get("name") or "").strip()
+        parent_campaign_name = str(parent.get("campaign") or "").strip()
+        if not parent_campaign_name or parent_campaign_name == campaign_name:
+            return True
+        return allow_renamed_legacy
     
     def _rebuild_tree(self) -> None:
         """Rebuild the tree widget from data."""
@@ -933,7 +1015,14 @@ class CompactNavTree(QWidget):
         if campaign_idx is None:
             return
         campaign = world["campaigns"][campaign_idx]
-        self._move_to_trash("campaign", campaign, parent={"world": world["name"]})
+        parent = {"world": world["name"]}
+        world_id = self._clean_id(world.get("id"))
+        if world_id:
+            parent["world_id"] = world_id
+        campaign_payload = copy.deepcopy(campaign)
+        if world_id and not self._clean_id(campaign_payload.get("world_id")):
+            campaign_payload["world_id"] = world_id
+        self._move_to_trash("campaign", campaign_payload, parent=parent)
         del world["campaigns"][campaign_idx]
         self._save_data()
         self._rebuild_tree()
@@ -963,12 +1052,22 @@ class CompactNavTree(QWidget):
             return
         world = self._data[world_idx]
         existing = {c["name"] for c in world["campaigns"]}
-        entries = [
-            e for e in self._trash
-            if e.get("type") == "campaign"
-            and e.get("parent", {}).get("world") == world["name"]
-            and e.get("name") not in existing
+        candidates = [
+            e
+            for e in self._trash
+            if e.get("type") == "campaign" and e.get("name") not in existing
         ]
+        entries = [
+            e
+            for e in candidates
+            if self._campaign_entry_matches_world(e, world, allow_renamed_legacy=False)
+        ]
+        if not entries:
+            entries = [
+                e
+                for e in candidates
+                if self._campaign_entry_matches_world(e, world, allow_renamed_legacy=True)
+            ]
         if not entries:
             QMessageBox.information(self, "No Campaigns", "No campaigns are eligible to revive.")
             return
@@ -1044,10 +1143,19 @@ class CompactNavTree(QWidget):
         if group_idx is None:
             return
         group = campaign["groups"][group_idx]
-        self._move_to_trash(
-            "group", group,
-            parent={"world": world["name"], "campaign": campaign["name"]}
-        )
+        parent = {"world": world["name"], "campaign": campaign["name"]}
+        world_id = self._clean_id(world.get("id"))
+        campaign_id = self._clean_id(campaign.get("id"))
+        if world_id:
+            parent["world_id"] = world_id
+        if campaign_id:
+            parent["campaign_id"] = campaign_id
+        group_payload = copy.deepcopy(group)
+        if world_id and not self._clean_id(group_payload.get("world_id")):
+            group_payload["world_id"] = world_id
+        if campaign_id and not self._clean_id(group_payload.get("campaign_id")):
+            group_payload["campaign_id"] = campaign_id
+        self._move_to_trash("group", group_payload, parent=parent)
         del campaign["groups"][group_idx]
         self._save_data()
         self._rebuild_tree()
@@ -1083,13 +1191,32 @@ class CompactNavTree(QWidget):
             return
         campaign = world["campaigns"][campaign_idx]
         existing = {g["name"] for g in campaign["groups"]}
-        entries = [
-            e for e in self._trash
-            if e.get("type") == "group"
-            and e.get("parent", {}).get("world") == world["name"]
-            and e.get("parent", {}).get("campaign") == campaign["name"]
-            and e.get("name") not in existing
+        candidates = [
+            e
+            for e in self._trash
+            if e.get("type") == "group" and e.get("name") not in existing
         ]
+        entries = [
+            e
+            for e in candidates
+            if self._group_entry_matches_campaign(
+                e,
+                world,
+                campaign,
+                allow_renamed_legacy=False,
+            )
+        ]
+        if not entries:
+            entries = [
+                e
+                for e in candidates
+                if self._group_entry_matches_campaign(
+                    e,
+                    world,
+                    campaign,
+                    allow_renamed_legacy=True,
+                )
+            ]
         if not entries:
             QMessageBox.information(self, "No Groups", "No groups are eligible to revive.")
             return
@@ -1178,7 +1305,11 @@ class CompactNavTree(QWidget):
         if isinstance(group, dict):
             name = str(group.get("name", "")).strip()
             icon = group.get("icon") or self._default_group_icon
-            return {"name": name, "icon": icon}
+            group_id = self._clean_id(group.get("id")) or None
+            normalized = {"name": name, "icon": icon}
+            if group_id:
+                normalized["id"] = group_id
+            return normalized
         name = str(group).strip()
         return {"name": name, "icon": self._default_group_icon}
     
@@ -1186,22 +1317,30 @@ class CompactNavTree(QWidget):
         """Normalize a campaign entry."""
         name = str(campaign.get("name", "")).strip()
         icon = campaign.get("icon") or self._default_campaign_icon
+        campaign_id = self._clean_id(campaign.get("id")) or None
         groups = []
         for group in campaign.get("groups", []):
             normalized = self._normalize_group(group)
             if normalized["name"]:
                 groups.append(normalized)
-        return {"name": name, "icon": icon, "groups": groups}
+        normalized_campaign = {"name": name, "icon": icon, "groups": groups}
+        if campaign_id:
+            normalized_campaign["id"] = campaign_id
+        return normalized_campaign
     
     def _normalize_world(self, world: dict) -> dict:
         """Normalize a world entry."""
         name = str(world.get("name", "")).strip()
         icon = world.get("icon") or self._default_world_icon
+        world_id = self._clean_id(world.get("id")) or None
         campaigns = []
         for campaign in world.get("campaigns", []):
             normalized = self._normalize_campaign(campaign)
             if normalized["name"]:
                 campaigns.append(normalized)
-        return {"name": name, "icon": icon, "campaigns": campaigns}
+        normalized_world = {"name": name, "icon": icon, "campaigns": campaigns}
+        if world_id:
+            normalized_world["id"] = world_id
+        return normalized_world
 
 

@@ -1,6 +1,8 @@
 import os
 import sys
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -8,6 +10,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from npc_database import NPCEntry, matches_filters, filter_entries, _split_search
+from dmt_package import write_dmt_package
 
 class TestNPCDatabaseLogic(unittest.TestCase):
     def test_split_search(self):
@@ -75,6 +78,30 @@ class TestNPCDatabaseLogic(unittest.TestCase):
         results = filter_entries(entries, search_query="Charlie")
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].name, "Charlie")
+
+    def test_save_preserves_unknown_format_packages(self):
+        import npc_database
+
+        with TemporaryDirectory() as tmpdir:
+            original_sheet_save_dir = npc_database.default_sheet_save_dir
+            npc_database.default_sheet_save_dir = lambda: str(Path(tmpdir))
+            try:
+                root = npc_database.npc_storage_dir()
+                root.mkdir(parents=True, exist_ok=True)
+                unknown_file = root / "future_format.dmtnpc"
+                write_dmt_package(
+                    unknown_file,
+                    info={
+                        "format": "dmtnpc.v999",
+                        "object_type": "npc",
+                        "object_id": "future",
+                        "payload": {"id": "future", "name": "Future NPC"},
+                    },
+                )
+                npc_database.save_npc_entries_to_storage([])
+                self.assertTrue(unknown_file.exists())
+            finally:
+                npc_database.default_sheet_save_dir = original_sheet_save_dir
 
 if __name__ == "__main__":
     unittest.main()

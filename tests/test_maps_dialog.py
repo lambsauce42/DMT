@@ -19,6 +19,7 @@ from maps_applet import (
     map_image_trash_path,
     map_thumb_trash_path,
 )
+from dmt_package import write_dmt_package
 
 
 def _write_png(path: Path) -> None:
@@ -94,6 +95,30 @@ def test_maps_widget_ignores_invalid_map_packages(qtbot, monkeypatch, tmp_path):
 
     assert widget._manager.entries == []
     assert widget._load_entries_error == ""
+
+
+def test_maps_widget_save_preserves_unknown_format_packages(qtbot, monkeypatch, tmp_path):
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(parents=True, exist_ok=True)
+    unknown_file = maps_dir / "future_format.dmtmap"
+    write_dmt_package(
+        unknown_file,
+        info={
+            "format": "dmtmap.v999",
+            "object_type": "map",
+            "object_id": "future",
+            "payload": {"id": "future", "name": "Future Map", "image_path": "missing.png"},
+        },
+    )
+    monkeypatch.setattr("maps_applet.maps_storage_dir", lambda: maps_dir)
+    monkeypatch.setattr("maps_applet.maps_images_dir", lambda: maps_dir / "images")
+    monkeypatch.setattr("maps_applet.maps_thumbs_dir", lambda: maps_dir / "images" / ".thumbs")
+
+    widget = MapsWidget()
+    qtbot.addWidget(widget)
+    widget._save_entries()
+
+    assert unknown_file.exists()
 
 
 def test_map_trash_paths_use_stable_id_not_name():

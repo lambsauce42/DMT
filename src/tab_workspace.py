@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Protocol, Set
 
-from PySide6.QtCore import QEvent, QEventLoop, QObject, QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QPoint, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QPen
-from PySide6.QtWidgets import QApplication, QTabBar, QTabWidget, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QTabBar, QTabWidget, QWidget
 
 
 class WorkspaceWindow(Protocol):
@@ -30,6 +30,7 @@ class _ExternalTabDragState:
     ghost: Optional["_FloatingTabGhost"] = None
     last_target_window: Optional[WorkspaceWindow] = None
     last_target_index: Optional[int] = None
+    cursor_polling: bool = False
 
 
 class _FloatingTabGhost(QWidget):
@@ -88,23 +89,57 @@ class DetachableTabBar(QTabBar):
         self._tab_widget = tab_widget
         self._press_pos = QPoint()
         self._press_index = -1
+        self._press_identity: Optional[int] = None
         self._width_lock_active = False
         self._locked_width_by_id: Dict[int, int] = {}
+        self._hover_index = -1
+        self._title_overlay_by_index: Dict[int, QLabel] = {}
+        self._title_gap_by_identity: Dict[int, int] = {}
+        self._title_width_by_identity: Dict[int, int] = {}
+        self._external_drag_identity: Optional[int] = None
+        self._external_drag_global_pos: Optional[QPoint] = None
+        self._external_drag_hot_x: int = 0
+        self._externally_repositioned_close_by_identity: Set[int] = set()
+        self._settling_overlay_left_by_identity: Dict[int, float] = {}
+        self._settling_overlay_start_ms_by_identity: Dict[int, int] = {}
+        self._title_overlay_timer = QTimer(self)
+        self._title_overlay_timer.setInterval(16)
+        self._title_overlay_timer.timeout.connect(self._sync_title_overlays)
+        self._title_overlay_timer.start()
+        self.currentChanged.connect(lambda _index: self._sync_title_overlays())
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        self._sync_title_overlays()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_pos = event.position().toPoint()
             self._press_index = self.tabAt(self._press_pos)
+            identity = self.tabData(self._press_index) if self._press_index >= 0 else None
+            self._press_identity = int(identity) if identity is not None else None
+            self._hover_index = -1
         super().mousePressEvent(event)
+        self._sync_title_overlays()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         self._press_index = -1
+        self._press_identity = None
         self._press_pos = QPoint()
         super().mouseReleaseEvent(event)
+        self._sync_title_overlays()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
-        if self._press_index < 0 or not (event.buttons() & Qt.MouseButton.LeftButton):
+        dragging_with_left_button = (
+            self._press_index >= 0 and bool(event.buttons() & Qt.MouseButton.LeftButton)
+        )
+        hover_index = -1 if dragging_with_left_button else self.tabAt(event.position().toPoint())
+        if hover_index != self._hover_index:
+            self._hover_index = hover_index
+            self._sync_title_overlays()
+        if not dragging_with_left_button:
             super().mouseMoveEvent(event)
+            self._sync_title_overlays()
             return
         current_pos = event.position().toPoint()
         distance = (current_pos - self._press_pos).manhattanLength()
@@ -121,25 +156,78 @@ class DetachableTabBar(QTabBar):
         )
         if distance < threshold:
             super().mouseMoveEvent(event)
+            self._sync_title_overlays()
             return
+        dragged_widget = self._tab_widget.widget(self._press_index)
+        if dragged_widget is not None and self._controller.is_home_widget(dragged_widget):
+            self._controller._drag_trace(
+                "bar_home_drag_blocked",
+                owner=self._controller._window_label(self._owner_window),
+                press_index=self._press_index,
+                cursor_x=current_pos.x(),
+                cursor_y=current_pos.y(),
+            )
+            event.accept()
+            self._sync_title_overlays()
+            return
+        effective_drag_pos = QPoint(current_pos)
+        home_zone_passthrough = False
+        if dragged_widget is not None and not self._controller.is_home_widget(dragged_widget):
+            if self.count() > 0 and str(self.tabText(0)).strip().lower() == "home":
+                home_rect = self.tabRect(0)
+                ignore_guard = 0
+                if self.count() > 1:
+                    ignore_guard = max(12, min(80, int(self.tabRect(1).width() * 0.5)))
+                expanded_home_drag_block = QRect(home_rect)
+                expanded_home_drag_block.setRight(home_rect.right() + ignore_guard)
+                if (
+                    home_rect.width() > 0
+                    and home_rect.height() > 0
+                    and current_pos.x() >= 0
+                    and expanded_home_drag_block.contains(current_pos)
+                ):
+                    # Treat Home as visually transparent while preserving pinned behavior.
+                    home_zone_passthrough = True
+                    self._controller._drag_trace(
+                        "bar_home_region_passthrough",
+                        owner=self._controller._window_label(self._owner_window),
+                        press_index=self._press_index,
+                        cursor_x=current_pos.x(),
+                        cursor_y=current_pos.y(),
+                        passthrough_x=current_pos.x(),
+                        guard_px=ignore_guard,
+                    )
         vertical_pull = 0
-        if current_pos.y() < 0:
-            vertical_pull = -current_pos.y()
-        elif current_pos.y() > self.height():
-            vertical_pull = current_pos.y() - self.height()
+        if effective_drag_pos.y() < 0:
+            vertical_pull = -effective_drag_pos.y()
+        elif effective_drag_pos.y() > self.height():
+            vertical_pull = effective_drag_pos.y() - self.height()
+        horizontal_pull = 0
+        if effective_drag_pos.x() < 0:
+            horizontal_pull = -effective_drag_pos.x()
+        elif effective_drag_pos.x() > self.width():
+            horizontal_pull = effective_drag_pos.x() - self.width()
         self._controller._drag_trace(
             "bar_vertical_pull",
             owner=self._controller._window_label(self._owner_window),
             press_index=self._press_index,
             vertical_pull=vertical_pull,
+            horizontal_pull=horizontal_pull,
             bar_height=self.height(),
+            bar_width=self.width(),
         )
-        if vertical_pull < 24:
+        if vertical_pull < 24 and horizontal_pull < 24:
+            if home_zone_passthrough:
+                event.accept()
+                self._sync_title_overlays()
+                return
             super().mouseMoveEvent(event)
+            self._sync_title_overlays()
             return
         widget = self._tab_widget.widget(self._press_index)
         if widget is None or not self._controller.can_detach_widget(widget):
             super().mouseMoveEvent(event)
+            self._sync_title_overlays()
             return
         tab_rect = self.tabRect(self._press_index)
         hot_spot = current_pos - tab_rect.topLeft()
@@ -163,19 +251,33 @@ class DetachableTabBar(QTabBar):
             global_y=global_pos.y(),
         )
         self._press_index = -1
+        self._press_identity = None
         self._press_pos = QPoint()
         if started:
             event.accept()
+            self._sync_title_overlays()
             return
         super().mouseMoveEvent(event)
+        self._sync_title_overlays()
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        self._hover_index = -1
+        super().leaveEvent(event)
+        self._sync_title_overlays()
 
     def _insertion_index_from_pos(self, pos: QPoint) -> int:
         if self.count() <= 0:
             return 0
+        start_index = 0
+        if str(self.tabText(0)).strip().lower() == "home":
+            start_index = 1
+        if start_index >= self.count():
+            return self.count()
         x = pos.x()
-        for index in range(self.count()):
+        for index in range(start_index, self.count()):
             rect = self.tabRect(index)
-            if x < rect.center().x():
+            trigger_x = rect.left() + max(1, int(rect.width() * 0.25))
+            if x < trigger_x:
                 return index
         return self.count()
 
@@ -225,15 +327,321 @@ class DetachableTabBar(QTabBar):
         self.updateGeometry()
         self.update()
 
+    def set_external_drag_overlay(
+        self,
+        identity: int,
+        global_pos: QPoint,
+        *,
+        hot_x: int,
+    ) -> None:
+        self._external_drag_identity = int(identity)
+        self._external_drag_global_pos = QPoint(global_pos)
+        self._external_drag_hot_x = int(max(0, hot_x))
+        self._sync_title_overlays()
+
+    def clear_external_drag_overlay(self) -> None:
+        if (
+            self._external_drag_identity is None
+            and self._external_drag_global_pos is None
+            and not self._externally_repositioned_close_by_identity
+        ):
+            return
+        captured_settle = False
+        for identity in list(self._externally_repositioned_close_by_identity):
+            index = self._index_for_identity(identity)
+            if index < 0:
+                continue
+            label = self._title_overlay_by_index.get(index)
+            if label is not None and label.isVisible():
+                self._settling_overlay_left_by_identity[int(identity)] = float(label.geometry().x())
+                self._settling_overlay_start_ms_by_identity[int(identity)] = int(time.time() * 1000)
+                captured_settle = True
+        self._external_drag_identity = None
+        self._external_drag_global_pos = None
+        self._external_drag_hot_x = 0
+        # Avoid one immediate post-release snap; let the timer drive settle.
+        if not captured_settle:
+            self._sync_title_overlays()
+
+    def _sync_title_overlays(self) -> None:
+        internal_dragged_index = -1
+        if (
+            self._press_identity is not None
+            and bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+        ):
+            internal_dragged_index = self._index_for_identity(self._press_identity)
+        external_dragged_index = -1
+        if self._external_drag_identity is not None:
+            external_dragged_index = self._index_for_identity(self._external_drag_identity)
+        dragged_index = internal_dragged_index if internal_dragged_index >= 0 else external_dragged_index
+        drag_active = dragged_index >= 0
+        drag_cursor_local_x: Optional[int] = None
+        drag_hot_x: Optional[int] = None
+        if (
+            dragged_index >= 0
+            and dragged_index == external_dragged_index
+            and self._external_drag_global_pos is not None
+        ):
+            drag_cursor_local_x = int(self.mapFromGlobal(self._external_drag_global_pos).x())
+            drag_hot_x = int(self._external_drag_hot_x) if self._external_drag_hot_x > 0 else None
+        external_dragging_active = (
+            dragged_index >= 0
+            and dragged_index == external_dragged_index
+            and drag_cursor_local_x is not None
+        )
+        repositioned_this_frame: Set[int] = set()
+        active: Dict[int, QLabel] = {}
+        for index in range(self.count()):
+            text = self.tabText(index)
+            rect = self.tabRect(index)
+            if not text or rect.width() <= 0 or rect.height() <= 0:
+                continue
+            label = self._title_overlay_by_index.get(index)
+            if label is None:
+                label = QLabel(self)
+                label.setObjectName("WorkspaceTabOverlayLabel")
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            left, width = self._title_overlay_geometry(
+                index,
+                rect,
+                dragging=(index == dragged_index),
+                drag_cursor_local_x=drag_cursor_local_x if index == dragged_index else None,
+                drag_hot_x=drag_hot_x if index == dragged_index else None,
+            )
+            identity = self.tabData(index)
+            identity_key = int(identity) if identity is not None else None
+            if identity_key is not None and index != dragged_index:
+                settle_left = self._settling_overlay_left_by_identity.get(identity_key)
+                if settle_left is not None:
+                    target_left = float(rect.x() + 20)
+                    start_ms = self._settling_overlay_start_ms_by_identity.get(
+                        identity_key,
+                        int(time.time() * 1000),
+                    )
+                    elapsed_ms = max(0, int(time.time() * 1000) - int(start_ms))
+                    duration_ms = 260
+                    progress = max(0.0, min(1.0, float(elapsed_ms) / float(duration_ms)))
+                    eased = (3.0 * (progress ** 2)) - (2.0 * (progress ** 3))
+                    next_left = settle_left + ((target_left - settle_left) * eased)
+                    if progress >= 1.0 or abs(target_left - next_left) < 1.0:
+                        next_left = target_left
+                        self._settling_overlay_left_by_identity.pop(identity_key, None)
+                        self._settling_overlay_start_ms_by_identity.pop(identity_key, None)
+                    else:
+                        # keep start position/time fixed across frames to preserve easing curve
+                        pass
+                    left = int(round(next_left))
+            if (
+                external_dragging_active
+                and index != dragged_index
+                and label is not None
+                and label.isVisible()
+            ):
+                prev_left = int(label.geometry().x())
+                delta = int(left - prev_left)
+                max_step = 14
+                if abs(delta) > max_step:
+                    left = int(prev_left + (max_step if delta > 0 else -max_step))
+            label.setGeometry(left, rect.y(), width, rect.height())
+            elided = label.fontMetrics().elidedText(str(text), self.elideMode(), width)
+            if label.text() != elided:
+                label.setText(elided)
+            color = "#8b949e"
+            if index == self.currentIndex():
+                color = "#58a6ff"
+            elif (not drag_active) and index == self._hover_index:
+                color = "#e6edf3"
+            style = f"color: {color}; font-weight: 600; font-size: 13px;"
+            if label.styleSheet() != style:
+                label.setStyleSheet(style)
+            label.show()
+            label.raise_()
+            active[index] = label
+            if external_dragging_active and index == dragged_index:
+                identity = self._position_close_button_for_overlay(
+                    index=index,
+                    overlay_left=left,
+                    rect=rect,
+                )
+                if identity is not None:
+                    repositioned_this_frame.add(identity)
+            elif external_dragging_active and identity_key is not None and index != dragged_index:
+                identity = self._position_close_button_for_overlay(
+                    index=index,
+                    overlay_left=left,
+                    rect=rect,
+                    max_step=14,
+                )
+                if identity is not None:
+                    repositioned_this_frame.add(identity)
+            elif identity_key is not None and identity_key in self._settling_overlay_left_by_identity:
+                self._position_close_button_for_overlay(
+                    index=index,
+                    overlay_left=left,
+                    rect=rect,
+                )
+
+        if dragged_index in active:
+            active[dragged_index].raise_()
+
+        for index, label in list(self._title_overlay_by_index.items()):
+            if index in active:
+                continue
+            label.hide()
+
+        self._title_overlay_by_index = active
+        stale_repositioned = (
+            self._externally_repositioned_close_by_identity - repositioned_this_frame
+        )
+        for identity in stale_repositioned:
+            if identity in self._settling_overlay_left_by_identity:
+                continue
+            self._restore_close_button_position(identity)
+        self._externally_repositioned_close_by_identity = repositioned_this_frame
+        stale_settle_keys = set(self._settling_overlay_start_ms_by_identity.keys()) - set(
+            self._settling_overlay_left_by_identity.keys()
+        )
+        for identity in stale_settle_keys:
+            self._settling_overlay_start_ms_by_identity.pop(identity, None)
+
+    def _index_for_identity(self, identity: Optional[int]) -> int:
+        if identity is None:
+            return -1
+        for index in range(self.count()):
+            data = self.tabData(index)
+            if data is None:
+                continue
+            if int(data) == int(identity):
+                return index
+        return -1
+
+    def _title_overlay_geometry(
+        self,
+        index: int,
+        rect: QRect,
+        *,
+        dragging: bool,
+        drag_cursor_local_x: Optional[int] = None,
+        drag_hot_x: Optional[int] = None,
+    ) -> tuple[int, int]:
+        close_btn = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
+        if close_btn is None or not close_btn.isVisible():
+            return rect.x() + 20, max(6, rect.width() - 38)
+
+        identity = self.tabData(index)
+        if identity is None:
+            identity_key = -1 - index
+        else:
+            identity_key = int(identity)
+        baseline_gap = self._title_gap_by_identity.get(identity_key)
+        if baseline_gap is None:
+            baseline_gap = int(close_btn.x() - (rect.x() + 20))
+            baseline_gap = max(18, baseline_gap)
+            self._title_gap_by_identity[identity_key] = baseline_gap
+
+        baseline_width = self._title_width_by_identity.get(identity_key)
+        if baseline_width is None:
+            baseline_width = max(6, int(rect.width() - 16))
+            self._title_width_by_identity[identity_key] = baseline_width
+
+        if dragging:
+            width = int(baseline_width)
+            max_width = max(6, int(self.width()) - 8)
+            width = min(width, max_width)
+            if drag_cursor_local_x is not None:
+                anchor_x = int(drag_hot_x) if drag_hot_x is not None else width // 2
+                anchor_x = max(8, min(anchor_x, max(8, width - 8)))
+                left = int(drag_cursor_local_x - anchor_x)
+                left = max(0, min(left, max(0, int(self.width()) - width)))
+            else:
+                left = int(close_btn.x() - baseline_gap)
+            return left, width
+
+        post_release_left = int(close_btn.x() - baseline_gap)
+        rect_left = int(rect.x() + 8)
+        rect_right = int(rect.right() - 4)
+        if (
+            not bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+            and (post_release_left < rect_left - 24 or post_release_left > rect_right + 24)
+        ):
+            width = int(baseline_width)
+            max_width = max(6, int(self.width()) - 8)
+            width = min(width, max_width)
+            left = max(0, min(post_release_left, max(0, int(self.width()) - width)))
+            return left, width
+
+        left = int(close_btn.x() - baseline_gap)
+        right = int(close_btn.x() - 8)
+        min_left = rect.x() + 8
+        max_right = rect.right() - 4
+        left = max(min_left, min(left, max_right - 6))
+        right = max(left + 6, min(right, max_right))
+        width = max(6, right - left)
+        if width > self._title_width_by_identity.get(identity_key, 0):
+            self._title_width_by_identity[identity_key] = width
+        return left, width
+
+    def _position_close_button_for_overlay(
+        self,
+        *,
+        index: int,
+        overlay_left: int,
+        rect: QRect,
+        max_step: Optional[int] = None,
+    ) -> Optional[int]:
+        identity = self.tabData(index)
+        if identity is None:
+            return None
+        identity_key = int(identity)
+        close_btn = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
+        if close_btn is None or not close_btn.isVisible():
+            return None
+        baseline_gap = self._title_gap_by_identity.get(identity_key)
+        if baseline_gap is None:
+            baseline_gap = int(close_btn.x() - (rect.x() + 20))
+            baseline_gap = max(18, baseline_gap)
+            self._title_gap_by_identity[identity_key] = baseline_gap
+        target_x = int(overlay_left + baseline_gap)
+        max_x = max(0, int(self.width()) - int(close_btn.width()))
+        target_x = max(0, min(target_x, max_x))
+        if max_step is not None:
+            step = max(1, int(max_step))
+            prev_x = int(close_btn.x())
+            if abs(target_x - prev_x) > step:
+                target_x = int(prev_x + (step if target_x > prev_x else -step))
+        target_y = int(rect.y() + max(0, (rect.height() - close_btn.height()) // 2))
+        close_btn.move(target_x, target_y)
+        close_btn.raise_()
+        return identity_key
+
+    def _restore_close_button_position(self, identity: int) -> None:
+        index = self._index_for_identity(identity)
+        if index < 0:
+            return
+        close_btn = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
+        if close_btn is None or not close_btn.isVisible():
+            return
+        rect = self.tabRect(index)
+        baseline_gap = self._title_gap_by_identity.get(int(identity))
+        if baseline_gap is None:
+            return
+        default_x = int(rect.x() + 20 + baseline_gap)
+        max_x = max(0, int(self.width()) - int(close_btn.width()))
+        default_x = max(0, min(default_x, max_x))
+        default_y = int(rect.y() + max(0, (rect.height() - close_btn.height()) // 2))
+        close_btn.move(default_x, default_y)
+
 
 class TabWorkspaceController(QObject):
     _DROP_TARGET_TOP_SLOP_PX = 4
     _DROP_TARGET_SIDE_SLOP_PX = 8
     # Keep a generous lower hit area so fast vertical moves do not bounce a
     # dragged tab in/out of floating mode while crossing window borders.
-    _DROP_TARGET_BOTTOM_SLOP_PX = 120
-    _DROP_TARGET_STICKY_BOTTOM_SLOP_PX = 120
-    _EXTERNAL_DRAG_INDEX_HYSTERESIS_PX = 10
+    _DROP_TARGET_BOTTOM_SLOP_PX = 40
+    _DROP_TARGET_STICKY_BOTTOM_SLOP_PX = 40
+    _EXTERNAL_DRAG_INDEX_HYSTERESIS_PX = 2
+    _EXTERNAL_DRAG_CURSOR_POLL_MS = 16
 
     def __init__(self) -> None:
         super().__init__()
@@ -248,6 +656,8 @@ class TabWorkspaceController(QObject):
         self._home_widget: Optional[QWidget] = None
         self._external_drag: Optional[_ExternalTabDragState] = None
         self._drag_filter_installed: bool = False
+        self._drag_cursor_poll_timer: Optional[QTimer] = None
+        self._drag_cursor_poll_last_pos: Optional[QPoint] = None
         self._detached_window_factory: Optional[Callable[[], WorkspaceWindow]] = None
         self._debug_log_path = Path(__file__).resolve().parents[1] / "debug" / "tab_workspace.log"
         self._drag_trace_enabled = os.environ.get("DMT_TAB_DRAG_DEBUG", "").strip() == "1"
@@ -498,7 +908,13 @@ class TabWorkspaceController(QObject):
             source_window.close()
         return True
 
-    def detach_widget_to_new_window(self, widget: QWidget, global_pos: QPoint) -> Optional[WorkspaceWindow]:
+    def detach_widget_to_new_window(
+        self,
+        widget: QWidget,
+        global_pos: QPoint,
+        *,
+        hot_spot: Optional[QPoint] = None,
+    ) -> Optional[WorkspaceWindow]:
         if not self.can_detach_widget(widget):
             return None
         if self._detached_window_factory is None:
@@ -519,6 +935,22 @@ class TabWorkspaceController(QObject):
             if hasattr(new_window, "close"):
                 new_window.close()
             return None
+        if hot_spot is not None:
+            tabs = new_window.workspace_tabs()
+            index = tabs.indexOf(widget)
+            if index != -1:
+                bar = tabs.tabBar()
+                rect = bar.tabRect(index)
+                if rect.width() > 0 and rect.height() > 0:
+                    clamped_hot = QPoint(
+                        max(1, min(int(hot_spot.x()), max(1, rect.width() - 1))),
+                        max(1, min(int(hot_spot.y()), max(1, rect.height() - 1))),
+                    )
+                    actual_global = bar.mapToGlobal(rect.topLeft() + clamped_hot)
+                    dx = int(global_pos.x() - actual_global.x())
+                    dy = int(global_pos.y() - actual_global.y())
+                    if dx != 0 or dy != 0:
+                        new_window.move(new_window.x() + dx, new_window.y() + dy)
         self._debug_log("detach_widget", key=str(self.key_by_widget.get(widget, "")))
         return new_window
 
@@ -582,18 +1014,27 @@ class TabWorkspaceController(QObject):
         title = source_tabs.tabText(source_index) if source_index != -1 else self.title_by_widget.get(widget, "")
         tab_rect = source_tabs.tabBar().tabRect(source_index)
         ghost = _FloatingTabGhost(str(title or ""), tab_rect.size())
-        centered_hot_spot = QPoint(max(1, ghost.width() // 2), max(1, ghost.height() // 2))
+        if hot_spot is not None:
+            hot_x = int(max(1, min(int(hot_spot.x()), ghost.width() - 1)))
+            hot_y = int(max(1, min(int(hot_spot.y()), ghost.height() - 1)))
+            drag_hot_spot = QPoint(hot_x, hot_y)
+        else:
+            drag_hot_spot = QPoint(max(1, ghost.width() // 2), max(1, ghost.height() // 2))
         self._external_drag = _ExternalTabDragState(
             widget=widget,
             title=str(title or ""),
             source_window=source_window,
             current_host_window=source_window,
-            hot_spot=centered_hot_spot,
+            hot_spot=drag_hot_spot,
             ghost=ghost,
+            cursor_polling=hot_spot is not None,
         )
         self._set_external_drag_width_lock(True)
         QApplication.setOverrideCursor(Qt.CursorShape.ClosedHandCursor)
         self._ensure_drag_event_filter()
+        self._set_external_drag_cursor_polling(
+            bool(self._external_drag.cursor_polling)
+        )
         self.update_external_tab_drag(global_pos)
         self._drag_trace(
             "drag_start_created",
@@ -601,8 +1042,8 @@ class TabWorkspaceController(QObject):
             widget=self._widget_label(widget),
             ghost_w=ghost.width(),
             ghost_h=ghost.height(),
-            hot_x=centered_hot_spot.x(),
-            hot_y=centered_hot_spot.y(),
+            hot_x=drag_hot_spot.x(),
+            hot_y=drag_hot_spot.y(),
         )
         self._debug_log("drag_begin", key=str(self.key_by_widget.get(widget, "")))
         return True
@@ -662,10 +1103,23 @@ class TabWorkspaceController(QObject):
                 raw_target_index=raw_target_index,
                 target_index=target_index,
             )
-            # Keep ghost visible while hovering tab bars so drag motion remains
-            # continuous instead of looking slot-by-slot discrete.
-            self._show_drag_ghost(state, global_pos)
+            attached_owner = self.window_by_widget.get(state.widget)
+            if attached_owner is target_window:
+                self._set_external_drag_overlay_for_bar(
+                    target_bar,
+                    state.widget,
+                    global_pos,
+                    hot_x=state.hot_spot.x(),
+                )
+            else:
+                self._clear_external_drag_overlays()
+            # Hide the floating ghost while a real tab preview is attached.
+            if self.window_by_widget.get(state.widget) is not None:
+                self._hide_drag_ghost(state)
+            else:
+                self._show_drag_ghost(state, global_pos)
             return
+        self._clear_external_drag_overlays()
         state.last_target_window = None
         state.last_target_index = None
         if current_owner is not None:
@@ -705,7 +1159,11 @@ class TabWorkspaceController(QObject):
         moved = False
         current_owner = self.window_by_widget.get(state.widget)
         if target_bar is None and detach_on_invalid_drop:
-            detached = self.detach_widget_to_new_window(state.widget, global_pos)
+            detached = self.detach_widget_to_new_window(
+                state.widget,
+                global_pos,
+                hot_spot=state.hot_spot,
+            )
             moved = detached is not None
             if moved and detached is not None:
                 self.focus_widget(detached, state.widget)
@@ -716,8 +1174,10 @@ class TabWorkspaceController(QObject):
                 self._debug_log("drag_attach", key=str(self.key_by_widget.get(state.widget, "")))
         self._hide_drag_ghost(state)
         self._destroy_drag_ghost(state)
+        self._clear_external_drag_overlays()
         self._set_external_drag_width_lock(False)
         QApplication.restoreOverrideCursor()
+        self._set_external_drag_cursor_polling(False)
         self._external_drag = None
         self._remove_drag_event_filter()
         self._drag_trace(
@@ -752,14 +1212,16 @@ class TabWorkspaceController(QObject):
         local_x = target_bar.mapFromGlobal(global_pos).x()
         margin = int(self._EXTERNAL_DRAG_INDEX_HYSTERESIS_PX)
 
-        # Demand a small overshoot before switching adjacent insertion slots so
-        # repeated sampling at the same point cannot flap between two indices.
+        # Apply only a tiny hysteresis around the same quarter-width trigger
+        # used by insertion index, so attached external drag feels like native.
         if clamped == previous_index + 1 and count > 0 and 0 <= previous_index < count:
-            threshold = target_bar.tabRect(previous_index).center().x() + margin
+            prev_rect = target_bar.tabRect(previous_index)
+            threshold = prev_rect.left() + max(1, int(prev_rect.width() * 0.25)) + margin
             if local_x < threshold:
                 stable_index = previous_index
-        elif clamped + 1 == previous_index and count > 0 and 0 <= clamped < count:
-            threshold = target_bar.tabRect(clamped).center().x() - margin
+        elif clamped + 1 == previous_index and count > 0 and 0 <= previous_index < count:
+            prev_rect = target_bar.tabRect(previous_index)
+            threshold = prev_rect.left() + max(1, int(prev_rect.width() * 0.25)) - margin
             if local_x > threshold:
                 stable_index = previous_index
 
@@ -823,6 +1285,44 @@ class TabWorkspaceController(QObject):
             app.removeEventFilter(self)
         self._drag_filter_installed = False
 
+    def _set_external_drag_cursor_polling(self, enabled: bool) -> None:
+        if not enabled:
+            timer = self._drag_cursor_poll_timer
+            if timer is not None and timer.isActive():
+                timer.stop()
+            self._drag_cursor_poll_last_pos = None
+            return
+
+        timer = self._drag_cursor_poll_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(False)
+            timer.setInterval(self._EXTERNAL_DRAG_CURSOR_POLL_MS)
+            timer.timeout.connect(self._poll_external_drag_cursor)
+            self._drag_cursor_poll_timer = timer
+        self._drag_cursor_poll_last_pos = None
+        if not timer.isActive():
+            timer.start()
+
+    def _poll_external_drag_cursor(self) -> None:
+        state = self._external_drag
+        if state is None or not state.cursor_polling:
+            self._set_external_drag_cursor_polling(False)
+            return
+        global_pos = QPoint(QCursor.pos())
+        if (
+            self._drag_cursor_poll_last_pos is not None
+            and global_pos == self._drag_cursor_poll_last_pos
+        ):
+            return
+        self._drag_cursor_poll_last_pos = QPoint(global_pos)
+        self._drag_trace(
+            "drag_poll_cursor",
+            global_x=global_pos.x(),
+            global_y=global_pos.y(),
+        )
+        self.update_external_tab_drag(global_pos)
+
     def _event_global_pos(self, event: QEvent) -> Optional[QPoint]:
         global_position = getattr(event, "globalPosition", None)
         if callable(global_position):
@@ -831,6 +1331,32 @@ class TabWorkspaceController(QObject):
         if callable(global_pos):
             return global_pos()
         return None
+
+    def _set_external_drag_overlay_for_bar(
+        self,
+        target_bar: DetachableTabBar,
+        widget: QWidget,
+        global_pos: QPoint,
+        *,
+        hot_x: int,
+    ) -> None:
+        identity = int(id(widget))
+        for window in list(self.registered_windows):
+            tabs = window.workspace_tabs()
+            bar = tabs.tabBar()
+            if not isinstance(bar, DetachableTabBar):
+                continue
+            if bar is target_bar:
+                bar.set_external_drag_overlay(identity, global_pos, hot_x=hot_x)
+            else:
+                bar.clear_external_drag_overlay()
+
+    def _clear_external_drag_overlays(self) -> None:
+        for window in list(self.registered_windows):
+            tabs = window.workspace_tabs()
+            bar = tabs.tabBar()
+            if isinstance(bar, DetachableTabBar):
+                bar.clear_external_drag_overlay()
 
     def _show_drag_ghost(self, state: _ExternalTabDragState, global_pos: QPoint) -> None:
         ghost = state.ghost
@@ -931,22 +1457,15 @@ class TabWorkspaceController(QObject):
                 continue
             top_left = bar.mapToGlobal(QPoint(0, 0))
             global_rect = QRect(top_left, bar.size())
-            strip_width = bar.width()
-            if strip_width <= 0:
+            strip_rect = self._drop_target_strip_rect(
+                window,
+                tabs,
+                bar,
+                bottom_slop_px=self._DROP_TARGET_BOTTOM_SLOP_PX,
+            )
+            if strip_rect.width() <= 0:
                 scan_parts.append(f"{self._window_label(window)}:zero-width")
                 continue
-            strip_top_left = bar.mapToGlobal(QPoint(0, 0))
-            strip_origin = strip_top_left - QPoint(
-                self._DROP_TARGET_SIDE_SLOP_PX,
-                self._DROP_TARGET_TOP_SLOP_PX,
-            )
-            strip_height = (
-                bar.height() + self._DROP_TARGET_TOP_SLOP_PX + self._DROP_TARGET_BOTTOM_SLOP_PX
-            )
-            strip_rect = QRect(
-                strip_origin,
-                QSize(strip_width + (2 * self._DROP_TARGET_SIDE_SLOP_PX), max(1, strip_height)),
-            )
             in_global = global_rect.contains(global_pos)
             in_strip = strip_rect.contains(global_pos)
             scan_parts.append(
@@ -983,21 +1502,14 @@ class TabWorkspaceController(QObject):
             return None
         if not bar.isVisible():
             return None
-        strip_width = bar.width()
-        if strip_width <= 0:
+        sticky_rect = self._drop_target_strip_rect(
+            owner_window,
+            tabs,
+            bar,
+            bottom_slop_px=self._DROP_TARGET_STICKY_BOTTOM_SLOP_PX,
+        )
+        if sticky_rect.width() <= 0:
             return None
-        strip_top_left = bar.mapToGlobal(QPoint(0, 0))
-        strip_origin = strip_top_left - QPoint(
-            self._DROP_TARGET_SIDE_SLOP_PX,
-            self._DROP_TARGET_TOP_SLOP_PX,
-        )
-        strip_height = (
-            bar.height() + self._DROP_TARGET_TOP_SLOP_PX + self._DROP_TARGET_STICKY_BOTTOM_SLOP_PX
-        )
-        sticky_rect = QRect(
-            strip_origin,
-            QSize(strip_width + (2 * self._DROP_TARGET_SIDE_SLOP_PX), max(1, strip_height)),
-        )
         if sticky_rect.contains(global_pos):
             self._drag_trace(
                 "target_lookup_sticky_owner",
@@ -1007,6 +1519,34 @@ class TabWorkspaceController(QObject):
             )
             return bar
         return None
+
+    def _use_full_tab_strip_drop_target_width(self, window: WorkspaceWindow) -> bool:
+        _ = window
+        return True
+
+    def _drop_target_strip_rect(
+        self,
+        window: WorkspaceWindow,
+        tabs: QTabWidget,
+        bar: QTabBar,
+        *,
+        bottom_slop_px: int,
+    ) -> QRect:
+        strip_top_left = bar.mapToGlobal(QPoint(0, 0))
+        strip_width = max(1, int(bar.width()))
+        if self._use_full_tab_strip_drop_target_width(window):
+            tabs_top_left = tabs.mapToGlobal(QPoint(0, 0))
+            strip_top_left = QPoint(tabs_top_left.x(), strip_top_left.y())
+            strip_width = max(strip_width, int(tabs.width()))
+        strip_origin = strip_top_left - QPoint(
+            self._DROP_TARGET_SIDE_SLOP_PX,
+            self._DROP_TARGET_TOP_SLOP_PX,
+        )
+        strip_height = bar.height() + self._DROP_TARGET_TOP_SLOP_PX + int(bottom_slop_px)
+        return QRect(
+            strip_origin,
+            QSize(strip_width + (2 * self._DROP_TARGET_SIDE_SLOP_PX), max(1, strip_height)),
+        )
 
     def _set_external_drag_width_lock(self, enabled: bool) -> None:
         for window in list(self.registered_windows):
@@ -1052,6 +1592,13 @@ class TabWorkspaceController(QObject):
             return
         if bar.expanding():
             bar.setExpanding(False)
+        target_width = max(0, int(tabs.width()))
+        if target_width <= 0:
+            return
+        if bar.minimumWidth() != target_width or bar.maximumWidth() != target_width:
+            bar.setMinimumWidth(target_width)
+            bar.setMaximumWidth(target_width)
+            bar.updateGeometry()
 
     def _debug_log(self, event: str, **fields: object) -> None:
         if os.environ.get("DMT_TEST_MODE", "").strip() != "1":

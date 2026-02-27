@@ -1172,10 +1172,6 @@ def player_sheets_storage_path() -> Path:
     return player_sheets_cache_dir() / "character_sheets.json"
 
 
-def player_sheets_storage_dir() -> Path:
-    return Path(default_sheet_save_dir()) / "characters"
-
-
 def player_sheets_cache_dir() -> Path:
     return Path(default_sheet_save_dir()) / "cache" / "characters"
 
@@ -1814,19 +1810,6 @@ def resolve_selection(options: Iterable[str], value: Optional[str]) -> Optional[
     if value and value in options:
         return value
     return None
-
-
-def coerce_hierarchy_selection(
-    world_data: list[dict],
-    world: Optional[str],
-    campaign: Optional[str],
-    group: Optional[str],
-) -> tuple[Optional[str], Optional[str]]:
-    campaigns = list_campaigns(world_data, world)
-    campaign = resolve_selection(campaigns, campaign)
-    groups = list_groups(world_data, world, campaign)
-    group = resolve_selection(groups, group)
-    return campaign, group
 
 
 def matches_filters(

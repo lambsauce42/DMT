@@ -97,10 +97,6 @@ def trash_json_path() -> str:
     return str(dnd_saves_dir() / "trash.json")
 
 
-def navigation_trash_path() -> Path:
-    return dnd_saves_dir() / "trash" / "navigation_trash.json"
-
-
 def navigation_json_path() -> Path:
     return dnd_saves_dir() / "navigation.json"
 

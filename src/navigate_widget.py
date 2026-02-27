@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEasingCurve, QPropertyAnimation, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -30,6 +30,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    import shiboken6
+except Exception:  # pragma: no cover - optional runtime guard
+    shiboken6 = None
 
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -642,6 +647,7 @@ class CollapsibleSection(QWidget):
         self._animation.setDuration(self._duration_ms)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._animation.finished.connect(self._on_animation_finished)
+        self.destroyed.connect(self._on_destroyed)
 
     @property
     def expanded(self) -> bool:
@@ -687,6 +693,23 @@ class CollapsibleSection(QWidget):
         else:
             self._content.setMaximumHeight(0)
 
+    def _on_destroyed(self, *_args) -> None:
+        self._dispose_animation()
+
+    def _dispose_animation(self) -> None:
+        try:
+            self._animation.stop()
+        except Exception:
+            pass
+        try:
+            self._animation.finished.disconnect(self._on_animation_finished)
+        except Exception:
+            pass
+        try:
+            self._animation.setTargetObject(None)
+        except Exception:
+            pass
+
     def set_context_actions(
         self,
         edit_action,
@@ -699,6 +722,7 @@ class CollapsibleSection(QWidget):
 class NavigateContentWidget(QWidget):
     def __init__(self, show_worlds_header: bool = True) -> None:
         super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._show_worlds_header = show_worlds_header
         self._launch_session_callback: Optional[Callable[[str, str, str], None]] = None
         self._icon_paths = _list_icon_paths()
@@ -1594,7 +1618,25 @@ class NavigateContentWidget(QWidget):
             item = self._layout.takeAt(0)
             widget = item.widget()
             if widget:
+                for section in widget.findChildren(CollapsibleSection):
+                    section._dispose_animation()
+                if isinstance(widget, CollapsibleSection):
+                    widget._dispose_animation()
+                if shiboken6 is not None:
+                    try:
+                        if shiboken6.isValid(widget):
+                            shiboken6.delete(widget)
+                            continue
+                    except Exception:
+                        pass
                 widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, 0)
+
+    def closeEvent(self, event) -> None:
+        self._clear_layout()
+        self.world_sections = []
+        self.worlds_section = None
+        super().closeEvent(event)
 
     def _rebuild(self, expansion_state: Optional[dict] = None) -> None:
         self._clear_layout()
@@ -1747,6 +1789,7 @@ class NavigateContentWidget(QWidget):
 class NavigateWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setMinimumSize(720, 480)
         self._auto_expand_done = False
 
@@ -1772,3 +1815,11 @@ class NavigateWidget(QWidget):
         if not self._auto_expand_done and self._worlds_section is not None:
             self._auto_expand_done = True
             self._worlds_section.set_expanded(True, animate=True)
+
+    def closeEvent(self, event) -> None:
+        if hasattr(self, "_content") and self._content is not None:
+            try:
+                self._content.close()
+            except Exception:
+                pass
+        super().closeEvent(event)

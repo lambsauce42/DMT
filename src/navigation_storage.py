@@ -248,10 +248,10 @@ def save_navigation_world_data(world_data: list[dict], *, base_dir: Path | None 
                     },
                 )
 
-    for directory, extension in (
-        (_worlds_dir(base_dir=base_dir), WORLD_EXTENSION),
-        (_campaigns_dir(base_dir=base_dir), CAMPAIGN_EXTENSION),
-        (_groups_dir(base_dir=base_dir), GROUP_EXTENSION),
+    for directory, extension, expected_format in (
+        (_worlds_dir(base_dir=base_dir), WORLD_EXTENSION, WORLD_FORMAT),
+        (_campaigns_dir(base_dir=base_dir), CAMPAIGN_EXTENSION, CAMPAIGN_FORMAT),
+        (_groups_dir(base_dir=base_dir), GROUP_EXTENSION, GROUP_FORMAT),
     ):
         for existing in directory.glob(f"*{extension}"):
             try:
@@ -259,6 +259,11 @@ def save_navigation_world_data(world_data: list[dict], *, base_dir: Path | None 
             except Exception:
                 resolved = existing
             if resolved in expected:
+                continue
+            info = read_dmt_package_info(existing)
+            if not isinstance(info, dict):
+                continue
+            if str(info.get("format") or "") != expected_format:
                 continue
             try:
                 existing.unlink()

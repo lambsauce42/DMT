@@ -24,6 +24,7 @@ class TerminalSession:
         base_dir = cwd if cwd else os.getcwd()
         expanded = os.path.expandvars(os.path.expanduser(base_dir))
         self._cwd = os.path.abspath(expanded)
+        self._cwd_display = self._format_prompt_cwd(self._cwd, base_dir)
         self._shell_kind, self._shell_executable = self._resolve_shell(shell_executable)
         self._debug_log(f"session-start cwd={self._cwd} shell_kind={self._shell_kind} shell={self._shell_executable}")
 
@@ -33,7 +34,7 @@ class TerminalSession:
 
     @property
     def prompt(self) -> str:
-        return f"{self._cwd} >"
+        return f"{self._cwd_display} >"
 
     def run_command(self, command: str, include_prompt_echo: bool = True) -> List[TerminalLine]:
         trimmed = command.strip()
@@ -51,6 +52,11 @@ class TerminalSession:
         cd_result = self._try_change_directory(trimmed)
         if cd_result is not None:
             lines.extend(cd_result)
+            return lines
+
+        pwd_result = self._try_native_pwd(trimmed)
+        if pwd_result is not None:
+            lines.extend(pwd_result)
             return lines
 
         lines.extend(self._run_shell_command(trimmed))
@@ -83,8 +89,14 @@ class TerminalSession:
             return [TerminalLine(f"cd: no such directory: {target}", is_error=True)]
 
         self._cwd = new_dir
+        self._cwd_display = self._format_prompt_cwd(new_dir, target)
         self._debug_log(f"cd updated cwd={self._cwd}")
         return []
+
+    def _try_native_pwd(self, command: str) -> List[TerminalLine] | None:
+        if command != "pwd":
+            return None
+        return [TerminalLine(self._cwd_display)]
 
     def _run_shell_command(self, command: str) -> List[TerminalLine]:
         args = self._build_shell_args(command)
@@ -164,6 +176,15 @@ class TerminalSession:
         if self._shell_executable and self._shell_kind == "cmd":
             return [self._shell_executable, "/C", command]
         return command
+
+    @staticmethod
+    def _format_prompt_cwd(cwd: str, raw_input: str) -> str:
+        if os.name != "nt":
+            return cwd
+        token = str(raw_input or "")
+        if "/" in token and "\\" not in token:
+            return cwd.replace("\\", "/")
+        return cwd
 
     def _debug_log(self, message: str) -> None:
         try:

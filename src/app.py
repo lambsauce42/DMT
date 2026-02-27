@@ -704,15 +704,15 @@ QTabBar::tab {{
     border-bottom: 2px solid transparent;
     padding: 10px 20px;
     margin-right: 8px;
-    color: #8b949e;
+    color: transparent;
     font-weight: 600;
     font-size: 13px;
 }}
 QTabBar::tab:hover {{
-    color: #e6edf3;
+    color: transparent;
 }}
 QTabBar::tab:selected {{
-    color: #58a6ff;
+    color: transparent;
     border-bottom: 2px solid #58a6ff;
 }}
 QTabBar::close-button {{
@@ -1697,10 +1697,6 @@ class HomeWidget(QWidget):
         main_layout.setStretch(1, 1)
 
         self._set_breadcrumbs(["Navigation"])
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._sync_bottom_panel_sizes()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

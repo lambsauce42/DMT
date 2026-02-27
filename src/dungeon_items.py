@@ -22,6 +22,20 @@ from PySide6.QtGui import QPen, QColor, QPainter, QPainterPath, QPolygonF, QBrus
 from PySide6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
 from dungeon_constants import GRID_SIZE, FLOOR_COLOR, WALL_COLOR, WALL_WIDTH, ROLE_LABEL, ROLE_ENTITY_ID
 
+try:
+    import shiboken6
+except Exception:  # pragma: no cover - optional runtime guard
+    shiboken6 = None
+
+
+def _qt_object_is_valid(obj: object) -> bool:
+    if shiboken6 is None:
+        return True
+    try:
+        return bool(shiboken6.isValid(obj))
+    except Exception:
+        return False
+
 
 class FogItem(QGraphicsPathItem):
     """
@@ -666,6 +680,8 @@ class PingItem(QGraphicsEllipseItem):
         self.restart_animation()
 
     def restart_animation(self):
+        if not _qt_object_is_valid(self):
+            return
         self._finished = False
         self.setOpacity(1.0)
         self.setRect(-1, -1, 2, 2)
@@ -673,9 +689,22 @@ class PingItem(QGraphicsEllipseItem):
         self.anim.start()
 
     def stop_animation(self):
-        self.anim.stop()
+        try:
+            self.anim.stop()
+        except RuntimeError:
+            return
+
+    def itemChange(self, change, value):
+        if (
+            change == QGraphicsItem.GraphicsItemChange.ItemSceneHasChanged
+            and value is None
+        ):
+            self.stop_animation()
+        return super().itemChange(change, value)
 
     def _on_anim_value_changed(self, value: float):
+        if not _qt_object_is_valid(self):
+            return
         # Outer circle
         outer_radius = value * self._max_radius
         self.setRect(-outer_radius, -outer_radius, outer_radius * 2, outer_radius * 2)
@@ -691,9 +720,12 @@ class PingItem(QGraphicsEllipseItem):
         self.update()
 
     def _on_anim_finished(self):
+        if not _qt_object_is_valid(self):
+            return
         self._finished = True
-        if self.scene():
-            self.scene().removeItem(self)
+        scene = self.scene()
+        if scene is not None:
+            scene.removeItem(self)
 
     def paint(self, painter: QPainter, option, widget=None):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
