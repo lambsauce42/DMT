@@ -121,6 +121,7 @@ _KNOWN_TEST_FILES = frozenset(
         "test_session_file_pool_persistence.py",
         "test_session_file_pool_preview.py",
         "test_session_text_links.py",
+        "test_storage_load_resilience.py",
         "test_suggest_greedy_is_deterministic.py",
         "test_target_xp_sums.py",
         "test_terminal_logic.py",

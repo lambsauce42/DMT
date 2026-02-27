@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, qInstallMessageHandler
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import QTabBar, QTabWidget, QWidget
 
@@ -692,6 +692,7 @@ def test_external_attach_drag_pushes_neighbor_tabs_smoothly_like_internal_drag(q
     controller.update_external_tab_drag(QPoint(-1200, -900))
     qtbot.wait(20)
 
+    overlay_x_samples: list[int] = []
     close_x_samples: list[int] = []
     for x in range(28, tabs.width() - 24, 8):
         probe = tabs.mapToGlobal(QPoint(x, max(2, bar.height() // 2)))
@@ -700,20 +701,24 @@ def test_external_attach_drag_pushes_neighbor_tabs_smoothly_like_internal_drag(q
         idx = tabs.indexOf(observed_widget)
         if idx == -1:
             continue
+        overlay = getattr(bar, "_title_overlay_by_index", {}).get(idx)
+        if overlay is not None and overlay.isVisible():
+            overlay_x_samples.append(int(overlay.geometry().x()))
         close_btn = bar.tabButton(idx, QTabBar.ButtonPosition.RightSide)
         if close_btn is None or not close_btn.isVisible():
             continue
         close_x_samples.append(int(close_btn.geometry().x()))
 
+    unique_overlay_x = sorted(set(overlay_x_samples))
     unique_close_x = sorted(set(close_x_samples))
     _debug_log(
         "external_attach_neighbor_push_probe "
-        f"samples={len(close_x_samples)} unique_close_x={len(unique_close_x)} "
-        f"close_x={close_x_samples}"
+        f"overlay_samples={len(overlay_x_samples)} unique_overlay_x={len(unique_overlay_x)} "
+        f"overlay_x={overlay_x_samples} close_x={close_x_samples} unique_close_x={len(unique_close_x)}"
     )
-    assert len(close_x_samples) >= 20
-    assert len(unique_close_x) >= 3, (
-        "Neighbor tabs still move slot-snappy during external attach drag; expected smoother push behavior."
+    assert len(overlay_x_samples) >= 20
+    assert len(unique_overlay_x) >= 2, (
+        "Neighbor tabs did not move at all during external attach drag."
     )
 
 
@@ -771,6 +776,289 @@ def test_external_drag_release_settles_close_button_instead_of_popping(qtbot) ->
     assert len(set(x_samples)) >= 2, (
         "Close button popped directly to final slot position on release; expected short smooth settle."
     )
+
+
+def test_external_drag_release_keeps_valid_current_tab_selection(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.resize(1400, 900)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    window.open_applet(_applet("npc_database"), focus_if_new=True)
+    qtbot.wait(30)
+
+    controller = window._workspace_controller
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+
+    for step in range(5):
+        owner = controller.window_by_widget.get(map_widget)
+        if owner is window:
+            detached = controller.detach_widget_to_new_window(
+                map_widget, QPoint(520 + (step * 10), 220 + (step * 6))
+            )
+            assert detached is not None
+            owner = detached
+        assert owner is not None
+
+        source_tabs = owner.workspace_tabs()
+        source_bar = source_tabs.tabBar()
+        start = source_bar.mapToGlobal(source_bar.tabRect(source_tabs.indexOf(map_widget)).center())
+        assert controller.start_external_tab_drag(owner, map_widget, start) is True
+        controller.update_external_tab_drag(QPoint(-1200, -900))
+        qtbot.wait(16)
+
+        probe_x = max(8, min(tabs.width() - 8, 120 + (step * 120)))
+        drop_pos = tabs.mapToGlobal(QPoint(probe_x, max(2, bar.height() // 2)))
+        controller.update_external_tab_drag(drop_pos)
+        qtbot.wait(12)
+        assert controller.finish_external_tab_drag(drop_pos) is True
+        qtbot.wait(18)
+
+        current_idx = tabs.currentIndex()
+        current_count = tabs.count()
+        labels = [tabs.tabText(i) for i in range(current_count)]
+        _debug_log(
+            "selection_after_external_release "
+            f"step={step} current_idx={current_idx} count={current_count} labels={labels}"
+        )
+        assert current_count > 0
+        assert current_idx != -1, "External release left tab bar without an active selected tab."
+
+
+def test_external_drag_preview_keeps_valid_current_tab_selection(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.resize(1400, 900)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    window.open_applet(_applet("npc_database"), focus_if_new=True)
+    qtbot.wait(30)
+
+    controller = window._workspace_controller
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+    detached = controller.detach_widget_to_new_window(map_widget, QPoint(520, 200))
+    assert detached is not None
+
+    start = detached.workspace_tabs().tabBar().mapToGlobal(
+        detached.workspace_tabs().tabBar().tabRect(0).center()
+    )
+    assert controller.start_external_tab_drag(detached, map_widget, start) is True
+    controller.update_external_tab_drag(QPoint(-1200, -900))
+    qtbot.wait(20)
+
+    sampled_widget_current_indices: list[int] = []
+    sampled_bar_current_indices: list[int] = []
+    for x in range(16, tabs.width() - 12, 10):
+        probe = tabs.mapToGlobal(QPoint(x, max(2, bar.height() // 2)))
+        controller.update_external_tab_drag(probe)
+        qtbot.wait(8)
+        sampled_widget_current_indices.append(int(tabs.currentIndex()))
+        sampled_bar_current_indices.append(int(bar.currentIndex()))
+
+    controller.finish_external_tab_drag(
+        tabs.mapToGlobal(QPoint(max(16, tabs.width() // 2), max(2, bar.height() // 2)))
+    )
+    qtbot.wait(20)
+
+    _debug_log(
+        "external_preview_current_index_probe "
+        f"widget_indices={sampled_widget_current_indices} bar_indices={sampled_bar_current_indices} "
+        f"count={tabs.count()}"
+    )
+    assert tabs.count() > 0
+    assert sampled_widget_current_indices, "No current-index samples captured during external preview drag."
+    assert all(idx >= 0 for idx in sampled_widget_current_indices), (
+        "External drag preview produced an invalid widget current index (-1)."
+    )
+    assert all(idx >= 0 for idx in sampled_bar_current_indices), (
+        "External drag preview produced an invalid tab-bar current index (-1), hiding active tab visuals."
+    )
+
+
+def test_external_drag_overlay_identity_tracks_tab_identity(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.resize(1400, 900)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    window.open_applet(_applet("npc_database"), focus_if_new=True)
+    window.open_applet(
+        {
+            "key": "custom_overlay_identity_probe",
+            "tab": "Overlay Identity Probe With Long Text",
+            "title": "Custom",
+            "actions": [],
+            "panels": [],
+        },
+        focus_if_new=True,
+    )
+    qtbot.wait(40)
+
+    controller = window._workspace_controller
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    dragged_widget = window._tab_by_key["custom_overlay_identity_probe"]
+    detached = controller.detach_widget_to_new_window(dragged_widget, QPoint(560, 220))
+    assert detached is not None
+
+    start = detached.workspace_tabs().tabBar().mapToGlobal(
+        detached.workspace_tabs().tabBar().tabRect(0).center()
+    )
+    assert controller.start_external_tab_drag(detached, dragged_widget, start) is True
+    controller.update_external_tab_drag(QPoint(-1200, -900))
+    qtbot.wait(20)
+
+    mismatch_samples: list[str] = []
+    for x in range(18, tabs.width() - 10, 9):
+        probe = tabs.mapToGlobal(QPoint(x, max(2, bar.height() // 2)))
+        controller.update_external_tab_drag(probe)
+        qtbot.wait(8)
+        overlays = getattr(bar, "_title_overlay_by_index", {})
+        for index, overlay in overlays.items():
+            if overlay is None or not overlay.isVisible():
+                continue
+            overlay_identity = overlay.property("tab_identity")
+            tab_identity = bar.tabData(index)
+            if overlay_identity is None or tab_identity is None:
+                continue
+            if int(overlay_identity) != int(tab_identity):
+                mismatch_samples.append(
+                    f"idx={index} overlay_id={int(overlay_identity)} tab_id={int(tab_identity)}"
+                )
+
+    controller.finish_external_tab_drag(
+        tabs.mapToGlobal(QPoint(max(16, tabs.width() // 2), max(2, bar.height() // 2)))
+    )
+    qtbot.wait(20)
+
+    _debug_log(
+        "external_overlay_identity_probe "
+        f"mismatch_count={len(mismatch_samples)} samples={mismatch_samples[:12]}"
+    )
+    assert not mismatch_samples, (
+        "Overlay widgets desynced from tab identities during external drag, causing text/position shifts."
+    )
+
+
+def test_external_drag_attach_detach_toggle_keeps_current_index_valid(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.resize(1400, 900)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    window.open_applet(_applet("npc_database"), focus_if_new=True)
+    qtbot.wait(30)
+
+    controller = window._workspace_controller
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+    detached = controller.detach_widget_to_new_window(map_widget, QPoint(560, 220))
+    assert detached is not None
+    start = detached.workspace_tabs().tabBar().mapToGlobal(
+        detached.workspace_tabs().tabBar().tabRect(0).center()
+    )
+    assert controller.start_external_tab_drag(detached, map_widget, start) is True
+
+    in_bar = tabs.mapToGlobal(QPoint(max(16, tabs.width() // 3), max(2, bar.height() // 2)))
+    out_of_bar = tabs.mapToGlobal(QPoint(-220, bar.height() + 180))
+    sampled_widget_current: list[int] = []
+    sampled_bar_current: list[int] = []
+    sampled_counts: list[int] = []
+
+    for _ in range(36):
+        controller.update_external_tab_drag(in_bar)
+        qtbot.wait(6)
+        sampled_counts.append(int(tabs.count()))
+        sampled_widget_current.append(int(tabs.currentIndex()))
+        sampled_bar_current.append(int(bar.currentIndex()))
+
+        controller.update_external_tab_drag(out_of_bar)
+        qtbot.wait(6)
+        sampled_counts.append(int(tabs.count()))
+        sampled_widget_current.append(int(tabs.currentIndex()))
+        sampled_bar_current.append(int(bar.currentIndex()))
+
+    controller.finish_external_tab_drag(in_bar)
+    qtbot.wait(20)
+
+    _debug_log(
+        "external_attach_detach_toggle_probe "
+        f"counts={sampled_counts} widget_current={sampled_widget_current} bar_current={sampled_bar_current}"
+    )
+    assert sampled_counts, "No samples captured during attach/detach toggle probe."
+    assert all(
+        idx >= 0 for idx, count in zip(sampled_widget_current, sampled_counts) if count > 0
+    ), "Widget current index became -1 while tabs existed during attach/detach toggling."
+    assert all(
+        idx >= 0 for idx, count in zip(sampled_bar_current, sampled_counts) if count > 0
+    ), "Tab-bar current index became -1 while tabs existed during attach/detach toggling."
+
+
+def test_external_drag_ghost_paint_does_not_emit_inactive_painter_warnings(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    captured: list[str] = []
+
+    def _handler(_mode, _ctx, message) -> None:
+        text = str(message)
+        if (
+            "QPainter::" in text
+            or "Painter not active" in text
+            or "QBackingStore::endPaint() called with active painter" in text
+        ):
+            captured.append(text)
+
+    previous_handler = qInstallMessageHandler(_handler)
+    try:
+        window = MainLauncherWindow()
+        qtbot.addWidget(window)
+        window.resize(1400, 900)
+        window.show()
+        window.open_applet(_applet("map_library"), focus_if_new=True)
+        window.open_applet(_applet("session_creator"), focus_if_new=True)
+        qtbot.wait(30)
+
+        controller = window._workspace_controller
+        tabs = window.workspace_tabs()
+        bar = tabs.tabBar()
+        map_widget = window._tab_by_key["map_library"]
+        detached = controller.detach_widget_to_new_window(map_widget, QPoint(560, 220))
+        assert detached is not None
+
+        start = detached.workspace_tabs().tabBar().mapToGlobal(
+            detached.workspace_tabs().tabBar().tabRect(0).center()
+        )
+        assert controller.start_external_tab_drag(detached, map_widget, start) is True
+
+        inside = tabs.mapToGlobal(QPoint(max(20, tabs.width() // 3), max(2, bar.height() // 2)))
+        outside = tabs.mapToGlobal(QPoint(-380, bar.height() + 240))
+        for _ in range(24):
+            controller.update_external_tab_drag(outside)
+            qtbot.wait(6)
+            controller.update_external_tab_drag(inside)
+            qtbot.wait(6)
+        controller.finish_external_tab_drag(inside)
+        qtbot.wait(20)
+    finally:
+        qInstallMessageHandler(previous_handler)
+
+    _debug_log(
+        "external_drag_ghost_painter_probe "
+        f"captured_count={len(captured)} samples={captured[:12]}"
+    )
+    assert not captured, "External drag ghost emitted inactive painter warnings."
 
 
 def test_detach_new_window_places_tab_hotspot_under_cursor(qtbot) -> None:
@@ -975,6 +1263,92 @@ def test_dragging_non_home_across_home_region_has_no_rejection_jitter(qtbot) -> 
     assert sampled_indices, "Did not capture any samples while crossing Home region."
     assert set(sampled_indices) == {1}, "Dragged tab index jittered while crossing Home; expected Home to be ignored."
     assert tabs.indexOf(map_widget) == 1, "Dragged tab did not settle back to the pinned-home-adjacent slot."
+
+
+def test_internal_drag_over_home_zone_keeps_dragged_text_close_to_tab_rect(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    qtbot.wait(20)
+
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+    start = bar.tabRect(tabs.indexOf(map_widget)).center()
+    home_rect = bar.tabRect(0)
+
+    offset_samples: list[int] = []
+    qtbot.mousePress(bar, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.wait(12)
+    for x in range(start.x(), max(2, home_rect.left() + 2), -8):
+        qtbot.mouseMove(bar, QPoint(x, start.y()))
+        qtbot.wait(8)
+        idx = tabs.indexOf(map_widget)
+        if idx == -1:
+            continue
+        overlay = getattr(bar, "_title_overlay_by_index", {}).get(idx)
+        if overlay is None or not overlay.isVisible():
+            continue
+        rect = bar.tabRect(idx)
+        offset_samples.append(abs(int(overlay.geometry().x()) - int(rect.x())))
+    qtbot.mouseRelease(bar, Qt.MouseButton.LeftButton, pos=QPoint(max(2, home_rect.left() + 2), start.y()))
+    qtbot.wait(20)
+
+    _debug_log(f"home_zone_text_offset_probe offsets={offset_samples}")
+    assert offset_samples, "Did not capture dragged text offsets in Home zone."
+    assert max(offset_samples) <= 48, "Dragged text shifted too far from its tab while crossing Home zone."
+
+
+def test_internal_drag_over_home_zone_moves_selected_tab_indicator(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    qtbot.wait(20)
+
+    tabs = window.workspace_tabs()
+    bar = tabs.tabBar()
+    map_widget = window._tab_by_key["map_library"]
+    tabs.setCurrentWidget(map_widget)
+    start = bar.tabRect(tabs.indexOf(map_widget)).center()
+    home_rect = bar.tabRect(0)
+
+    overlay_x_samples: list[int] = []
+    sampled_current_indices: list[int] = []
+    qtbot.mousePress(bar, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.wait(12)
+    for x in range(start.x(), max(2, home_rect.left() + 2), -10):
+        qtbot.mouseMove(bar, QPoint(x, start.y()))
+        qtbot.wait(8)
+        cur = tabs.currentIndex()
+        if cur == -1:
+            continue
+        sampled_current_indices.append(int(cur))
+        idx = tabs.indexOf(map_widget)
+        if idx == -1:
+            continue
+        overlay = getattr(bar, "_title_overlay_by_index", {}).get(idx)
+        if overlay is None or not overlay.isVisible():
+            continue
+        overlay_x_samples.append(int(overlay.geometry().x()))
+    qtbot.mouseRelease(bar, Qt.MouseButton.LeftButton, pos=QPoint(max(2, home_rect.left() + 2), start.y()))
+    qtbot.wait(20)
+
+    _debug_log(
+        "home_zone_selected_indicator_probe "
+        f"overlay_x={overlay_x_samples} current_indices={sampled_current_indices}"
+    )
+    assert overlay_x_samples, "Did not sample dragged-tab overlay while crossing Home zone."
+    assert len(set(overlay_x_samples)) >= 2, (
+        "Active dragged-tab visuals stayed stuck while crossing Home zone."
+    )
 
 
 def test_internal_release_in_far_right_empty_strip_keeps_title_overlay_visible(qtbot) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -329,7 +330,7 @@ def _load_dungeon_entries(base_dir: Path) -> list[_StoredEntry]:
                     kind="dungeon",
                     target_id=target_id,
                     name=name,
-                    collection_path=str(path.resolve()),
+                    collection_path=path.resolve().as_posix(),
                     collection_name=collection_name,
                 )
             )
@@ -365,11 +366,50 @@ def _load_item_entries(base_dir: Path) -> list[_StoredEntry]:
 
 
 def _load_character_entries(_base_dir: Path) -> list[_StoredEntry]:
-    # Player sheets storage has richer migration logic; rely on its loader directly.
-    from player_sheets import load_entries_from_storage, sheet_id_for_entry
+    from player_sheets import (
+        entry_from_dict,
+        load_entries_from_storage,
+        player_sheets_storage_path,
+        sheet_id_for_entry,
+    )
 
     output: list[_StoredEntry] = []
-    for entry in load_entries_from_storage():
+    base_dir = Path(_base_dir).expanduser().resolve()
+    default_base_dir = dnd_saves_dir().expanduser().resolve()
+    entries: list = []
+
+    if base_dir == default_base_dir:
+        # Keep existing behavior for the active save root.
+        entries = load_entries_from_storage()
+    else:
+        storage_path = base_dir / "characters" / player_sheets_storage_path().name
+        cache_storage_path = base_dir / "cache" / "characters" / player_sheets_storage_path().name
+        candidates = [cache_storage_path, storage_path]
+        loaded = False
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception as exc:
+                print(
+                    f"[WARN] Unable to read character suggestions from '{candidate}': {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            if not isinstance(raw, list):
+                continue
+            for payload in raw:
+                entry = entry_from_dict(payload)
+                if entry is None:
+                    continue
+                entries.append(entry)
+            loaded = True
+            break
+        if not loaded:
+            entries = load_entries_from_storage()
+
+    for entry in entries:
         target_id = str(sheet_id_for_entry(entry) or "").strip()
         name = str(getattr(entry, "name", "") or "").strip()
         if not target_id or not name:

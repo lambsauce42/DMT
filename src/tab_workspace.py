@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Protocol, Set
 
-from PySide6.QtCore import QEvent, QEventLoop, QObject, QPoint, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QPoint, QPointF, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QLabel, QTabBar, QTabWidget, QWidget
 
@@ -52,8 +52,9 @@ class _FloatingTabGhost(QWidget):
         self.resize(width, height)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
-        super().paintEvent(event)
         painter = QPainter(self)
+        if not painter.isActive():
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         fill = QColor(31, 111, 235, 120)
         border = QColor(88, 166, 255, 185)
@@ -96,9 +97,12 @@ class DetachableTabBar(QTabBar):
         self._title_overlay_by_index: Dict[int, QLabel] = {}
         self._title_gap_by_identity: Dict[int, int] = {}
         self._title_width_by_identity: Dict[int, int] = {}
+        self._external_smoothed_close_x_by_identity: Dict[int, int] = {}
         self._external_drag_identity: Optional[int] = None
         self._external_drag_global_pos: Optional[QPoint] = None
         self._external_drag_hot_x: int = 0
+        self._internal_drag_cursor_local_x: Optional[int] = None
+        self._internal_drag_hot_x: Optional[int] = None
         self._externally_repositioned_close_by_identity: Set[int] = set()
         self._settling_overlay_left_by_identity: Dict[int, float] = {}
         self._settling_overlay_start_ms_by_identity: Dict[int, int] = {}
@@ -118,6 +122,13 @@ class DetachableTabBar(QTabBar):
             self._press_index = self.tabAt(self._press_pos)
             identity = self.tabData(self._press_index) if self._press_index >= 0 else None
             self._press_identity = int(identity) if identity is not None else None
+            if self._press_index >= 0:
+                press_rect = self.tabRect(self._press_index)
+                self._internal_drag_hot_x = int(max(1, self._press_pos.x() - press_rect.x()))
+                self._internal_drag_cursor_local_x = int(self._press_pos.x())
+            else:
+                self._internal_drag_hot_x = None
+                self._internal_drag_cursor_local_x = None
             self._hover_index = -1
         super().mousePressEvent(event)
         self._sync_title_overlays()
@@ -126,22 +137,29 @@ class DetachableTabBar(QTabBar):
         self._press_index = -1
         self._press_identity = None
         self._press_pos = QPoint()
+        self._internal_drag_cursor_local_x = None
+        self._internal_drag_hot_x = None
         super().mouseReleaseEvent(event)
         self._sync_title_overlays()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        left_down = bool(event.buttons() & Qt.MouseButton.LeftButton) or bool(
+            QApplication.mouseButtons() & Qt.MouseButton.LeftButton
+        )
         dragging_with_left_button = (
-            self._press_index >= 0 and bool(event.buttons() & Qt.MouseButton.LeftButton)
+            self._press_index >= 0 and left_down
         )
         hover_index = -1 if dragging_with_left_button else self.tabAt(event.position().toPoint())
         if hover_index != self._hover_index:
             self._hover_index = hover_index
             self._sync_title_overlays()
         if not dragging_with_left_button:
+            self._internal_drag_cursor_local_x = None
             super().mouseMoveEvent(event)
             self._sync_title_overlays()
             return
         current_pos = event.position().toPoint()
+        self._internal_drag_cursor_local_x = int(current_pos.x())
         distance = (current_pos - self._press_pos).manhattanLength()
         threshold = max(3, min(int(QApplication.startDragDistance()), 4))
         self._controller._drag_trace(
@@ -172,6 +190,7 @@ class DetachableTabBar(QTabBar):
             return
         effective_drag_pos = QPoint(current_pos)
         home_zone_passthrough = False
+        home_zone_synth_x: Optional[int] = None
         if dragged_widget is not None and not self._controller.is_home_widget(dragged_widget):
             if self.count() > 0 and str(self.tabText(0)).strip().lower() == "home":
                 home_rect = self.tabRect(0)
@@ -188,15 +207,29 @@ class DetachableTabBar(QTabBar):
                 ):
                     # Treat Home as visually transparent while preserving pinned behavior.
                     home_zone_passthrough = True
+                    span = max(1, int(expanded_home_drag_block.width()))
+                    rel = float(current_pos.x() - expanded_home_drag_block.left()) / float(span)
+                    rel = max(0.0, min(1.0, rel))
+                    synth_range = max(10, min(36, max(12, ignore_guard)))
+                    home_zone_synth_x = int(home_rect.right() + 1 + int(round(rel * synth_range)))
+                    home_zone_synth_x = max(0, min(home_zone_synth_x, max(0, self.width() - 1)))
                     self._controller._drag_trace(
                         "bar_home_region_passthrough",
                         owner=self._controller._window_label(self._owner_window),
                         press_index=self._press_index,
                         cursor_x=current_pos.x(),
                         cursor_y=current_pos.y(),
-                        passthrough_x=current_pos.x(),
+                        passthrough_x=home_zone_synth_x,
                         guard_px=ignore_guard,
                     )
+        self._controller._sparse_drag_log(
+            "home_zone_state",
+            owner=self._controller._window_label(self._owner_window),
+            press_index=self._press_index,
+            zone=int(home_zone_passthrough),
+            cursor_b=int(current_pos.x() // 24),
+            current=self._tab_widget.currentIndex(),
+        )
         vertical_pull = 0
         if effective_drag_pos.y() < 0:
             vertical_pull = -effective_drag_pos.y()
@@ -218,7 +251,26 @@ class DetachableTabBar(QTabBar):
         )
         if vertical_pull < 24 and horizontal_pull < 24:
             if home_zone_passthrough:
-                event.accept()
+                if home_zone_synth_x is not None:
+                    synthetic = QMouseEvent(
+                        QEvent.Type.MouseMove,
+                        QPointF(float(home_zone_synth_x), float(current_pos.y())),
+                        QPointF(float(home_zone_synth_x), float(current_pos.y())),
+                        QPointF(
+                            float(self.mapToGlobal(QPoint(home_zone_synth_x, current_pos.y())).x()),
+                            float(self.mapToGlobal(QPoint(home_zone_synth_x, current_pos.y())).y()),
+                        ),
+                        event.button(),
+                        event.buttons(),
+                        event.modifiers(),
+                    )
+                    super().mouseMoveEvent(synthetic)
+                    if dragged_widget is not None:
+                        dragged_idx = self._tab_widget.indexOf(dragged_widget)
+                        if dragged_idx > 1:
+                            self.moveTab(dragged_idx, 1)
+                else:
+                    super().mouseMoveEvent(event)
                 self._sync_title_overlays()
                 return
             super().mouseMoveEvent(event)
@@ -253,6 +305,8 @@ class DetachableTabBar(QTabBar):
         self._press_index = -1
         self._press_identity = None
         self._press_pos = QPoint()
+        self._internal_drag_cursor_local_x = None
+        self._internal_drag_hot_x = None
         if started:
             event.accept()
             self._sync_title_overlays()
@@ -364,6 +418,20 @@ class DetachableTabBar(QTabBar):
             self._sync_title_overlays()
 
     def _sync_title_overlays(self) -> None:
+        if self.count() > 0:
+            widget_current = int(self._tab_widget.currentIndex())
+            bar_current = int(self.currentIndex())
+            if bar_current < 0 or bar_current >= self.count():
+                fallback = widget_current if 0 <= widget_current < self.count() else 0
+                self.setCurrentIndex(int(fallback))
+                bar_current = int(self.currentIndex())
+            self._controller._sparse_drag_log(
+                "active_index_state",
+                owner=self._controller._window_label(self._owner_window),
+                bar_current=int(bar_current),
+                widget_current=int(widget_current),
+                count=int(self.count()),
+            )
         internal_dragged_index = -1
         if (
             self._press_identity is not None
@@ -384,11 +452,30 @@ class DetachableTabBar(QTabBar):
         ):
             drag_cursor_local_x = int(self.mapFromGlobal(self._external_drag_global_pos).x())
             drag_hot_x = int(self._external_drag_hot_x) if self._external_drag_hot_x > 0 else None
+        if dragged_index >= 0 and dragged_index == internal_dragged_index:
+            if self._internal_drag_cursor_local_x is not None:
+                drag_cursor_local_x = int(self._internal_drag_cursor_local_x)
+            if self._internal_drag_hot_x is not None and self._internal_drag_hot_x > 0:
+                drag_hot_x = int(self._internal_drag_hot_x)
         external_dragging_active = (
             dragged_index >= 0
             and dragged_index == external_dragged_index
             and drag_cursor_local_x is not None
         )
+        drag_kind = "none"
+        if dragged_index >= 0:
+            drag_kind = "external" if dragged_index == external_dragged_index else "internal"
+        previous_labels_by_identity: Dict[int, QLabel] = {}
+        for previous_label in self._title_overlay_by_index.values():
+            previous_identity = previous_label.property("tab_identity")
+            if previous_identity is None:
+                continue
+            try:
+                parsed_identity = int(previous_identity)
+            except Exception:
+                continue
+            if parsed_identity not in previous_labels_by_identity:
+                previous_labels_by_identity[parsed_identity] = previous_label
         repositioned_this_frame: Set[int] = set()
         active: Dict[int, QLabel] = {}
         for index in range(self.count()):
@@ -396,21 +483,26 @@ class DetachableTabBar(QTabBar):
             rect = self.tabRect(index)
             if not text or rect.width() <= 0 or rect.height() <= 0:
                 continue
-            label = self._title_overlay_by_index.get(index)
+            identity = self.tabData(index)
+            identity_key = int(identity) if identity is not None else None
+            label = previous_labels_by_identity.get(identity_key) if identity_key is not None else None
+            if label is None and identity_key is None:
+                label = self._title_overlay_by_index.get(index)
             if label is None:
                 label = QLabel(self)
                 label.setObjectName("WorkspaceTabOverlayLabel")
                 label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            if identity_key is not None:
+                label.setProperty("tab_identity", int(identity_key))
             left, width = self._title_overlay_geometry(
                 index,
                 rect,
                 dragging=(index == dragged_index),
                 drag_cursor_local_x=drag_cursor_local_x if index == dragged_index else None,
                 drag_hot_x=drag_hot_x if index == dragged_index else None,
+                prefer_rect_anchor=(external_dragging_active and index != dragged_index),
             )
-            identity = self.tabData(index)
-            identity_key = int(identity) if identity is not None else None
             if identity_key is not None and index != dragged_index:
                 settle_left = self._settling_overlay_left_by_identity.get(identity_key)
                 if settle_left is not None:
@@ -440,10 +532,50 @@ class DetachableTabBar(QTabBar):
             ):
                 prev_left = int(label.geometry().x())
                 delta = int(left - prev_left)
-                max_step = 14
-                if abs(delta) > max_step:
+                max_step = 6
+                max_visual_offset = 48
+                if abs(delta) > max_step and abs(left - int(rect.x() + 20)) <= max_visual_offset:
+                    self._controller._sparse_drag_log(
+                        "external_neighbor_clip",
+                        owner=self._controller._window_label(self._owner_window),
+                        idx=index,
+                        prev_b=int(prev_left // 12),
+                        target_b=int(left // 12),
+                        delta_b=int(delta // 12),
+                    )
                     left = int(prev_left + (max_step if delta > 0 else -max_step))
+                left_min = int(rect.x() + 20 - max_visual_offset)
+                left_max = int(rect.x() + 20 + max_visual_offset)
+                if left < left_min or left > left_max:
+                    left = max(left_min, min(left, left_max))
+            if index != dragged_index and abs(int(left) - int(rect.x())) > 96:
+                self._controller._sparse_drag_log(
+                    "overlay_offset_alert",
+                    owner=self._controller._window_label(self._owner_window),
+                    idx=index,
+                    drag_kind=drag_kind,
+                    delta=int(left - rect.x()),
+                    left=int(left),
+                    rect_x=int(rect.x()),
+                    width=int(width),
+                )
             label.setGeometry(left, rect.y(), width, rect.height())
+            if index == dragged_index:
+                close_btn_for_log = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
+                close_b = -1
+                if close_btn_for_log is not None and close_btn_for_log.isVisible():
+                    close_b = int(close_btn_for_log.geometry().x() // 12)
+                self._controller._sparse_drag_log(
+                    "dragged_overlay",
+                    owner=self._controller._window_label(self._owner_window),
+                    kind=drag_kind,
+                    idx=index,
+                    current=self.currentIndex(),
+                    left_b=int(left // 12),
+                    width_b=int(width // 12),
+                    rect_b=int(rect.x() // 12),
+                    close_b=close_b,
+                )
             elided = label.fontMetrics().elidedText(str(text), self.elideMode(), width)
             if label.text() != elided:
                 label.setText(elided)
@@ -458,7 +590,7 @@ class DetachableTabBar(QTabBar):
             label.show()
             label.raise_()
             active[index] = label
-            if external_dragging_active and index == dragged_index:
+            if drag_active and index == dragged_index:
                 identity = self._position_close_button_for_overlay(
                     index=index,
                     overlay_left=left,
@@ -471,7 +603,7 @@ class DetachableTabBar(QTabBar):
                     index=index,
                     overlay_left=left,
                     rect=rect,
-                    max_step=14,
+                    max_step=6,
                 )
                 if identity is not None:
                     repositioned_this_frame.add(identity)
@@ -498,12 +630,33 @@ class DetachableTabBar(QTabBar):
             if identity in self._settling_overlay_left_by_identity:
                 continue
             self._restore_close_button_position(identity)
+            self._external_smoothed_close_x_by_identity.pop(identity, None)
         self._externally_repositioned_close_by_identity = repositioned_this_frame
         stale_settle_keys = set(self._settling_overlay_start_ms_by_identity.keys()) - set(
             self._settling_overlay_left_by_identity.keys()
         )
         for identity in stale_settle_keys:
             self._settling_overlay_start_ms_by_identity.pop(identity, None)
+        if drag_active and active:
+            placements: list[str] = []
+            for index in sorted(active.keys()):
+                label = active[index]
+                rect = self.tabRect(index)
+                tab_text = str(self.tabText(index)).strip().replace(" ", "_")
+                if len(tab_text) > 20:
+                    tab_text = tab_text[:20]
+                placements.append(
+                    f"{index}:{tab_text}:{int(label.geometry().x() // 12)}:"
+                    f"{int(label.geometry().width() // 12)}:{int(rect.x() // 12)}"
+                )
+            self._controller._sparse_drag_log(
+                "tab_text_layout",
+                owner=self._controller._window_label(self._owner_window),
+                drag_kind=drag_kind,
+                dragged=dragged_index,
+                current=self.currentIndex(),
+                tabs="|".join(placements),
+            )
 
     def _index_for_identity(self, identity: Optional[int]) -> int:
         if identity is None:
@@ -524,6 +677,7 @@ class DetachableTabBar(QTabBar):
         dragging: bool,
         drag_cursor_local_x: Optional[int] = None,
         drag_hot_x: Optional[int] = None,
+        prefer_rect_anchor: bool = False,
     ) -> tuple[int, int]:
         close_btn = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
         if close_btn is None or not close_btn.isVisible():
@@ -554,8 +708,22 @@ class DetachableTabBar(QTabBar):
                 anchor_x = max(8, min(anchor_x, max(8, width - 8)))
                 left = int(drag_cursor_local_x - anchor_x)
                 left = max(0, min(left, max(0, int(self.width()) - width)))
+                if (
+                    index == 1
+                    and self.count() > 1
+                    and str(self.tabText(0)).strip().lower() == "home"
+                ):
+                    left = max(int(rect.x()) - 48, left)
             else:
                 left = int(close_btn.x() - baseline_gap)
+            return left, width
+
+        if prefer_rect_anchor:
+            left = int(rect.x() + 20)
+            right = int(rect.right() - 8)
+            width = max(6, right - left)
+            max_width = max(6, int(self.width()) - 8)
+            width = min(width, max_width)
             return left, width
 
         post_release_left = int(close_btn.x() - baseline_gap)
@@ -607,9 +775,12 @@ class DetachableTabBar(QTabBar):
         target_x = max(0, min(target_x, max_x))
         if max_step is not None:
             step = max(1, int(max_step))
-            prev_x = int(close_btn.x())
+            prev_x = int(self._external_smoothed_close_x_by_identity.get(identity_key, int(close_btn.x())))
             if abs(target_x - prev_x) > step:
                 target_x = int(prev_x + (step if target_x > prev_x else -step))
+            self._external_smoothed_close_x_by_identity[identity_key] = int(target_x)
+        else:
+            self._external_smoothed_close_x_by_identity.pop(identity_key, None)
         target_y = int(rect.y() + max(0, (rect.height() - close_btn.height()) // 2))
         close_btn.move(target_x, target_y)
         close_btn.raise_()
@@ -666,6 +837,12 @@ class TabWorkspaceController(QObject):
         if self._drag_trace_enabled and os.environ.get("DMT_TAB_DRAG_DEBUG_APPEND", "").strip() != "1":
             self._drag_trace_path.parent.mkdir(parents=True, exist_ok=True)
             self._drag_trace_path.write_text("", encoding="utf-8")
+        self._sparse_drag_debug_enabled = os.environ.get("DMT_TAB_DRAG_SPARSE_DEBUG", "").strip() == "1"
+        self._sparse_drag_path = Path(__file__).resolve().parents[1] / "debug" / "tab_workspace_sparse.log"
+        self._sparse_drag_last_by_channel: Dict[str, str] = {}
+        if self._sparse_drag_debug_enabled and os.environ.get("DMT_TAB_DRAG_SPARSE_DEBUG_APPEND", "").strip() != "1":
+            self._sparse_drag_path.parent.mkdir(parents=True, exist_ok=True)
+            self._sparse_drag_path.write_text("", encoding="utf-8")
 
     def set_detached_window_factory(self, factory: Callable[[], WorkspaceWindow]) -> None:
         self._detached_window_factory = factory
@@ -871,26 +1048,34 @@ class TabWorkspaceController(QObject):
         source_index = source_tabs.indexOf(widget)
         if source_index == -1:
             return False
+        source_current_before = source_tabs.currentIndex()
 
         if source_window is target_window:
             clamped = max(0, min(int(target_index), source_tabs.count() - 1))
             if source_index == clamped:
                 if focus:
                     source_tabs.setCurrentWidget(widget)
+                self._ensure_valid_current_index(source_tabs, preferred=clamped)
                 return True
             source_tabs.tabBar().moveTab(source_index, clamped)
             self.sync_tab_bar_extent(target_window)
             self._enforce_home_pinned(target_window)
             if focus:
                 source_tabs.setCurrentWidget(widget)
+            self._ensure_valid_current_index(source_tabs, preferred=clamped)
             return True
 
         title = self.title_by_widget.get(widget, source_tabs.tabText(source_index))
         source_tabs.removeTab(source_index)
+        preferred_source = source_current_before
+        if preferred_source == source_index:
+            preferred_source = max(0, min(source_index, source_tabs.count() - 1))
+        self._ensure_valid_current_index(source_tabs, preferred=preferred_source)
         target_tabs = target_window.workspace_tabs()
         insert_at = max(0, min(int(target_index), target_tabs.count()))
         target_tabs.insertTab(insert_at, widget, title)
         target_tabs.tabBar().setTabData(insert_at, int(id(widget)))
+        self._ensure_valid_current_index(target_tabs, preferred=insert_at)
         self.window_by_widget[widget] = target_window
         self.sync_tab_bar_extent(source_window)
         self.sync_tab_bar_extent(target_window)
@@ -1075,6 +1260,16 @@ class TabWorkspaceController(QObject):
                 target_bar,
                 global_pos,
                 raw_target_index,
+            )
+            local_x = int(target_bar.mapFromGlobal(global_pos).x())
+            self._sparse_drag_log(
+                "external_target",
+                owner=self._window_label(target_window),
+                from_owner=self._window_label(current_owner),
+                raw=int(raw_target_index),
+                stable=int(target_index),
+                local_b=int(local_x // 12),
+                count=target_bar.count(),
             )
             moved = False
             if current_owner is None:
@@ -1393,8 +1588,13 @@ class TabWorkspaceController(QObject):
             return None
         source_tabs = source_window.workspace_tabs()
         source_index = source_tabs.indexOf(widget)
+        source_current_before = source_tabs.currentIndex()
         if source_index != -1:
             source_tabs.removeTab(source_index)
+            preferred_source = source_current_before
+            if preferred_source == source_index:
+                preferred_source = max(0, min(source_index, source_tabs.count() - 1))
+            self._ensure_valid_current_index(source_tabs, preferred=preferred_source)
             self.sync_tab_bar_extent(source_window)
             self._enforce_home_pinned(source_window)
         self.window_by_widget.pop(widget, None)
@@ -1422,6 +1622,7 @@ class TabWorkspaceController(QObject):
         title = self.title_by_widget.get(widget, "")
         target_tabs.insertTab(insert_at, widget, title)
         target_tabs.tabBar().setTabData(insert_at, int(id(widget)))
+        self._ensure_valid_current_index(target_tabs, preferred=insert_at)
         self.window_by_widget[widget] = target_window
         self.sync_tab_bar_extent(target_window)
         self._enforce_home_pinned(target_window)
@@ -1571,6 +1772,20 @@ class TabWorkspaceController(QObject):
         self.title_by_widget[widget] = title
         self.window_by_widget[widget] = window
 
+    def _ensure_valid_current_index(self, tabs: QTabWidget, *, preferred: Optional[int] = None) -> None:
+        count = int(tabs.count())
+        if count <= 0:
+            return
+        current = int(tabs.currentIndex())
+        if 0 <= current < count:
+            return
+        fallback = 0
+        if preferred is not None:
+            fallback = max(0, min(int(preferred), count - 1))
+        elif count > 1 and str(tabs.tabText(0)).strip().lower() == "home":
+            fallback = 1
+        tabs.setCurrentIndex(int(fallback))
+
     def _enforce_home_pinned(self, window: WorkspaceWindow) -> None:
         home = self._home_widget
         if home is None:
@@ -1643,4 +1858,19 @@ class TabWorkspaceController(QObject):
         line = " ".join(f"{key}={value}" for key, value in payload.items())
         self._drag_trace_path.parent.mkdir(parents=True, exist_ok=True)
         with self._drag_trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+    def _sparse_drag_log(self, channel: str, **fields: object) -> None:
+        if not self._sparse_drag_debug_enabled:
+            return
+        payload: Dict[str, str] = {"channel": str(channel)}
+        for key in sorted(fields):
+            payload[key] = str(fields[key])
+        signature = " ".join(f"{k}={payload[k]}" for k in sorted(payload))
+        if self._sparse_drag_last_by_channel.get(str(channel)) == signature:
+            return
+        self._sparse_drag_last_by_channel[str(channel)] = signature
+        line = f"t_ms={int(time.time() * 1000)} {signature}"
+        self._sparse_drag_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._sparse_drag_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")

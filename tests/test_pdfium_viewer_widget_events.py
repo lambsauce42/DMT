@@ -25,6 +25,12 @@ def _write_cursor_debug(lines: list[str]) -> None:
     debug_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_render_debug(lines: list[str]) -> None:
+    debug_path = Path(ROOT) / "debug" / "pdfium_render.log"
+    debug_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 class _MouseEventStub:
     def __init__(
         self,
@@ -109,8 +115,13 @@ class PdfiumViewerWidgetRenderTests(unittest.TestCase):
 
     def test_render_page_returns_qimage_for_loaded_character_pdf(self) -> None:
         widget = PdfiumViewerWidget()
-        pdf_path = os.path.join(
-            ROOT, "tests", "test_saves", "DMT", "cache", "characters", "Hero.pdf"
+        pdf_path = os.path.join(ROOT, "data", "5e_CharacterSheet.pdf")
+
+        _write_render_debug(
+            [
+                f"pdf_path={pdf_path}",
+                f"exists={os.path.exists(pdf_path)}",
+            ]
         )
 
         self.assertTrue(widget.load_document(pdf_path))
