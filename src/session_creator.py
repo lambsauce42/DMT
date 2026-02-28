@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import hashlib
+import re
 import sys
 from dataclasses import asdict
 from datetime import datetime
@@ -64,7 +65,7 @@ from PySide6.QtWidgets import (
 from dmt_package import read_dmt_package_asset, read_dmt_package_info, write_dmt_package
 from models import Session, SessionAttachment, SessionLogEntry
 from save_paths import default_dnd_save_dir
-from navigate_widget import load_navigation_data
+from navigation_repository import load_navigation_data
 from player_sheets import (
     list_worlds,
     list_campaigns,
@@ -78,6 +79,7 @@ from session_text_link_controller import SessionTextLinkController
 from session_text_links import LinkSuggestion, ParsedSessionLink, load_link_suggestions
 from ui.widgets import TerminalWidget
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
+from user_settings import is_session_autosave_enabled
 from unique_ids import generate_probabilistic_unique_id
 
 
@@ -97,6 +99,11 @@ MAX_ATTACHMENT_FILE_BYTES = 25 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 150 * 1024 * 1024
 FILES_COLLAPSED_STRIP_WIDTH = 0
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+ANCHOR_WITH_HREF_TAG_RE = re.compile(r"<a\b(?=[^>]*\bhref\s*=)(?P<attrs>[^>]*)>", re.IGNORECASE)
+STYLE_ATTR_RE = re.compile(
+    r"(?P<prefix>\sstyle\s*=\s*)(?P<quote>[\"'])(?P<value>.*?)(?P=quote)",
+    re.IGNORECASE,
+)
 TEXT_FILE_EXTENSIONS = {
     ".txt",
     ".md",
@@ -164,6 +171,34 @@ SESSION_LINK_APPLET_DEFINITIONS: dict[str, dict[str, object]] = {
         "panels": [],
     },
 }
+
+
+def _normalize_session_link_html(html: str) -> str:
+    text = str(html or "")
+    if not text:
+        return ""
+
+    def _replace_anchor(match: re.Match[str]) -> str:
+        attrs = match.group("attrs") or ""
+        style_match = STYLE_ATTR_RE.search(attrs)
+        if style_match is None:
+            return f'<a{attrs} style="text-decoration: none;">'
+        style_value = str(style_match.group("value") or "")
+        if "text-decoration" in style_value.lower():
+            return match.group(0)
+        normalized_style = style_value.strip()
+        if normalized_style and not normalized_style.endswith(";"):
+            normalized_style = f"{normalized_style};"
+        if normalized_style:
+            normalized_style = f"{normalized_style} "
+        normalized_style = f"{normalized_style}text-decoration: none;"
+        start, end = style_match.span("value")
+        updated_attrs = f"{attrs[:start]}{normalized_style}{attrs[end:]}"
+        return f"<a{updated_attrs}>"
+
+    return ANCHOR_WITH_HREF_TAG_RE.sub(_replace_anchor, text)
+
+
 SESSION_LINK_APPLET_KEY_BY_KIND: dict[str, str] = {
     "npc": "npc_database",
     "map": "map_library",
@@ -542,6 +577,7 @@ class SessionCreatorWidget(QWidget):
         self._files_list_collapsed = False
         self._files_last_expanded_width = 320
         self._text_link_controllers: list[SessionTextLinkController] = []
+        self._session_autosave_enabled = is_session_autosave_enabled()
 
         self._world_data = _navigation_world_data()
 
@@ -587,6 +623,7 @@ class SessionCreatorWidget(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._refresh_session_autosave_setting()
         self._refresh_navigation_context_options()
         self._position_files_edge_toggle()
 
@@ -1237,7 +1274,15 @@ class SessionCreatorWidget(QWidget):
     def _trigger_auto_save(self) -> None:
         if self._current_session:
             self._set_current_session_dirty(True)
+        if not self._session_autosave_enabled:
+            self.auto_save_timer.stop()
+            return
         self.auto_save_timer.start()
+
+    def _refresh_session_autosave_setting(self) -> None:
+        self._session_autosave_enabled = is_session_autosave_enabled()
+        if not self._session_autosave_enabled:
+            self.auto_save_timer.stop()
 
     def _persist_pending_session_edits(self) -> bool:
         if not self._current_session or not self._current_session_dirty:
@@ -1265,9 +1310,9 @@ class SessionCreatorWidget(QWidget):
             return
         
         # Only saving scratchpad and context now, as date/duration/log removed from UI
-        self._current_session.notes = self.scratchpad.toHtml()
+        self._current_session.notes = _normalize_session_link_html(self.scratchpad.toHtml())
         self._current_session.plan_text = self.plan_editor.toPlainText()
-        self._current_session.plan_html = self.plan_editor.toHtml()
+        self._current_session.plan_html = _normalize_session_link_html(self.plan_editor.toHtml())
         
         # Save linked context
         w, c, g = self._current_context_restrictions()
@@ -1427,12 +1472,12 @@ class SessionCreatorWidget(QWidget):
         self._set_plan_controls_enabled(True)
         self._set_file_controls_enabled(True)
         self.scratchpad.blockSignals(True)
-        self.scratchpad.setHtml(session.notes)
+        self.scratchpad.setHtml(_normalize_session_link_html(session.notes))
         self.scratchpad.blockSignals(False)
         self._load_plan_text_file(
             session.document_path,
             fallback_text=session.plan_text,
-            fallback_html=getattr(session, "plan_html", ""),
+            fallback_html=_normalize_session_link_html(getattr(session, "plan_html", "")),
         )
         self._refresh_file_table()
 

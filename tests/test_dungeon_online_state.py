@@ -759,6 +759,30 @@ def test_player_loot_add_from_inventory_sends_source_metadata(dungeon_widget, mo
     assert isinstance(request_id, str) and request_id
 
 
+def test_local_loot_claim_runs_through_local_action_path(dungeon_widget, monkeypatch):
+    captured = {}
+    dungeon_widget._online_mode = ONLINE_MODE_LOCAL_DM
+    dungeon_widget._session_loot_pool = [
+        {"entry_id": "loot-1", "type": "item", "item_id": "item-a", "title": "Potion"},
+        {"entry_id": "loot-2", "type": "note", "note": "Keep", "title": "Keep"},
+    ]
+    monkeypatch.setattr(dungeon_widget, "_selected_loot_pool_ids", lambda: ["loot-1"])
+    monkeypatch.setattr(dungeon_widget, "_choose_sheet_for_claim", lambda: ("sheet-1", "Hero"))
+
+    def _apply_claim(sheet_id, claimed_entries):
+        captured["sheet_id"] = sheet_id
+        captured["claimed_entries"] = [dict(entry) for entry in claimed_entries]
+        return True, "Claim applied."
+
+    monkeypatch.setattr(dungeon_widget, "_apply_claim_entries_to_sheet", _apply_claim)
+
+    dungeon_widget._on_loot_claim_selected()
+
+    assert captured["sheet_id"] == "sheet-1"
+    assert [entry["entry_id"] for entry in captured["claimed_entries"]] == ["loot-1"]
+    assert [entry["entry_id"] for entry in dungeon_widget._session_loot_pool] == ["loot-2"]
+
+
 def test_loot_add_from_library_dialog_contract_and_selection(monkeypatch, dungeon_widget, tmp_path):
     chosen_path = tmp_path / "sword.dmtitem"
     chosen_path.write_text(
@@ -1496,12 +1520,13 @@ def test_host_sync_character_inventory_persists_authoritative_sheet_state(
             },
         )
 
+    def _ensure_network_entry(*_args, **_kwargs):
+        captured["ensure_calls"] += 1
+        return True, "ok", {}
+
     fake_module = types.SimpleNamespace(
         set_inventory_payload_for_sheet_id=_set_inventory_payload,
-        ensure_network_linked_sheet_entry=lambda *_args, **_kwargs: captured.__setitem__(
-            "ensure_calls", captured["ensure_calls"] + 1
-        )
-        or (True, "ok", {}),
+        ensure_network_linked_sheet_entry=_ensure_network_entry,
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
 
@@ -2143,7 +2168,9 @@ def test_client_claim_result_applies_items_and_custom_notes(monkeypatch, dungeon
 
     fake_module = types.SimpleNamespace(apply_claim_to_sheet=_apply_claim)
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._player_connection_ready = True
 
     dungeon_widget._on_client_command_result(
         {
@@ -2191,7 +2218,9 @@ def test_client_claim_result_materializes_item_document_for_item_id(monkeypatch,
 
     fake_module = types.SimpleNamespace(apply_claim_to_sheet=_apply_claim)
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._player_connection_ready = True
     library_dir = tmp_path / "claimed_items"
     monkeypatch.setattr("dungeon_applet.items_dir", lambda: library_dir)
 

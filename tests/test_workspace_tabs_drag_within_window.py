@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -55,6 +55,41 @@ def test_previous_active_tab_stays_active_during_drag(qtbot) -> None:
         "active_hold "
         f"before={id(active_before)} mid={id(active_mid)} after={id(active_after)} "
         f"drag_index={host.indexOf(dragged)}"
+    )
+    assert active_mid is active_before
+    assert active_after is active_before
+
+
+def test_pointer_drag_release_does_not_activate_dragged_inactive_tab(qtbot) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.open_applet(_applet("map_library"), focus_if_new=True)
+    window.open_applet(_applet("session_creator"), focus_if_new=True)
+    window.open_applet(_applet("npc_database"), focus_if_new=True)
+
+    host = window.workspace_tabs()
+    strip = host.tabBar()
+    dragged = window._tab_by_key["map_library"]
+    active_before = window._tab_by_key["session_creator"]
+    host.setCurrentWidget(active_before)
+    drag_rect = strip.tab_rect_for_index(host.indexOf(dragged))
+    start = drag_rect.center()
+    drop = QPoint(strip.width() - 18, strip.height() // 2)
+
+    qtbot.mousePress(strip, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(strip, drop)
+    qtbot.wait(20)
+    active_mid = host.currentWidget()
+    qtbot.mouseRelease(strip, Qt.MouseButton.LeftButton, pos=drop)
+    qtbot.wait(20)
+    active_after = host.currentWidget()
+
+    _debug_log(
+        "pointer_release_hold "
+        f"before={id(active_before)} mid={id(active_mid)} after={id(active_after)} "
+        f"dragged_index={host.indexOf(dragged)}"
     )
     assert active_mid is active_before
     assert active_after is active_before

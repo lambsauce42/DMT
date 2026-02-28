@@ -163,7 +163,7 @@ def test_client_controller_clears_presence_when_disconnected(qtbot):
         server.stop()
 
 
-def test_client_controller_tracks_backpack_loot_transfer_for_retry(qtbot, monkeypatch):
+def test_client_controller_sends_backpack_loot_transfer_without_retry_tracking(qtbot, monkeypatch):
     _ = qtbot
     controller = ClientSessionController()
     sent_packets = []
@@ -177,5 +177,8 @@ def test_client_controller_tracks_backpack_loot_transfer_for_retry(qtbot, monkey
     )
 
     assert sent_packets
-    assert "req-loot-add-1" in controller._pending_commands
+    assert sent_packets[-1]["type"] == "command"
+    assert sent_packets[-1]["action"] == "add_loot_from_inventory"
+    assert sent_packets[-1]["request_id"] == "req-loot-add-1"
+    assert not hasattr(controller, "_pending_commands")
     controller.disconnect()

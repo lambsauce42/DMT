@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
 )
 
 from dmt_package import read_dmt_package_info, write_dmt_package
-from navigate_widget import load_navigation_data
+from navigation_repository import load_navigation_data
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
 from unique_ids import generate_probabilistic_unique_id
 

@@ -25,9 +25,13 @@ class AppletInitTests(unittest.TestCase):
         # Mock potentially file-system/noisy operations
         self.save_patcher = patch("navigate_widget.save_navigation_data")
         self.save_patcher.start()
+        self.shared_save_patcher = patch("navigation_repository.save_navigation_data")
+        self.shared_save_patcher.start()
         
         self.load_patcher = patch("navigate_widget.load_navigation_data", return_value=[])
         self.load_patcher.start()
+        self.shared_load_patcher = patch("navigation_repository.load_navigation_data", return_value=[])
+        self.shared_load_patcher.start()
         
         # Mock dnd_saves_dir to avoid touching real files
         self.path_patcher = patch("save_paths.dnd_saves_dir")
@@ -38,7 +42,9 @@ class AppletInitTests(unittest.TestCase):
 
     def tearDown(self):
         self.save_patcher.stop()
+        self.shared_save_patcher.stop()
         self.load_patcher.stop()
+        self.shared_load_patcher.stop()
         self.path_patcher.stop()
         self.temp_dir.cleanup()
 

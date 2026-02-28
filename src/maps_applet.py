@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from dmt_package import list_dmt_package_assets, read_dmt_package_asset, read_dmt_package_info, write_dmt_package
-from navigate_widget import load_navigation_data, move_to_trash
+from navigation_repository import load_navigation_data, move_to_trash
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")

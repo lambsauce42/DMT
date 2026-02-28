@@ -13,11 +13,9 @@ Features:
 from __future__ import annotations
 
 import copy
-import json
 import os
 import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QSize, Qt
@@ -50,7 +48,6 @@ except Exception:
     SVG_AVAILABLE = False
 
 from save_paths import trash_json_path, navigation_json_path
-from navigation_storage import load_navigation_world_data, save_navigation_world_data
 from navigation_repository import (
     campaign_trash_entry_matches_world,
     clean_navigation_id,

@@ -463,6 +463,7 @@ class WorkspaceTabStrip(QWidget):
         self._hover_tab_id: Optional[int] = None
         self._press_tab_id: Optional[int] = None
         self._press_on_close = False
+        self._suppress_release_activation = False
         self._press_pos = QPoint()
         self._pointer_dragging = False
 
@@ -560,6 +561,8 @@ class WorkspaceTabStrip(QWidget):
     def clear_drag_preview(self, tab_id: Optional[int] = None, *, settle: bool) -> None:
         if tab_id is not None and self._drag_tab_id is not None and int(tab_id) != int(self._drag_tab_id):
             return
+        if self._pointer_dragging and self._press_tab_id is not None:
+            self._suppress_release_activation = True
         self._sync_layouts()
         if self._drag_tab_id is not None and settle:
             drag_id = int(self._drag_tab_id)
@@ -641,6 +644,7 @@ class WorkspaceTabStrip(QWidget):
         tab_id, on_close = self._hit_test(event.position().toPoint())
         self._press_tab_id = tab_id
         self._press_on_close = on_close
+        self._suppress_release_activation = False
         self._press_pos = self._event_global_pos(event)
         self._pointer_dragging = False
         super().mousePressEvent(event)
@@ -701,6 +705,13 @@ class WorkspaceTabStrip(QWidget):
             self._pointer_dragging = False
             self._press_tab_id = None
             self._press_on_close = False
+            self._suppress_release_activation = False
+            return super().mouseReleaseEvent(event)
+
+        if self._suppress_release_activation:
+            self._press_tab_id = None
+            self._press_on_close = False
+            self._suppress_release_activation = False
             return super().mouseReleaseEvent(event)
 
         released_tab_id, released_on_close = self._hit_test(event.position().toPoint())
@@ -712,6 +723,7 @@ class WorkspaceTabStrip(QWidget):
                 self.tabActivated.emit(int(self._press_tab_id))
         self._press_tab_id = None
         self._press_on_close = False
+        self._suppress_release_activation = False
         super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]

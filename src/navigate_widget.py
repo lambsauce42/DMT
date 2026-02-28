@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import os
 from datetime import datetime, timedelta
 from typing import Callable, Optional
@@ -1361,22 +1360,11 @@ class NavigateContentWidget(QWidget):
         return dialog.selected
 
     def _load_trash(self) -> None:
-        self._trash = []
-        if not os.path.exists(TRASH_PATH):
-            return
-        try:
-            with open(TRASH_PATH, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            if isinstance(data, list):
-                self._trash = data
-        except Exception:
-            self._trash = []
+        self._trash = load_trash(TRASH_PATH)
         self._purge_trash()
 
     def _save_trash(self) -> None:
-        os.makedirs(os.path.dirname(TRASH_PATH), exist_ok=True)
-        with open(TRASH_PATH, "w", encoding="utf-8") as handle:
-            json.dump(self._trash, handle, indent=2)
+        save_trash(self._trash, TRASH_PATH)
 
     def _purge_trash(self) -> None:
         if not self._trash:
@@ -1399,18 +1387,10 @@ class NavigateContentWidget(QWidget):
             self._save_trash()
 
     def _move_to_trash(self, entry_type: str, payload: dict, parent: Optional[dict] = None) -> None:
-        if not isinstance(payload, dict):
+        trash_entry = move_to_trash(entry_type, payload, parent=parent, path=TRASH_PATH)
+        if not trash_entry:
             return
-        trash_entry = {
-            "type": entry_type,
-            "name": payload.get("name"),
-            "icon": payload.get("icon"),
-            "payload": copy.deepcopy(payload),
-            "parent": parent or {},
-            "deleted_at": datetime.now().isoformat(timespec="seconds"),
-        }
         self._trash.append(trash_entry)
-        self._save_trash()
 
     def _confirm_disintegrate(self, title: str, message: str) -> bool:
         dialog = QDialog(self)
@@ -1439,32 +1419,22 @@ class NavigateContentWidget(QWidget):
         return input_field.text().strip() == "CONFIRM"
 
     def _normalize_group(self, group: object) -> dict:
-        if isinstance(group, dict):
-            name = str(group.get("name", "")).strip()
-            icon = group.get("icon") or self._default_group_icon
-            return {"name": name, "icon": icon}
-        name = str(group).strip()
-        return {"name": name, "icon": self._default_group_icon}
+        return normalize_group_entry(group, default_icon=self._default_group_icon)
 
     def _normalize_campaign(self, campaign: dict) -> dict:
-        name = str(campaign.get("name", "")).strip()
-        icon = campaign.get("icon") or self._default_campaign_icon
-        groups = []
-        for group in campaign.get("groups", []):
-            normalized = self._normalize_group(group)
-            if normalized["name"]:
-                groups.append(normalized)
-        return {"name": name, "icon": icon, "groups": groups}
+        return normalize_campaign_entry(
+            campaign,
+            default_icon=self._default_campaign_icon,
+            default_group_icon=self._default_group_icon,
+        )
 
     def _normalize_world(self, world: dict) -> dict:
-        name = str(world.get("name", "")).strip()
-        icon = world.get("icon") or self._default_world_icon
-        campaigns = []
-        for campaign in world.get("campaigns", []):
-            normalized = self._normalize_campaign(campaign)
-            if normalized["name"]:
-                campaigns.append(normalized)
-        return {"name": name, "icon": icon, "campaigns": campaigns}
+        return normalize_world_entry(
+            world,
+            default_icon=self._default_world_icon,
+            default_campaign_icon=self._default_campaign_icon,
+            default_group_icon=self._default_group_icon,
+        )
 
     def _capture_expansion_state(self) -> dict:
         state: dict = {"worlds_section": True, "worlds": {}, "campaigns": {}}

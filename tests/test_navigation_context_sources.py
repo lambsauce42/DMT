@@ -14,8 +14,8 @@ if SRC not in sys.path:
 
 from PySide6.QtWidgets import QApplication
 
-import navigate_widget
 from maps_applet import MapsWidget
+import navigation_repository
 from navigation_storage import save_navigation_world_data
 from npc_database import NPCDatabaseWidget
 from session_creator import SessionCreatorWidget
@@ -47,7 +47,7 @@ class NavigationContextSourceTests(unittest.TestCase):
     def test_session_creator_uses_navigation_storage_for_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             nav_path = _seed_navigation(Path(tmpdir))
-            with patch.object(navigate_widget, "NAVIGATION_PATH", nav_path):
+            with patch.object(navigation_repository, "NAVIGATION_PATH", nav_path):
                 widget = SessionCreatorWidget()
                 self.addCleanup(widget.close)
 
@@ -67,7 +67,7 @@ class NavigationContextSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             nav_path = _seed_navigation(base_dir)
-            with patch.object(navigate_widget, "NAVIGATION_PATH", nav_path):
+            with patch.object(navigation_repository, "NAVIGATION_PATH", nav_path):
                 widget = SessionCreatorWidget()
                 self.addCleanup(widget.close)
                 widget.show()
@@ -94,7 +94,7 @@ class NavigationContextSourceTests(unittest.TestCase):
     def test_maps_widget_uses_navigation_storage_for_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             nav_path = _seed_navigation(Path(tmpdir))
-            with patch.object(navigate_widget, "NAVIGATION_PATH", nav_path):
+            with patch.object(navigation_repository, "NAVIGATION_PATH", nav_path):
                 widget = MapsWidget()
                 self.addCleanup(widget.close)
                 self.assertNotEqual(widget._world_combo.findText("Eldervale"), -1)
@@ -102,7 +102,7 @@ class NavigationContextSourceTests(unittest.TestCase):
     def test_npc_widget_uses_navigation_storage_for_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             nav_path = _seed_navigation(Path(tmpdir))
-            with patch.object(navigate_widget, "NAVIGATION_PATH", nav_path):
+            with patch.object(navigation_repository, "NAVIGATION_PATH", nav_path):
                 widget = NPCDatabaseWidget()
                 self.addCleanup(widget.close)
                 self.assertNotEqual(widget._world_combo.findText("Eldervale"), -1)

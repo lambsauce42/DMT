@@ -5896,6 +5896,13 @@ class DungeonAppletWidget(QWidget):
         return selected_rows
 
     def _on_loot_add_from_player_inventory(self) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER or self._client_controller is None:
+            QMessageBox.information(
+                self,
+                "Loot Pool",
+                "Inventory/equipment-to-loot transfers are available in online player sessions.",
+            )
+            return
         selected_sheet = self._choose_sheet_for_claim()
         if selected_sheet is None:
             return
@@ -5914,49 +5921,36 @@ class DungeonAppletWidget(QWidget):
         )
         if not selected_rows:
             return
-        if self._online_mode == ONLINE_MODE_PLAYER and self._client_controller is not None:
-            if not self._player_network_actions_available():
-                QMessageBox.warning(
-                    self,
-                    "Loot Pool",
-                    "You are currently disconnected. Please wait for reconnect.",
-                )
-                return
-            transfer_items: list[dict] = []
-            for row in selected_rows:
-                item_id = str(row.get("item_id") or "").strip()
-                if not item_id:
-                    continue
-                transfer_payload = {
-                    "item_id": item_id,
-                    "title": str(row.get("title") or item_id or "Item"),
-                    "path": str(row.get("path") or item_id),
-                    "source": str(row.get("source_type") or "backpack"),
-                }
-                if transfer_payload["source"] == "equipment":
-                    transfer_payload["source_slot"] = str(row.get("source_slot") or "").strip()
-                elif isinstance(row.get("source_index"), int):
-                    transfer_payload["source_index"] = int(row.get("source_index"))
-                item_document = row.get("item_document")
-                if isinstance(item_document, dict):
-                    transfer_payload["item_document"] = dict(item_document)
-                transfer_items.append(transfer_payload)
-            if not transfer_items:
-                return
-            self._client_controller.send_command(
-                "add_loot_from_inventory",
-                {
-                    "sheet_id": sheet_id,
-                    "items": transfer_items,
-                    "dungeon_id": str(self._active_dungeon_id or ""),
-                },
-                request_id=uuid.uuid4().hex,
-            )
+        transfer_items: list[dict] = []
+        for row in selected_rows:
+            item_id = str(row.get("item_id") or "").strip()
+            if not item_id:
+                continue
+            transfer_payload = {
+                "item_id": item_id,
+                "title": str(row.get("title") or item_id or "Item"),
+                "path": str(row.get("path") or item_id),
+                "source": str(row.get("source_type") or "backpack"),
+            }
+            if transfer_payload["source"] == "equipment":
+                transfer_payload["source_slot"] = str(row.get("source_slot") or "").strip()
+            elif isinstance(row.get("source_index"), int):
+                transfer_payload["source_index"] = int(row.get("source_index"))
+            item_document = row.get("item_document")
+            if isinstance(item_document, dict):
+                transfer_payload["item_document"] = dict(item_document)
+            transfer_items.append(transfer_payload)
+        if not transfer_items:
             return
-        QMessageBox.information(
-            self,
-            "Loot Pool",
-            "Inventory/equipment-to-loot transfers are available in online player sessions.",
+        self._dispatch_player_command(
+            "add_loot_from_inventory",
+            {
+                "sheet_id": sheet_id,
+                "items": transfer_items,
+                "dungeon_id": str(self._active_dungeon_id or ""),
+            },
+            unavailable_title="Loot Pool",
+            unavailable_message="You are currently disconnected. Please wait for reconnect.",
         )
 
     def _on_loot_add_from_library(self) -> None:
@@ -6196,6 +6190,30 @@ class DungeonAppletWidget(QWidget):
         ok, message, _payload = apply_claim_to_sheet(sheet_id, item_ids=item_ids, note_lines=notes)
         return ok, message
 
+    def _apply_local_loot_claim(self, payload: dict) -> None:
+        selected_ids = payload.get("entry_ids")
+        sheet_id = str(payload.get("sheet_id") or "").strip()
+        if not isinstance(selected_ids, list) or not sheet_id:
+            return
+        selected_set = {str(entry_id).strip() for entry_id in selected_ids if str(entry_id).strip()}
+        if not selected_set:
+            return
+        claimed = [
+            entry for entry in self._session_loot_pool if str(entry.get("entry_id") or "") in selected_set
+        ]
+        if not claimed:
+            return
+        ok, message = self._apply_claim_entries_to_sheet(sheet_id, claimed)
+        if not ok:
+            QMessageBox.warning(self, "Claim", message or "Unable to claim selected entries.")
+            return
+        self._session_loot_pool = [
+            entry for entry in self._session_loot_pool if str(entry.get("entry_id") or "") not in selected_set
+        ]
+        self._refresh_loot_pool_list()
+        if self._online_mode == ONLINE_MODE_DM_HOST:
+            self._broadcast_snapshot_if_host()
+
     def _on_loot_claim_selected(self) -> None:
         selected_ids = self._selected_loot_pool_ids()
         if not selected_ids:
@@ -6205,33 +6223,13 @@ class DungeonAppletWidget(QWidget):
         if selected_sheet is None:
             return
         sheet_id, _sheet_name = selected_sheet
-
-        if self._online_mode == ONLINE_MODE_PLAYER and self._client_controller is not None:
-            if not self._player_network_actions_available():
-                QMessageBox.warning(self, "Claim", "You are currently disconnected. Please wait for reconnect.")
-                return
-            self._client_controller.send_command(
-                "claim_loot",
-                {"entry_ids": selected_ids, "sheet_id": sheet_id},
-                request_id=uuid.uuid4().hex,
-            )
-            return
-
-        claimed = [
-            entry for entry in self._session_loot_pool if str(entry.get("entry_id") or "") in set(selected_ids)
-        ]
-        if not claimed:
-            return
-        ok, message = self._apply_claim_entries_to_sheet(sheet_id, claimed)
-        if not ok:
-            QMessageBox.warning(self, "Claim", message or "Unable to claim selected entries.")
-            return
-        self._session_loot_pool = [
-            entry for entry in self._session_loot_pool if str(entry.get("entry_id") or "") not in set(selected_ids)
-        ]
-        self._refresh_loot_pool_list()
-        if self._online_mode == ONLINE_MODE_DM_HOST:
-            self._broadcast_snapshot_if_host()
+        self._run_session_action(
+            "claim_loot",
+            {"entry_ids": selected_ids, "sheet_id": sheet_id},
+            local_handler=self._apply_local_loot_claim,
+            unavailable_title="Claim",
+            unavailable_message="You are currently disconnected. Please wait for reconnect.",
+        )
 
     def _build_initiative_overlay(self) -> QFrame:
         panel = QFrame(self)
@@ -6564,18 +6562,14 @@ class DungeonAppletWidget(QWidget):
         if (
             self._online_mode == ONLINE_MODE_PLAYER
             and kind == "player"
-            and self._client_controller is not None
         ):
-            if not self._player_network_actions_available():
-                self._render_initiative_overlay()
-                return
             local_id = str(self._local_player_id or "")
             row_player_id = str(row.get("player_id") or "")
             if row_player_id == local_id:
-                self._client_controller.send_command(
+                self._dispatch_player_command(
                     "initiative_update",
                     {"kind": kind, "id": key, "initiative": value},
-                    request_id=uuid.uuid4().hex,
+                    silent=True,
                 )
         elif self._online_mode == ONLINE_MODE_DM_HOST:
             self._broadcast_snapshot_if_host()
@@ -6945,6 +6939,47 @@ class DungeonAppletWidget(QWidget):
             return bool(self._player_connection_ready)
         return True
 
+    def _dispatch_player_command(
+        self,
+        action: str,
+        payload: dict,
+        *,
+        unavailable_title: str = "",
+        unavailable_message: str = "",
+        silent: bool = False,
+    ) -> bool:
+        if self._online_mode != ONLINE_MODE_PLAYER or self._client_controller is None:
+            return False
+        if not self._player_network_actions_available():
+            if (not silent) and unavailable_title and unavailable_message:
+                QMessageBox.warning(self, unavailable_title, unavailable_message)
+            return False
+        self._client_controller.send_command(
+            action,
+            payload,
+            request_id=uuid.uuid4().hex,
+        )
+        return True
+
+    def _run_session_action(
+        self,
+        action: str,
+        payload: dict,
+        *,
+        local_handler,
+        unavailable_title: str = "",
+        unavailable_message: str = "",
+    ) -> bool:
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            return self._dispatch_player_command(
+                action,
+                payload,
+                unavailable_title=unavailable_title,
+                unavailable_message=unavailable_message,
+            )
+        local_handler(dict(payload))
+        return True
+
     def _player_interactions_temporarily_blocked(self) -> bool:
         return (
             self._online_mode == ONLINE_MODE_PLAYER
@@ -7097,14 +7132,11 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode == ONLINE_MODE_DM_HOST and self._host_controller is not None:
             self._host_controller.broadcast_ping(x=x, y=y, dungeon_id=dungeon_id)
             return
-        if self._online_mode == ONLINE_MODE_PLAYER and self._client_controller is not None:
-            if not self._player_network_actions_available():
-                return
-            self._client_controller.send_command(
-                "ping",
-                {"x": x, "y": y, "dungeon_id": dungeon_id},
-                request_id=uuid.uuid4().hex,
-            )
+        self._dispatch_player_command(
+            "ping",
+            {"x": x, "y": y, "dungeon_id": dungeon_id},
+            silent=True,
+        )
 
     def _on_network_ping_received(self, x: float, y: float, dungeon_id: str) -> None:
         self._show_network_ping(x, y, dungeon_id)
@@ -9150,7 +9182,7 @@ class DungeonAppletWidget(QWidget):
                     if not force:
                         return
                     continue
-                self._client_controller.send_command(
+                self._dispatch_player_command(
                     "resolve_linked_character_conflict",
                     {
                         "mode": "overwrite_dm",
@@ -9163,7 +9195,8 @@ class DungeonAppletWidget(QWidget):
                         "inventory": normalize_inventory_payload(local_payload.get("inventory") or {}),
                         "stats": dict(local_payload.get("stats") or {}),
                     },
-                    request_id=uuid.uuid4().hex,
+                    unavailable_title="Linked Character Conflict",
+                    unavailable_message="You are currently disconnected. Please wait for reconnect.",
                 )
                 return
 
@@ -9251,10 +9284,10 @@ class DungeonAppletWidget(QWidget):
                 if self._sent_character_override_fingerprints.get(sent_key) == fingerprint:
                     continue
                 self._sent_character_override_fingerprints[sent_key] = fingerprint
-                self._client_controller.send_command(
+                self._dispatch_player_command(
                     "link_character_entity",
                     host_payload,
-                    request_id=uuid.uuid4().hex,
+                    silent=True,
                 )
                 sent_count += 1
         return sent_count
@@ -9527,14 +9560,14 @@ class DungeonAppletWidget(QWidget):
                 if not ok:
                     self._append_server_log(f"[WARN] {message}")
                 if self._client_controller is not None and claim_id:
-                    self._client_controller.send_command(
+                    self._dispatch_player_command(
                         "claim_loot_finalize",
                         {
                             "claim_id": claim_id,
                             "applied": bool(ok),
                             "error": "" if ok else str(message or "Unable to apply claim."),
                         },
-                        request_id=uuid.uuid4().hex,
+                        silent=True,
                     )
             return
         data = result.get("data")
@@ -9608,8 +9641,6 @@ class DungeonAppletWidget(QWidget):
     def _on_deferred_icon_selected(self, filename: str) -> None:
         if self._online_mode != ONLINE_MODE_PLAYER or self._client_controller is None:
             return
-        if not self._player_network_actions_available():
-            return
         entity = self.inspector._entity
         if not isinstance(entity, EntityItem):
             return
@@ -9626,7 +9657,7 @@ class DungeonAppletWidget(QWidget):
         if not entity_id:
             entity_id = uuid.uuid4().hex
             entity.setData(ROLE_ENTITY_ID, entity_id)
-        self._client_controller.send_command(
+        self._dispatch_player_command(
             "upload_icon",
             {
                 "entity_id": entity_id,
@@ -9635,7 +9666,7 @@ class DungeonAppletWidget(QWidget):
                 "owner_player_id": str(self._local_player_id or ""),
                 "dungeon_id": str(self._active_dungeon_id or ""),
             },
-            request_id=uuid.uuid4().hex,
+            silent=True,
         )
 
     def _on_tool_changed(self, tool: ToolType):
@@ -10650,16 +10681,13 @@ class DungeonAppletWidget(QWidget):
         self._mark_active_dungeon_dirty()
         if (
             self._online_mode == ONLINE_MODE_PLAYER
-            and self._client_controller is not None
         ):
-            if not self._player_network_actions_available():
-                return
             entity_id = str(entity.data(ROLE_ENTITY_ID) or "").strip()
             if not entity_id:
                 entity_id = uuid.uuid4().hex
                 entity.setData(ROLE_ENTITY_ID, entity_id)
             if entity_id:
-                self._client_controller.send_command(
+                self._dispatch_player_command(
                     "link_character_entity",
                     {
                         "entity_id": entity_id,
@@ -10672,7 +10700,7 @@ class DungeonAppletWidget(QWidget):
                         "stats": dict(stats),
                         "dungeon_id": str(self._active_dungeon_id or ""),
                     },
-                    request_id=uuid.uuid4().hex,
+                    silent=True,
                 )
         elif self._online_mode == ONLINE_MODE_DM_HOST:
             self._broadcast_snapshot_if_host()
@@ -10746,18 +10774,15 @@ class DungeonAppletWidget(QWidget):
                 payload = normalize_inventory_payload(persisted_payload)
         if (
             self._online_mode == ONLINE_MODE_PLAYER
-            and self._client_controller is not None
         ):
-            if not self._player_network_actions_available():
-                return
-            self._client_controller.send_command(
+            self._dispatch_player_command(
                 "sync_character_inventory",
                 {
                     "sheet_id": clean_sheet,
                     "inventory": payload,
                     "dungeon_id": str(self._active_dungeon_id or ""),
                 },
-                request_id=uuid.uuid4().hex,
+                silent=True,
             )
             return
         owner = ""
@@ -11265,18 +11290,15 @@ class DungeonAppletWidget(QWidget):
             self._broadcast_snapshot_if_host()
         elif (
             self._online_mode == ONLINE_MODE_PLAYER
-            and self._client_controller is not None
         ):
-            if not self._player_network_actions_available():
-                return
             self._apply_online_permissions()
-            self._client_controller.send_command(
+            self._dispatch_player_command(
                 "state_update",
                 {
                     "state": self._serialize_scene(),
                     "dungeon_id": self._active_dungeon_id,
                 },
-                request_id=uuid.uuid4().hex,
+                silent=True,
             )
 
     def _refresh_entity_duplicate_badges(self) -> None:

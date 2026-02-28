@@ -87,7 +87,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
-from navigate_widget import load_navigation_data, move_to_trash
+from navigation_repository import load_navigation_data, move_to_trash
 from loot_applet import (
     LootItem,
     LootPreviewTooltip,

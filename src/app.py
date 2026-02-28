@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -22,6 +23,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -65,6 +67,7 @@ from session_creator import SessionCreatorWidget
 from save_paths import dungeon_collections_dir, clear_all_online_runtime_caches
 from tab_workspace import TabWorkspaceController, WorkspaceTabsHost
 from ui.encounter_panel import EncounterPanel
+from user_settings import load_app_settings, save_app_settings
 
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
 
@@ -1431,7 +1434,10 @@ class _WorkspaceTabWindow(QMainWindow):
         self._hide_applet_loading_overlay()
 
     def build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
-        return self._build_applet_widget(key, applet)
+        spinner = self._loading_overlay._spinner
+        if not spinner._timer.isActive():
+            return self._build_applet_widget(key, applet)
+        return self._build_applet_widget_with_animation_pump(key, applet)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -1445,6 +1451,34 @@ class _WorkspaceTabWindow(QMainWindow):
 
     def _hide_applet_loading_overlay(self) -> None:
         self._loading_overlay.hide_loading()
+
+    def _build_applet_widget_with_animation_pump(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
+        previous_profile = sys.getprofile()
+        pump_interval_s = 0.016
+        last_pump = time.perf_counter()
+        reentrant = False
+
+        def _profile(frame, event, arg):  # type: ignore[no-untyped-def]
+            nonlocal last_pump, reentrant
+            if previous_profile is not None:
+                previous_profile(frame, event, arg)
+            if reentrant:
+                return
+            now = time.perf_counter()
+            if now - last_pump < pump_interval_s:
+                return
+            reentrant = True
+            try:
+                QApplication.processEvents()
+            finally:
+                last_pump = now
+                reentrant = False
+
+        sys.setprofile(_profile)
+        try:
+            return self._build_applet_widget(key, applet)
+        finally:
+            sys.setprofile(previous_profile)
 
     def _build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
         return build_applet_widget(self.tabs, key, applet)
@@ -1854,20 +1888,59 @@ class HomeWidget(QWidget):
         dialog = ModernDialog("Settings", self)
         dialog.add_text("Configure your AIO-Hub and DMT experience.")
 
-        # Placeholder for settings content
+        settings = load_app_settings()
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
 
-        label = QLabel("Settings panel is not implemented yet.")
-        label.setStyleSheet("color: #8b949e; font-style: italic;")
-        content_layout.addWidget(label)
+        session_group = QGroupBox("Session Creator", content)
+        session_group.setObjectName("TransparentContainer")
+        session_layout = QVBoxLayout(session_group)
+        session_layout.setContentsMargins(12, 12, 12, 12)
+        session_layout.setSpacing(6)
+
+        session_autosave_checkbox = QCheckBox("Enable autosave while editing sessions", session_group)
+        session_autosave_checkbox.setChecked(
+            bool(settings.get("session_autosave_enabled", False))
+        )
+        session_layout.addWidget(session_autosave_checkbox)
+
+        session_hint = QLabel(
+            "When enabled, Session Creator saves edits automatically after about 2 seconds of inactivity."
+        )
+        session_hint.setWordWrap(True)
+        session_hint.setStyleSheet("color: #8b949e;")
+        session_layout.addWidget(session_hint)
+
+        content_layout.addWidget(session_group)
+        content_layout.addStretch(1)
         dialog.add_content(content)
+
+        def _save_settings() -> None:
+            try:
+                save_app_settings(
+                    {
+                        "session_autosave_enabled": bool(session_autosave_checkbox.isChecked()),
+                    }
+                )
+            except Exception as exc:
+                QMessageBox.warning(
+                    dialog,
+                    "Settings",
+                    f"Unable to save settings.\n\n{exc}",
+                )
+                return
+            dialog.accept()
+
+        save_btn = QPushButton("Save")
+        save_btn.setObjectName("PrimaryButton")
+        save_btn.clicked.connect(_save_settings)
 
         close_btn = QPushButton("Close")
         close_btn.setObjectName("SecondaryButton")
         close_btn.clicked.connect(dialog.accept)
-        dialog.add_buttons([close_btn])
+        dialog.add_buttons([close_btn, save_btn])
         dialog.exec()
 
     def _show_about(self) -> None:

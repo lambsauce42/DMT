@@ -757,6 +757,14 @@ def test_item_character_and_encounter_links_route_to_matching_applets(qtbot) -> 
 def test_slash_links_persist_after_session_save_and_reload(
     qtbot, slash_suggestion, monkeypatch, tmp_path: Path
 ) -> None:
+    def _linked_char_format(editor, snippet: str) -> QTextCharFormat:
+        text = editor.toPlainText()
+        start = text.index(snippet)
+        probe = editor.textCursor()
+        probe.setPosition(start)
+        probe.setPosition(start + 1, QTextCursor.MoveMode.KeepAnchor)
+        return probe.charFormat()
+
     storage_path = tmp_path / "sessions.dmtindex"
     monkeypatch.setattr(session_creator, "session_storage_path", lambda: storage_path)
 
@@ -773,12 +781,14 @@ def test_slash_links_persist_after_session_save_and_reload(
     qtbot.wait(100)
     qtbot.keyClick(widget1.plan_editor, Qt.Key.Key_Return)
     assert "dmt://npc/npc_123" in widget1.plan_editor.toHtml().lower()
+    assert not _linked_char_format(widget1.plan_editor, "Goblin Scout").fontUnderline()
 
     widget1.scratchpad.setFocus()
     qtbot.keyClicks(widget1.scratchpad, "/npc goblin")
     qtbot.wait(100)
     qtbot.keyClick(widget1.scratchpad, Qt.Key.Key_Return)
     assert "dmt://npc/npc_123" in widget1.scratchpad.toHtml().lower()
+    assert not _linked_char_format(widget1.scratchpad, "Goblin Scout").fontUnderline()
     widget1._save_now()
 
     host2 = _FakeMainWindow()
@@ -799,3 +809,5 @@ def test_slash_links_persist_after_session_save_and_reload(
     assert "Goblin Scout" in reopened.scratchpad.toPlainText()
     assert "dmt://npc/npc_123" in reopened.plan_editor.toHtml().lower()
     assert "dmt://npc/npc_123" in reopened.scratchpad.toHtml().lower()
+    assert not _linked_char_format(reopened.plan_editor, "Goblin Scout").fontUnderline()
+    assert not _linked_char_format(reopened.scratchpad, "Goblin Scout").fontUnderline()
