@@ -7815,7 +7815,7 @@ class DungeonAppletWidget(QWidget):
             ok, message, saved_payload = set_inventory_payload_for_sheet_id(
                 sheet_id,
                 normalized_inventory,
-                emit_event=True,
+                emit_event=False,
             )
             if not ok and str(message or "").strip().lower().startswith("character not found"):
                 ensure_ok, ensure_message, _ = ensure_network_linked_sheet_entry(
@@ -7828,7 +7828,7 @@ class DungeonAppletWidget(QWidget):
                     ok, message, saved_payload = set_inventory_payload_for_sheet_id(
                         sheet_id,
                         normalized_inventory,
-                        emit_event=True,
+                        emit_event=False,
                     )
                 else:
                     message = ensure_message or message

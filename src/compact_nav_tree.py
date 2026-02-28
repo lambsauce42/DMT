@@ -117,38 +117,7 @@ def _list_icon_paths() -> list[str]:
     return icons
 
 
-# Default world data structure
-WORLD_DATA: list[dict] = []
 NAVIGATION_PATH = str(navigation_json_path())
-
-
-def _navigation_base_dir() -> Path:
-    return Path(NAVIGATION_PATH).expanduser().resolve().parent
-
-
-def _load_navigation_legacy_file(path: Path) -> list[dict] | None:
-    if not path.exists() or not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        print(f"[WARN] Failed to read legacy navigation file '{path}': {exc}", file=sys.stderr)
-        return None
-    if isinstance(payload, list):
-        return payload
-    print(f"[WARN] Ignoring non-list legacy navigation payload in '{path}'", file=sys.stderr)
-    return None
-
-
-def _write_navigation_legacy_file(path: Path, data: list) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(data if isinstance(data, list) else [], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        print(f"[WARN] Failed to write legacy navigation file '{path}': {exc}", file=sys.stderr)
 
 
 def load_navigation_data() -> list:

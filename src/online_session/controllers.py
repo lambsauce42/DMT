@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import time
 import uuid
 from datetime import datetime, timezone
-from dataclasses import dataclass
 from typing import Dict, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -11,34 +9,14 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from .client import OnlineSessionClient
 from .server import OnlineSessionServer
 
-_COMMAND_RESULT_CACHE_TTL_SECONDS = 180.0
 _HEARTBEAT_INTERVAL_MS = 3000
 _HEARTBEAT_TIMEOUT_MS = 12000
 _RECONNECT_BASE_DELAY_MS = 1200
 _RECONNECT_MAX_DELAY_MS = 8000
-_COMMAND_RETRY_TIMEOUT_SECONDS = 2.5
-_COMMAND_RETRY_MAX_ATTEMPTS = 3
-_RETRYABLE_PLAYER_ACTIONS = {
-    "claim_loot",
-    "add_loot_from_inventory",
-    "link_character_entity",
-    "resolve_linked_character_conflict",
-    "sync_character_inventory",
-    "initiative_update",
-    "upload_icon",
-}
 
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-@dataclass(slots=True)
-class _PendingCommand:
-    action: str
-    payload: dict
-    attempts: int
-    last_sent_monotonic: float
 
 
 class HostSessionController(QObject):
@@ -55,8 +33,6 @@ class HostSessionController(QObject):
         self.server.player_connected.connect(self._on_player_connected)
         self.server.player_disconnected.connect(self._on_player_disconnected)
         self.server.message_received.connect(self._on_server_message)
-        self._command_result_cache: Dict[tuple[str, str], tuple[float, dict]] = {}
-        self._inflight_requests: set[tuple[str, str]] = set()
 
     @property
     def players(self) -> Dict[str, str]:
@@ -83,7 +59,6 @@ class HostSessionController(QObject):
         request_id: Optional[str] = None,
         data: Optional[dict] = None,
     ) -> None:
-        self._prune_command_result_cache()
         payload = {
             "type": "command_result",
             "ok": bool(ok),
@@ -91,10 +66,6 @@ class HostSessionController(QObject):
             "request_id": request_id,
             "data": data or {},
         }
-        if request_id:
-            key = (str(player_id), str(request_id))
-            self._command_result_cache[key] = (time.monotonic(), dict(payload))
-            self._inflight_requests.discard(key)
         self.server.send_to_player(player_id, payload)
 
     def broadcast_chat(self, *, actor_name: str, text: str, system: bool = False) -> None:
@@ -157,11 +128,6 @@ class HostSessionController(QObject):
         self.snapshot_requested.emit(player_id)
 
     def _on_player_disconnected(self, player_id: str, name: str) -> None:
-        pid = str(player_id or "")
-        self._inflight_requests = {key for key in self._inflight_requests if key[0] != pid}
-        self._command_result_cache = {
-            key: value for key, value in self._command_result_cache.items() if key[0] != pid
-        }
         self.players_changed.emit(self.players)
         self.broadcast_chat(actor_name="System", text=f"{name} left", system=True)
         self._broadcast_presence()
@@ -169,17 +135,6 @@ class HostSessionController(QObject):
     def _on_server_message(self, player_id: str, message: dict) -> None:
         msg_type = message.get("type")
         if msg_type == "command":
-            request_id = str(message.get("request_id") or "").strip()
-            if request_id:
-                self._prune_command_result_cache()
-                key = (str(player_id), request_id)
-                cached = self._command_result_cache.get(key)
-                if cached is not None:
-                    self.server.send_to_player(player_id, cached[1])
-                    return
-                if key in self._inflight_requests:
-                    return
-                self._inflight_requests.add(key)
             self.command_received.emit(player_id, message)
             return
         if msg_type == "chat":
@@ -196,14 +151,6 @@ class HostSessionController(QObject):
 
     def _broadcast_presence(self) -> None:
         self.server.broadcast({"type": "presence", "players": self.players, "ts": _utc_timestamp()})
-
-    def _prune_command_result_cache(self) -> None:
-        now = time.monotonic()
-        self._command_result_cache = {
-            key: value
-            for key, value in self._command_result_cache.items()
-            if (now - float(value[0])) <= _COMMAND_RESULT_CACHE_TTL_SECONDS
-        }
 
 
 class ClientSessionController(QObject):
@@ -227,7 +174,6 @@ class ClientSessionController(QObject):
         self.client.message_received.connect(self._on_message)
 
         self._players: Dict[str, str] = {}
-        self._pending_commands: Dict[str, _PendingCommand] = {}
         self._connect_host: str = ""
         self._connect_port: int = 0
         self._connect_name: str = ""
@@ -246,10 +192,6 @@ class ClientSessionController(QObject):
         self._reconnect_timer = QTimer(self)
         self._reconnect_timer.setSingleShot(True)
         self._reconnect_timer.timeout.connect(self._attempt_reconnect)
-        self._pending_retry_timer = QTimer(self)
-        self._pending_retry_timer.setSingleShot(False)
-        self._pending_retry_timer.setInterval(600)
-        self._pending_retry_timer.timeout.connect(self._on_pending_retry_tick)
 
     @property
     def player_id(self) -> Optional[str]:
@@ -284,8 +226,6 @@ class ClientSessionController(QObject):
         self._reconnect_timer.stop()
         self._heartbeat_timer.stop()
         self._heartbeat_timeout_timer.stop()
-        self._pending_retry_timer.stop()
-        self._pending_commands.clear()
         self._players = {}
         self.players_changed.emit(self.players)
         self.client.disconnect()
@@ -307,16 +247,6 @@ class ClientSessionController(QObject):
                 "request_id": request_id,
             }
         )
-        clean_request_id = str(request_id or "").strip()
-        if clean_request_id and str(action or "") in _RETRYABLE_PLAYER_ACTIONS:
-            self._pending_commands[clean_request_id] = _PendingCommand(
-                action=str(action or ""),
-                payload=dict(payload or {}),
-                attempts=1,
-                last_sent_monotonic=time.monotonic(),
-            )
-            if self.client.is_connected() and not self._pending_retry_timer.isActive():
-                self._pending_retry_timer.start()
 
     def request_snapshot(self) -> None:
         if self.client.is_connected():
@@ -326,14 +256,11 @@ class ClientSessionController(QObject):
         self._reconnect_attempt = 0
         self._heartbeat_timer.start()
         self._reset_heartbeat_timeout()
-        if self._pending_commands and not self._pending_retry_timer.isActive():
-            self._pending_retry_timer.start()
         self.connected.emit()
 
     def _on_disconnected(self) -> None:
         self._heartbeat_timer.stop()
         self._heartbeat_timeout_timer.stop()
-        self._pending_retry_timer.stop()
         if self._players:
             self._players = {}
             self.players_changed.emit(self.players)
@@ -345,9 +272,6 @@ class ClientSessionController(QObject):
         self.log_line.emit(f"[INFO] Joined as {player_id}")
         self._reset_heartbeat_timeout()
         self.request_snapshot()
-        self._resend_pending_commands()
-        if self._pending_commands and not self._pending_retry_timer.isActive():
-            self._pending_retry_timer.start()
 
     def _on_message(self, message: dict) -> None:
         self._reset_heartbeat_timeout()
@@ -372,11 +296,6 @@ class ClientSessionController(QObject):
                 self.snapshot_received.emit(state)
             return
         if msg_type == "command_result":
-            request_id = str(message.get("request_id") or "").strip()
-            if request_id:
-                self._pending_commands.pop(request_id, None)
-                if not self._pending_commands and self._pending_retry_timer.isActive():
-                    self._pending_retry_timer.stop()
             self.command_result.emit(message)
             return
         if msg_type == "icon_asset":
@@ -447,61 +366,3 @@ class ClientSessionController(QObject):
             self._connect_name,
             persistent_player_id=self._connect_persistent_player_id,
         )
-
-    def _resend_pending_commands(self) -> None:
-        if not self.client.is_connected():
-            return
-        now = time.monotonic()
-        for request_id, pending in self._pending_commands.items():
-            self.client.send(
-                {
-                    "type": "command",
-                    "action": pending.action,
-                    "payload": dict(pending.payload),
-                    "request_id": request_id,
-                }
-            )
-            pending.last_sent_monotonic = now
-
-    def _on_pending_retry_tick(self) -> None:
-        if not self.client.is_connected():
-            self._pending_retry_timer.stop()
-            return
-        now = time.monotonic()
-        expired: list[str] = []
-        for request_id, pending in self._pending_commands.items():
-            if (now - float(pending.last_sent_monotonic)) < _COMMAND_RETRY_TIMEOUT_SECONDS:
-                continue
-            if pending.attempts >= _COMMAND_RETRY_MAX_ATTEMPTS:
-                expired.append(request_id)
-                continue
-            pending.attempts += 1
-            pending.last_sent_monotonic = now
-            self.client.send(
-                {
-                    "type": "command",
-                    "action": pending.action,
-                    "payload": dict(pending.payload),
-                    "request_id": request_id,
-                }
-            )
-            self.log_line.emit(
-                f"[WARN] Retrying '{pending.action}' command ({pending.attempts}/{_COMMAND_RETRY_MAX_ATTEMPTS})"
-            )
-
-        for request_id in expired:
-            pending = self._pending_commands.pop(request_id, None)
-            if pending is None:
-                continue
-            self.log_line.emit(f"[ERROR] Command '{pending.action}' timed out")
-            self.command_result.emit(
-                {
-                    "type": "command_result",
-                    "ok": False,
-                    "message": f"Command '{pending.action}' timed out",
-                    "request_id": request_id,
-                    "data": {"action": pending.action, "timed_out": True},
-                }
-            )
-        if not self._pending_commands:
-            self._pending_retry_timer.stop()

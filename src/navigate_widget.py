@@ -3,9 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import QCoreApplication, QEasingCurve, QPropertyAnimation, QSize, Qt, Signal
@@ -62,7 +60,19 @@ DISINTEGRATE_ICON = os.path.join(ICON_DIR, "disintegrate.svg")
 REVIVE_ICON = os.path.join(ICON_DIR, "revive.svg")
 TRASH_RETENTION_DAYS = 30
 from save_paths import trash_json_path, navigation_json_path
-from navigation_storage import load_navigation_world_data, save_navigation_world_data
+from navigation_repository import (
+    campaign_trash_entry_matches_world,
+    clean_navigation_id,
+    group_trash_entry_matches_campaign,
+    load_navigation_data as shared_load_navigation_data,
+    load_trash as shared_load_trash,
+    move_to_trash as shared_move_to_trash,
+    normalize_campaign_entry,
+    normalize_group_entry,
+    normalize_world_entry,
+    save_navigation_data as shared_save_navigation_data,
+    save_trash as shared_save_trash,
+)
 TRASH_RETENTION_DAYS = 30
 TRASH_PATH = trash_json_path()
 NAVIGATION_PATH = str(navigation_json_path())
@@ -71,101 +81,22 @@ NAVIGATION_PATH = str(navigation_json_path())
 
 
 def load_trash(path: Optional[str] = None) -> list[dict]:
-    if not path:
-        path = TRASH_PATH
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception:
-        return []
-    if isinstance(data, list):
-        return data
-    return []
+    return shared_load_trash(path=path or TRASH_PATH)
 
 
 def save_trash(entries: list[dict], path: Optional[str] = None) -> None:
-    if not path:
-        path = TRASH_PATH
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(entries, handle, ensure_ascii=False, indent=2)
+    shared_save_trash(entries, path=path or TRASH_PATH)
 
 
 
-
-
-def _navigation_base_dir() -> str:
-    return str(Path(NAVIGATION_PATH).expanduser().resolve().parent)
-
-
-def _load_navigation_legacy_file(path: Path) -> list[dict] | None:
-    if not path.exists() or not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        print(f"[WARN] Failed to read legacy navigation file '{path}': {exc}", file=sys.stderr)
-        return None
-    if isinstance(payload, list):
-        return payload
-    print(f"[WARN] Ignoring non-list legacy navigation payload in '{path}'", file=sys.stderr)
-    return None
-
-
-def _write_navigation_legacy_file(path: Path, data: list) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(data if isinstance(data, list) else [], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        print(f"[WARN] Failed to write legacy navigation file '{path}': {exc}", file=sys.stderr)
 
 
 def save_navigation_data(data: list) -> None:
-    base_dir = Path(_navigation_base_dir())
-    legacy_path = Path(NAVIGATION_PATH).expanduser().resolve()
-    try:
-        save_navigation_world_data(
-            data if isinstance(data, list) else [],
-            base_dir=base_dir,
-        )
-    except Exception as exc:
-        print(f"[WARN] Failed to save package navigation data in '{base_dir}': {exc}", file=sys.stderr)
-    if legacy_path.exists() and legacy_path.is_file():
-        _write_navigation_legacy_file(legacy_path, data)
+    shared_save_navigation_data(data, navigation_path=NAVIGATION_PATH)
 
 
 def load_navigation_data() -> list:
-    base_dir = Path(_navigation_base_dir())
-    legacy_path = Path(NAVIGATION_PATH).expanduser().resolve()
-    packaged: list | None = None
-    try:
-        data = load_navigation_world_data(base_dir=base_dir)
-        packaged = data if isinstance(data, list) else None
-    except Exception as exc:
-        print(f"[WARN] Failed to load package navigation data from '{base_dir}': {exc}", file=sys.stderr)
-    if packaged:
-        return packaged
-    legacy = _load_navigation_legacy_file(legacy_path)
-    if legacy is not None:
-        if packaged == [] and legacy:
-            print(
-                f"[INFO] Loaded legacy navigation data from '{legacy_path}', migrating to package storage.",
-                file=sys.stderr,
-            )
-            try:
-                save_navigation_world_data(legacy, base_dir=base_dir)
-            except Exception as exc:
-                print(
-                    f"[WARN] Failed to migrate legacy navigation data to '{base_dir}': {exc}",
-                    file=sys.stderr,
-                )
-        return legacy
-    return packaged if isinstance(packaged, list) else WORLD_DATA
+    return shared_load_navigation_data(navigation_path=NAVIGATION_PATH)
 
 
 def move_to_trash(
@@ -174,25 +105,12 @@ def move_to_trash(
     parent: Optional[dict] = None,
     path: Optional[str] = None,
 ) -> dict:
-    if not isinstance(payload, dict):
-        return {}
-    if not path:
-        path = TRASH_PATH
-    trash = load_trash(path)
-    trash_entry = {
-        "type": entry_type,
-        "name": payload.get("name"),
-        "icon": payload.get("icon"),
-        "payload": copy.deepcopy(payload),
-        "parent": parent or {},
-        "deleted_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    trash.append(trash_entry)
-    save_trash(trash, path)
-    return trash_entry
-
-WORLD_DATA: list[dict] = []
-
+    return shared_move_to_trash(
+        entry_type,
+        payload,
+        parent=parent,
+        path=path or TRASH_PATH,
+    )
 
 def _load_icon(path: str, size: int) -> Optional[QPixmap]:
     if not path or not os.path.exists(path):
@@ -738,47 +656,14 @@ class NavigateContentWidget(QWidget):
         for world in loaded_data:
             if not isinstance(world, dict):
                 continue
-            world_name = str(world.get("name", "")).strip()
-            if not world_name:
-                continue
-            world_entry = {
-                "name": world_name,
-                "icon": world.get("icon") or self._default_world_icon,
-                "campaigns": [],
-            }
-            campaigns = world.get("campaigns")
-            if not isinstance(campaigns, list):
-                campaigns = []
-            for campaign in campaigns:
-                if isinstance(campaign, dict):
-                    campaign_name = str(campaign.get("name", "")).strip()
-                    campaign_icon = campaign.get("icon") or self._default_campaign_icon
-                    raw_groups = campaign.get("groups")
-                else:
-                    campaign_name = str(campaign).strip()
-                    campaign_icon = self._default_campaign_icon
-                    raw_groups = []
-                if not campaign_name:
-                    continue
-                groups = []
-                if isinstance(raw_groups, list):
-                    for group in raw_groups:
-                        if isinstance(group, dict):
-                            group_name = str(group.get("name", "")).strip()
-                            group_icon = group.get("icon") or self._default_group_icon
-                        else:
-                            group_name = str(group).strip()
-                            group_icon = self._default_group_icon
-                        if group_name:
-                            groups.append({"name": group_name, "icon": group_icon})
-                world_entry["campaigns"].append(
-                    {
-                        "name": campaign_name,
-                        "icon": campaign_icon,
-                        "groups": groups,
-                    }
-                )
-            self._data.append(world_entry)
+            normalized = normalize_world_entry(
+                world,
+                default_icon=self._default_world_icon,
+                default_campaign_icon=self._default_campaign_icon,
+                default_group_icon=self._default_group_icon,
+            )
+            if normalized["name"]:
+                self._data.append(normalized)
 
         self.worlds_section: Optional[CollapsibleSection] = None
         self.world_sections: list[CollapsibleSection] = []
@@ -1014,10 +899,17 @@ class NavigateContentWidget(QWidget):
         campaign = campaigns[campaign_index]
         campaign_name = str(campaign.get("name", ""))
         if campaign:
+            parent = {"world": world["name"]}
+            world_id = clean_navigation_id(world.get("id"))
+            if world_id:
+                parent["world_id"] = world_id
+            campaign_payload = copy.deepcopy(campaign)
+            if world_id and not clean_navigation_id(campaign_payload.get("world_id")):
+                campaign_payload["world_id"] = world_id
             self._move_to_trash(
                 "campaign",
-                campaign,
-                parent={"world": world["name"]},
+                campaign_payload,
+                parent=parent,
             )
         del world["campaigns"][campaign_index]
         expansion_state.get("campaigns", {}).pop((world["name"], campaign_name), None)
@@ -1114,13 +1006,31 @@ class NavigateContentWidget(QWidget):
         if world is None:
             return
         existing = {camp["name"] for camp in world["campaigns"]}
-        entries = [
+        candidates = [
             entry
             for entry in self._trash
             if entry.get("type") == "campaign"
-            and entry.get("parent", {}).get("world") == world["name"]
             and entry.get("name") not in existing
         ]
+        entries = [
+            entry
+            for entry in candidates
+            if campaign_trash_entry_matches_world(
+                entry,
+                world,
+                allow_renamed_legacy=False,
+            )
+        ]
+        if not entries:
+            entries = [
+                entry
+                for entry in candidates
+                if campaign_trash_entry_matches_world(
+                    entry,
+                    world,
+                    allow_renamed_legacy=True,
+                )
+            ]
         if not entries:
             QMessageBox.information(self, "No Campaigns", "No campaigns are eligible to revive.")
             return
@@ -1211,10 +1121,22 @@ class NavigateContentWidget(QWidget):
         group = groups[group_index]
         world = self._get_world(world_index)
         if group and world:
+            parent = {"world": world["name"], "campaign": campaign["name"]}
+            world_id = clean_navigation_id(world.get("id"))
+            campaign_id = clean_navigation_id(campaign.get("id"))
+            if world_id:
+                parent["world_id"] = world_id
+            if campaign_id:
+                parent["campaign_id"] = campaign_id
+            group_payload = copy.deepcopy(group)
+            if world_id and not clean_navigation_id(group_payload.get("world_id")):
+                group_payload["world_id"] = world_id
+            if campaign_id and not clean_navigation_id(group_payload.get("campaign_id")):
+                group_payload["campaign_id"] = campaign_id
             self._move_to_trash(
                 "group",
-                group,
-                parent={"world": world["name"], "campaign": campaign["name"]},
+                group_payload,
+                parent=parent,
             )
         del campaign["groups"][group_index]
         save_navigation_data(self._data)
@@ -1316,14 +1238,33 @@ class NavigateContentWidget(QWidget):
         if world is None:
             return
         existing = {group["name"] for group in campaign["groups"]}
-        entries = [
+        candidates = [
             entry
             for entry in self._trash
             if entry.get("type") == "group"
-            and entry.get("parent", {}).get("world") == world["name"]
-            and entry.get("parent", {}).get("campaign") == campaign["name"]
             and entry.get("name") not in existing
         ]
+        entries = [
+            entry
+            for entry in candidates
+            if group_trash_entry_matches_campaign(
+                entry,
+                world,
+                campaign,
+                allow_renamed_legacy=False,
+            )
+        ]
+        if not entries:
+            entries = [
+                entry
+                for entry in candidates
+                if group_trash_entry_matches_campaign(
+                    entry,
+                    world,
+                    campaign,
+                    allow_renamed_legacy=True,
+                )
+            ]
         if not entries:
             QMessageBox.information(self, "No Groups", "No groups are eligible to revive.")
             return

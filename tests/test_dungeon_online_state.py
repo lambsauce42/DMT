@@ -1460,6 +1460,108 @@ def test_host_sync_character_inventory_updates_owned_linked_entities(dungeon_wid
     assert dungeon_widget._dungeons[0]["dirty"] is True
 
 
+def test_host_sync_character_inventory_persists_authoritative_sheet_state(
+    monkeypatch, dungeon_widget
+):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def stop(self):
+            return None
+
+    captured = {"ensure_calls": 0}
+
+    def _set_inventory_payload(sheet_id, inventory_payload, *, emit_event=True):
+        captured["sheet_id"] = sheet_id
+        captured["inventory_payload"] = dict(inventory_payload)
+        captured["emit_event"] = emit_event
+        return (
+            True,
+            "Inventory updated.",
+            {
+                "inventory": ["item_saved"],
+                "inventory_notes": "saved",
+                "equipment": {"head": "helm_saved"},
+                "gold": 7,
+                "silver": 2,
+                "copper": 1,
+            },
+        )
+
+    fake_module = types.SimpleNamespace(
+        set_inventory_payload_for_sheet_id=_set_inventory_payload,
+        ensure_network_linked_sheet_entry=lambda *_args, **_kwargs: captured.__setitem__(
+            "ensure_calls", captured["ensure_calls"] + 1
+        )
+        or (True, "ok", {}),
+    )
+    monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._broadcast_snapshot_if_host = lambda: None
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_inventory": {},
+                        "icon_path": "",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_sync_character_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "inventory": {
+                "inventory": ["item_x"],
+                "inventory_notes": "claimed",
+                "equipment": {"head": "helm_a"},
+                "gold": 5,
+                "hp": 999,
+            },
+        },
+        request_id="sync-2",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is True
+    assert captured["sheet_id"] == "sheet-1"
+    assert captured["inventory_payload"]["inventory"] == ["item_x"]
+    assert "hp" not in captured["inventory_payload"]
+    assert captured["emit_event"] is False
+    assert captured["ensure_calls"] == 0
+
+    first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
+    assert first_item["linked_inventory"]["inventory"] == ["item_saved"]
+    assert first_item["linked_inventory"]["gold"] == 7
+
+
 def test_host_link_character_sync_allows_claim_for_player_owned_entity(dungeon_widget):
     class _HostStub:
         def __init__(self):
