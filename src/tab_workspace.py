@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Protocol, Tuple
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFontMetrics, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QImage, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QStackedWidget, QVBoxLayout, QWidget
 
 
@@ -17,9 +17,8 @@ TAB_TEXT_RIGHT_PADDING = 10
 TAB_CLOSE_RIGHT_PADDING = 6
 TAB_CLOSE_GAP = 8
 TAB_CLOSE_SIZE = 12
-TAB_CLOSE_HIT_SLOP_X = 4
-TAB_CLOSE_HIT_SLOP_Y = 5
 TAB_CLOSE_HOVER_PAD = 2
+TAB_CLOSE_HITBOX_SCALE = 1.3
 TAB_ACTIVE_LINE_HEIGHT = 2
 
 DROP_TARGET_TOP_SLOP_PX = 4
@@ -30,6 +29,8 @@ ANIMATION_TICK_MS = 16
 ANIMATION_BLEND = 0.35
 ANIMATION_SETTLE_EPSILON = 0.6
 ANIMATION_VISIBLE_SETTLE_EPSILON = 1.5
+
+_CLOSE_GLYPH_PIXEL_RECT_CACHE: Dict[Tuple[str, int, int], QRect] = {}
 
 
 def compute_workspace_tab_width(font_metrics: QFontMetrics, title: str, *, closable: bool) -> int:
@@ -49,17 +50,106 @@ def compute_workspace_tab_close_rect(tab_rect: QRect) -> QRect:
     return QRect(close_x, close_y, TAB_CLOSE_SIZE, TAB_CLOSE_SIZE)
 
 
-def compute_workspace_tab_close_hit_rect(tab_rect: QRect) -> QRect:
+def _centered_square(center: QPoint, size: int) -> QRect:
+    side = max(1, int(size) | 1)
+    half = side // 2
+    return QRect(center.x() - half, center.y() - half, side, side)
+
+
+def _rendered_centered_text_pixel_rect(size: QSize, font: QFont, text: str) -> QRect:
+    width = max(1, int(size.width()))
+    height = max(1, int(size.height()))
+    cache_key = (font.toString(), width, height)
+    cached = _CLOSE_GLYPH_PIXEL_RECT_CACHE.get(cache_key)
+    if cached is not None:
+        return QRect(cached)
+
+    image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    if painter.isActive():
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255, 255))
+        painter.drawText(QRect(0, 0, width, height), Qt.AlignmentFlag.AlignCenter, text)
+        painter.end()
+
+    min_x = width
+    min_y = height
+    max_x = -1
+    max_y = -1
+    for y in range(height):
+        for x in range(width):
+            if image.pixelColor(x, y).alpha() <= 0:
+                continue
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x)
+            max_y = max(max_y, y)
+
+    if max_x < 0 or max_y < 0:
+        result = QRect()
+    else:
+        result = QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+    _CLOSE_GLYPH_PIXEL_RECT_CACHE[cache_key] = QRect(result)
+    return result
+
+
+def compute_workspace_tab_close_glyph_rect(tab_rect: QRect, font: QFont) -> QRect:
     close_rect = compute_workspace_tab_close_rect(tab_rect)
     if close_rect.isNull():
         return QRect()
-    expanded = close_rect.adjusted(
-        -TAB_CLOSE_HIT_SLOP_X,
-        -TAB_CLOSE_HIT_SLOP_Y,
-        TAB_CLOSE_HIT_SLOP_X,
-        TAB_CLOSE_HIT_SLOP_Y,
-    )
-    return expanded.intersected(tab_rect)
+    local_rect = _rendered_centered_text_pixel_rect(close_rect.size(), font, "x")
+    if local_rect.isNull():
+        return QRect()
+    return local_rect.translated(close_rect.topLeft()).intersected(tab_rect)
+
+
+def compute_workspace_tab_close_hit_rect(tab_rect: QRect, font: QFont) -> QRect:
+    base_rect = _compute_workspace_tab_close_base_highlight_rect(tab_rect, font)
+    if base_rect.isNull():
+        return QRect()
+    base_side = max(int(base_rect.width()), int(base_rect.height()))
+    hit_side = max(base_side, int(round(base_side * TAB_CLOSE_HITBOX_SCALE)))
+    return _centered_square(base_rect.center(), hit_side).intersected(tab_rect)
+
+
+def _compute_workspace_tab_close_base_highlight_rect(tab_rect: QRect, font: QFont) -> QRect:
+    glyph_rect = compute_workspace_tab_close_glyph_rect(tab_rect, font)
+    if glyph_rect.isNull():
+        return QRect()
+    return glyph_rect.adjusted(
+        -TAB_CLOSE_HOVER_PAD,
+        -TAB_CLOSE_HOVER_PAD,
+        TAB_CLOSE_HOVER_PAD,
+        TAB_CLOSE_HOVER_PAD,
+    ).intersected(tab_rect)
+
+
+def compute_workspace_tab_close_hover_rect(tab_rect: QRect, font: QFont) -> QRect:
+    return compute_workspace_tab_close_hit_rect(tab_rect, font)
+
+
+def paint_workspace_tab_close_glyph(
+    painter: QPainter,
+    tab_rect: QRect,
+    *,
+    color: QColor,
+    hover_fill: Optional[QColor] = None,
+) -> None:
+    close_rect = compute_workspace_tab_close_rect(tab_rect)
+    if close_rect.isNull():
+        return
+    font = painter.font()
+    if hover_fill is not None:
+        hover_rect = compute_workspace_tab_close_hover_rect(tab_rect, font)
+        if not hover_rect.isNull():
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(hover_fill)
+            painter.drawRoundedRect(hover_rect, 4, 4)
+            painter.restore()
+    painter.setPen(color)
+    painter.drawText(close_rect, Qt.AlignmentFlag.AlignCenter, "x")
 
 
 def compute_workspace_tab_name_rect(tab_rect: QRect, *, closable: bool) -> QRect:
@@ -149,14 +239,13 @@ class _FloatingTabPreview(QWidget):
         painter.setBrush(QColor(31, 111, 235, 120))
         painter.drawRoundedRect(rect, 6, 6)
         name_rect = compute_workspace_tab_name_rect(rect, closable=True)
-        close_rect = compute_workspace_tab_close_rect(rect)
         painter.setPen(QColor(230, 237, 243))
         painter.drawText(
             name_rect,
             Qt.AlignmentFlag.AlignCenter,
             self.fontMetrics().elidedText(self._title, Qt.TextElideMode.ElideRight, name_rect.width()),
         )
-        painter.drawText(close_rect, Qt.AlignmentFlag.AlignCenter, "x")
+        paint_workspace_tab_close_glyph(painter, rect, color=QColor(230, 237, 243))
         painter.fillRect(
             QRect(rect.x(), rect.bottom() - TAB_ACTIVE_LINE_HEIGHT + 1, rect.width(), TAB_ACTIVE_LINE_HEIGHT),
             QColor(88, 166, 255),
@@ -895,21 +984,15 @@ class WorkspaceTabStrip(QWidget):
         )
 
         if entry.closable and not close_rect.isNull():
-            if is_close_hover:
-                painter.fillRect(
-                    close_rect.adjusted(
-                        -TAB_CLOSE_HOVER_PAD,
-                        -TAB_CLOSE_HOVER_PAD,
-                        TAB_CLOSE_HOVER_PAD,
-                        TAB_CLOSE_HOVER_PAD,
-                    ),
-                    QColor(240, 246, 252, 24),
-                )
             close_color = QColor(189, 198, 207)
             if is_close_hover:
                 close_color = QColor(230, 237, 243)
-            painter.setPen(close_color)
-            painter.drawText(close_rect, Qt.AlignmentFlag.AlignCenter, "x")
+            paint_workspace_tab_close_glyph(
+                painter,
+                rect,
+                color=close_color,
+                hover_fill=QColor(240, 246, 252, 24) if is_close_hover else None,
+            )
 
         if is_active:
             line_rect = QRect(rect.x(), rect.bottom() - TAB_ACTIVE_LINE_HEIGHT + 1, rect.width(), TAB_ACTIVE_LINE_HEIGHT)
@@ -927,7 +1010,7 @@ class WorkspaceTabStrip(QWidget):
             if not rect.contains(pos):
                 continue
             if entry.closable:
-                close_rect = compute_workspace_tab_close_hit_rect(rect)
+                close_rect = compute_workspace_tab_close_hit_rect(rect, self.font())
                 if close_rect.contains(pos):
                     return int(tab_id), True
             return int(tab_id), False
