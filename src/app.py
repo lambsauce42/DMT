@@ -1495,7 +1495,7 @@ class DetachedTabWindow(_WorkspaceTabWindow):
         super().__init__(
             workspace_controller,
             primary=False,
-            title="AIO-Hub | Detached Tabs",
+            title="Dungeon Master Tools | Detached Tabs",
         )
 
     def closeEvent(self, event) -> None:
@@ -1512,7 +1512,7 @@ class MainLauncherWindow(_WorkspaceTabWindow):
         super().__init__(
             self._workspace_controller,
             primary=True,
-            title="AIO-Hub | D&D Management Toolkit",
+            title="Dungeon Master Tools",
         )
         self._workspace_controller.set_detached_window_factory(
             lambda: DetachedTabWindow(self._workspace_controller)
@@ -1886,7 +1886,7 @@ class HomeWidget(QWidget):
 
     def _show_settings(self) -> None:
         dialog = ModernDialog("Settings", self)
-        dialog.add_text("Configure your AIO-Hub and DMT experience.")
+        dialog.add_text("Configure your Dungeon Master Tools experience.")
 
         settings = load_app_settings()
         content = QWidget()
@@ -1935,18 +1935,20 @@ class HomeWidget(QWidget):
 
         save_btn = QPushButton("Save")
         save_btn.setObjectName("PrimaryButton")
+        save_btn.setFixedWidth(96)
         save_btn.clicked.connect(_save_settings)
 
         close_btn = QPushButton("Close")
         close_btn.setObjectName("SecondaryButton")
+        close_btn.setFixedWidth(96)
         close_btn.clicked.connect(dialog.accept)
         dialog.add_buttons([close_btn, save_btn])
         dialog.exec()
 
     def _show_about(self) -> None:
-        dialog = ModernDialog("About D&D Management Toolkit", self)
+        dialog = ModernDialog("About Dungeon Master Tools", self)
         dialog.add_text(
-            "A comprehensive suite for Dungeon Masters and players, integrated into the AIO-Hub platform."
+            "A comprehensive suite for Dungeon Masters and players."
         )
 
         message = (
@@ -1981,7 +1983,7 @@ def main() -> int:
     except Exception:
         pass
     app = QApplication(sys.argv)
-    app.setApplicationName("DnD-AAT")
+    app.setApplicationName("DMT")
     app.setStyleSheet(DARK_STYLESHEET)
     window = MainLauncherWindow()
     window.show()

@@ -8,6 +8,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from session_creator import SessionCreatorWidget
+from user_settings import save_app_settings
 
 
 def _create_named_session(widget: SessionCreatorWidget, name: str) -> None:
@@ -36,6 +37,28 @@ def test_session_creator_close_stops_autosave_timer(qtbot):
     widget.close()
 
     assert not widget.auto_save_timer.isActive()
+
+
+def test_session_creator_autosave_is_disabled_by_default(qtbot):
+    widget = SessionCreatorWidget()
+    qtbot.addWidget(widget)
+    _create_named_session(widget, "Autosave Default Off")
+
+    widget._trigger_auto_save()
+
+    assert widget._current_session_dirty is True
+    assert not widget.auto_save_timer.isActive()
+
+
+def test_session_creator_autosave_uses_saved_setting(qtbot):
+    save_app_settings({"session_autosave_enabled": True})
+    widget = SessionCreatorWidget()
+    qtbot.addWidget(widget)
+    _create_named_session(widget, "Autosave Enabled")
+
+    widget._trigger_auto_save()
+
+    assert widget.auto_save_timer.isActive()
 
 
 def test_session_creator_close_persists_pending_edits(qtbot):

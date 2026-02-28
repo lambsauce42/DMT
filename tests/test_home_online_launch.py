@@ -2,7 +2,7 @@ import os
 import sys
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -10,6 +10,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from app import HomeWidget, MainLauncherWindow, APPLET_DEFINITIONS
+from user_settings import is_session_autosave_enabled
 
 
 @pytest.fixture(scope="module")
@@ -188,3 +189,24 @@ def test_main_window_close_clears_online_runtime_caches(monkeypatch, qapp):
     window.close()
 
     assert calls == [True]
+
+
+def test_home_settings_saves_session_autosave_toggle(monkeypatch, qapp):
+    widget = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
+
+    def _fake_exec(self):
+        checkbox = self.findChild(QCheckBox)
+        assert checkbox is not None
+        assert checkbox.isChecked() is False
+        checkbox.setChecked(True)
+        for button in self.findChildren(QPushButton):
+            if button.text() == "Save":
+                button.click()
+                return 0
+        pytest.fail("Save button not found")
+
+    monkeypatch.setattr("app.ModernDialog.exec", _fake_exec)
+
+    widget._show_settings()
+
+    assert is_session_autosave_enabled() is True

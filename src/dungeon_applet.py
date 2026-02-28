@@ -2218,7 +2218,7 @@ class EntityInspectorPanel(QWidget):
         stats_layout.setContentsMargins(12, 12, 12, 12)
         stats_layout.setSpacing(6)
         
-        # D&D Stats
+        # Ability scores
         self.stat_widgets = {}
         stat_names = ["STR", "DEX", "CON", "INT", "WIS", "CHA"]
         
