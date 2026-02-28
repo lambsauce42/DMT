@@ -37,6 +37,7 @@ class TestPlayerSheetsUtils(unittest.TestCase):
         entry = PlayerSheetEntry(
             name="Grog",
             pdf_path="grog.pdf",
+            sheet_id="Grog_sheet_20260226120000_deadbeefcafebabe",
             world="Exandria",
             campaign="Vox Machina",
             group="Bells Hells",
@@ -47,11 +48,13 @@ class TestPlayerSheetsUtils(unittest.TestCase):
         
         as_dict = entry_to_dict(entry)
         self.assertEqual(as_dict["name"], "Grog")
+        self.assertEqual(as_dict["sheet_id"], "Grog_sheet_20260226120000_deadbeefcafebabe")
         self.assertEqual(as_dict["tags"], ["goliath", "barbarian"])
         
         back = entry_from_dict(as_dict)
         self.assertEqual(back.name, entry.name)
         self.assertEqual(back.pdf_path, entry.pdf_path)
+        self.assertEqual(back.sheet_id, entry.sheet_id)
         self.assertEqual(back.world, entry.world)
         self.assertEqual(back.tags, entry.tags)
         self.assertEqual(back.inventory, entry.inventory)

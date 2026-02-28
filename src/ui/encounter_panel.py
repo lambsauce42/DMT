@@ -56,7 +56,7 @@ from encounter_engine import (
 )
 from dmt_package import read_dmt_package_info, write_dmt_package
 from save_paths import dnd_saves_dir
-from unique_ids import generate_probabilistic_unique_id
+from unique_ids import generate_named_object_id
 from ui.encounter_edit_dialog import ModifyMonsterDialog
 from ui.widgets.encounter_progress import EncounterProgressBar
 from ui.widgets.monster_card import MonsterCard
@@ -1400,7 +1400,7 @@ class EncounterPanel(QWidget):
 
     def new_encounter(self) -> None:
         self._encounter_entries = []
-        self._encounter_id = generate_probabilistic_unique_id("encounter")
+        self._encounter_id = ""
         self._refresh_encounter()
 
     def _encounters_dir(self) -> Path:
@@ -1436,7 +1436,10 @@ class EncounterPanel(QWidget):
             return
         self._encounter_id = str(data.get("object_id") or "").strip()
         if not self._encounter_id:
-            self._encounter_id = generate_probabilistic_unique_id("encounter")
+            self._encounter_id = generate_named_object_id(
+                str(data.get("name") or path.stem or "encounter"),
+                "encounter",
+            )
         self._encounter_entries = []
         levels = data.get("party_levels") or []
         self._party_size_slider.setValue(max(1, len(levels)))
@@ -1554,7 +1557,7 @@ class EncounterPanel(QWidget):
             self._encounter_entries, self._party_size_slider.value()
         )
         if not self._encounter_id:
-            self._encounter_id = generate_probabilistic_unique_id("encounter")
+            self._encounter_id = generate_named_object_id(name or "encounter", "encounter")
         return {
             "format": ENCOUNTER_FILE_FORMAT,
             "object_type": "encounter",

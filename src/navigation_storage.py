@@ -4,7 +4,7 @@ from pathlib import Path
 
 from dmt_package import read_dmt_package_info, write_dmt_package
 from save_paths import dnd_saves_dir
-from unique_ids import generate_probabilistic_unique_id
+from unique_ids import generate_named_object_id
 
 
 NAVIGATION_OBJECTS_DIR_NAME = "navigation_objects"
@@ -179,7 +179,7 @@ def save_navigation_world_data(world_data: list[dict], *, base_dir: Path | None 
         world_name = str(world.get("name") or "").strip()
         if not world_name:
             continue
-        world_id = str(world.get("id") or "").strip() or generate_probabilistic_unique_id("world")
+        world_id = str(world.get("id") or "").strip() or generate_named_object_id(world_name, "world")
         world["id"] = world_id
         world_path = _world_file_path(world_id, base_dir=base_dir)
         expected.add(world_path.resolve())
@@ -204,7 +204,10 @@ def save_navigation_world_data(world_data: list[dict], *, base_dir: Path | None 
             campaign_name = str(campaign.get("name") or "").strip()
             if not campaign_name:
                 continue
-            campaign_id = str(campaign.get("id") or "").strip() or generate_probabilistic_unique_id("campaign")
+            campaign_id = (
+                str(campaign.get("id") or "").strip()
+                or generate_named_object_id(campaign_name, "campaign")
+            )
             campaign["id"] = campaign_id
             campaign_path = _campaign_file_path(campaign_id, base_dir=base_dir)
             expected.add(campaign_path.resolve())
@@ -230,7 +233,10 @@ def save_navigation_world_data(world_data: list[dict], *, base_dir: Path | None 
                 group_name = str(group.get("name") or "").strip()
                 if not group_name:
                     continue
-                group_id = str(group.get("id") or "").strip() or generate_probabilistic_unique_id("group")
+                group_id = (
+                    str(group.get("id") or "").strip()
+                    or generate_named_object_id(group_name, "group")
+                )
                 group["id"] = group_id
                 group_path = _group_file_path(group_id, base_dir=base_dir)
                 expected.add(group_path.resolve())

@@ -80,7 +80,7 @@ from session_text_links import LinkSuggestion, ParsedSessionLink, load_link_sugg
 from ui.widgets import TerminalWidget
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
 from user_settings import is_session_autosave_enabled
-from unique_ids import generate_probabilistic_unique_id
+from unique_ids import generate_named_object_id, generate_probabilistic_unique_id
 
 
 # Attempt to import PDF Viewer
@@ -239,7 +239,6 @@ def sanitize_filename(name: str) -> str:
     cleaned = cleaned.strip("._-")
     return cleaned or "session"
 
-
 def _is_test_env() -> bool:
     if os.environ.get("DMT_TEST_MODE") == "1":
         return True
@@ -328,7 +327,10 @@ class SessionManager:
                     payload = info.get("payload")
                     if not isinstance(payload, dict):
                         raise ValueError("Missing session payload.")
-                    session = self._dict_to_session(payload)
+                    session = self._dict_to_session(
+                        payload,
+                        object_id=str(info.get("object_id") or "").strip(),
+                    )
                     attachments = self._attachments_from_payload(info.get("attachments"))
                     session_assets: dict[str, bytes] = {}
                     for attachment in attachments:
@@ -439,10 +441,13 @@ class SessionManager:
             )
         return attachments
 
-    def _dict_to_session(self, d: dict) -> Session:
+    def _dict_to_session(self, d: dict, *, object_id: str = "") -> Session:
         logs = [SessionLogEntry(**l) for l in d.get("logs", []) if isinstance(l, dict)]
+        session_id = str(object_id or d.get("id") or "").strip()
+        if not session_id:
+            session_id = sanitize_filename(str(d["name"]))
         return Session(
-            id=d.get("id", sanitize_filename(d["name"])),
+            id=session_id,
             name=d["name"],
             session_date=d["session_date"],
             in_game_date=d.get("in_game_date", ""),
@@ -1374,7 +1379,7 @@ class SessionCreatorWidget(QWidget):
             self._on_session_list_changed(selected_item, None)
 
     def _new_session_id(self, default_name: str) -> str:
-        base_id = sanitize_filename(f"{default_name}_{_now_timestamp()}")
+        base_id = generate_named_object_id(default_name, "session")
         existing_ids = {str(session.id) for session in self.manager.sessions}
         storage_root = session_storage_path().parent
         candidate = base_id

@@ -88,6 +88,7 @@ from PySide6.QtWidgets import (
 )
 
 from navigation_repository import load_navigation_data, move_to_trash
+from unique_ids import generate_named_object_id
 from loot_applet import (
     LootItem,
     LootPreviewTooltip,
@@ -1066,7 +1067,7 @@ def _equipment_slot_background_pixmap(
 
 
 def sheet_id_for_entry(entry: PlayerSheetEntry) -> str:
-    return sanitize_filename(entry.name)
+    return str(getattr(entry, "sheet_id", "") or "").strip() or sanitize_filename(entry.name)
 
 
 def character_sheet_pdf_path(sheet_id: str) -> Path:
@@ -1083,6 +1084,15 @@ def character_sheet_trash_path(sheet_id: str) -> Path:
 
 def character_sheet_archive_trash_path(sheet_id: str) -> Path:
     return character_sheets_trash_dir() / f"{sheet_id}{ARCHIVE_EXTENSION}"
+
+
+def _ensure_entry_sheet_id(entry: PlayerSheetEntry) -> str:
+    current = str(getattr(entry, "sheet_id", "") or "").strip()
+    if current:
+        return current
+    generated = generate_named_object_id(str(getattr(entry, "name", "") or "sheet"), "sheet")
+    entry.sheet_id = generated
+    return generated
 
 
 def move_entry_files_to_trash(entry: PlayerSheetEntry) -> Optional[str]:
@@ -1185,6 +1195,7 @@ def entry_to_dict(entry: PlayerSheetEntry) -> dict:
         "name": entry.name,
         "pdf_path": entry.pdf_path,
         "archive_path": entry.archive_path,
+        "sheet_id": str(entry.sheet_id or ""),
         "world": entry.world,
         "campaign": entry.campaign,
         "group": entry.group,
@@ -1222,6 +1233,7 @@ def entry_from_dict(payload: dict) -> Optional[PlayerSheetEntry]:
         name=name,
         pdf_path=pdf_path,
         archive_path=archive_path,
+        sheet_id=str(payload.get("sheet_id", "")).strip(),
         world=payload.get("world") or None,
         campaign=payload.get("campaign") or None,
         group=payload.get("group") or None,
@@ -1250,8 +1262,10 @@ class PlayerSheetEntry:
     gold: int = 0
     silver: int = 0
     copper: int = 0
+    sheet_id: str = ""
 
     def __post_init__(self) -> None:
+        self.sheet_id = str(self.sheet_id or "").strip()
         self.tags = normalize_tags(self.tags)
         self.inventory_notes = str(self.inventory_notes or "")
         self.equipment = _normalize_equipment(self.equipment)
@@ -1308,6 +1322,8 @@ def _apply_entry_meta(entry: PlayerSheetEntry, meta: dict) -> None:
     name = str(meta.get("name") or "").strip()
     if name:
         entry.name = name
+    if "sheet_id" in meta:
+        entry.sheet_id = str(meta.get("sheet_id") or "").strip()
 
     if "world" in meta:
         world = str(meta.get("world") or "").strip()
@@ -1370,9 +1386,7 @@ def _load_entry_from_archive(entry: PlayerSheetEntry) -> bool:
 
 def _entry_from_archive(archive_path: Path) -> Optional[PlayerSheetEntry]:
     archive_meta = read_character_meta(archive_path)
-    sheet_id = sanitize_filename(
-        str(archive_meta.get("sheet_id") or archive_path.stem)
-    )
+    sheet_id = str(archive_meta.get("sheet_id") or "").strip()
     if not sheet_id:
         return None
     name = str(archive_meta.get("name") or sheet_id).strip() or sheet_id
@@ -1380,6 +1394,7 @@ def _entry_from_archive(archive_path: Path) -> Optional[PlayerSheetEntry]:
         name=name,
         pdf_path=str(character_sheet_pdf_path(sheet_id)),
         archive_path=str(archive_path),
+        sheet_id=sheet_id,
     )
     if not _load_entry_from_archive(entry):
         return None
@@ -1400,6 +1415,7 @@ def _scan_archive_entries() -> List[PlayerSheetEntry]:
 
 
 def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
+    _ensure_entry_sheet_id(entry)
     archive_path = _entry_archive_path(entry)
     if archive_path.exists():
         entry.archive_path = str(archive_path)
@@ -1430,6 +1446,7 @@ def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
 
 
 def sync_entry_archive(entry: PlayerSheetEntry, pdf_source: str | None = None) -> bool:
+    _ensure_entry_sheet_id(entry)
     source = Path(pdf_source) if pdf_source else Path(entry.pdf_path)
     archive_path = _entry_archive_path(entry)
     if not source.exists() and archive_path.exists():
@@ -1538,6 +1555,8 @@ def _storage_payload_from_entries(entries: List[PlayerSheetEntry]) -> list[dict]
 
 def save_entries_to_storage(entries: List[PlayerSheetEntry]) -> None:
     """Persist a cache mirror of the authoritative character archives."""
+    for entry in entries:
+        _ensure_entry_sheet_id(entry)
     path = player_sheets_storage_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = _storage_payload_from_entries(entries)
@@ -1586,9 +1605,6 @@ def ensure_network_linked_sheet_entry(
 
     if target_entry is None:
         display_name = str(sheet_name or "").strip() or target
-        if sanitize_filename(display_name) != target:
-            # Keep incoming sheet id stable across host/client when names diverge.
-            display_name = target
 
         pdf_path = character_sheet_pdf_path(target)
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1606,6 +1622,7 @@ def ensure_network_linked_sheet_entry(
         target_entry = PlayerSheetEntry(
             name=display_name,
             pdf_path=str(pdf_path),
+            sheet_id=target,
         )
         entries.append(target_entry)
 
@@ -2294,10 +2311,14 @@ class PlayerSheetDialog(QDialog):
             )
             return
 
-        sheet_id = sanitize_filename(name)
+        sheet_id = (
+            str(getattr(self._original_entry, "sheet_id", "") or "").strip()
+            if self._original_entry is not None
+            else ""
+        ) or generate_named_object_id(name, "sheet")
         archive_path = character_sheet_archive_path(sheet_id)
         original_sheet_id = (
-            sanitize_filename(self._original_entry.name)
+            str(getattr(self._original_entry, "sheet_id", "") or "").strip()
             if self._original_entry is not None
             else ""
         )
@@ -2310,6 +2331,7 @@ class PlayerSheetDialog(QDialog):
             name=name,
             pdf_path=source_path,
             archive_path=str(archive_path),
+            sheet_id=sheet_id,
             world=_combo_optional_value(self._world_combo),
             campaign=_combo_optional_value(self._campaign_combo),
             group=_combo_optional_value(self._group_combo),

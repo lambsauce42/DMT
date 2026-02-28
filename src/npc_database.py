@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 from dmt_package import read_dmt_package_info, write_dmt_package
 from navigation_repository import load_navigation_data
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
-from unique_ids import generate_probabilistic_unique_id
+from unique_ids import generate_named_object_id
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
@@ -89,7 +89,6 @@ NPC_SORT_OPTIONS = [
 
 def _now_timestamp() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
 
 def npc_storage_dir() -> Path:
     return Path(default_sheet_save_dir()) / NPCS_DIR_NAME
@@ -253,9 +252,10 @@ def load_npc_entries_from_storage() -> List[NPCEntry]:
         payload = info.get("payload")
         if not isinstance(payload, dict):
             continue
-        if not str(payload.get("id") or "").strip():
-            payload = dict(payload)
-            payload["id"] = str(info.get("object_id") or "").strip()
+        payload = dict(payload)
+        object_id = str(info.get("object_id") or payload.get("id") or "").strip()
+        if object_id:
+            payload["id"] = object_id
         entry = entry_from_dict(payload)
         if entry:
             entries.append(entry)
@@ -268,7 +268,7 @@ def save_npc_entries_to_storage(entries: List[NPCEntry]) -> None:
     expected: set[Path] = set()
     for entry in entries:
         if not str(entry.id or "").strip():
-            entry.id = generate_probabilistic_unique_id("npc")
+            entry.id = generate_named_object_id(str(entry.name or "npc"), "npc")
         path = npc_file_path(entry.id)
         expected.add(path.resolve())
         write_dmt_package(
@@ -1464,12 +1464,10 @@ class NPCDatabaseWidget(QWidget):
         return bool(self._current_entry and self._current_entry.id == clean_id)
 
     def _make_unique_id(self, base_id: str) -> str:
-        base = sanitize_filename(base_id or "npc")
+        base = sanitize_filename(base_id or "npc") or "npc"
         existing = {entry.id for entry in self._manager.entries}
-        if base and base not in existing:
-            return base
         while True:
-            candidate = generate_probabilistic_unique_id(base or "npc")
+            candidate = generate_named_object_id(base, "npc")
             if candidate not in existing:
                 return candidate
 

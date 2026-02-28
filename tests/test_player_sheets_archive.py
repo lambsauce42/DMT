@@ -291,7 +291,8 @@ def test_legacy_character_sheet_entry_migrates_to_archive(
     persisted = json.loads(storage_path.read_text(encoding="utf-8"))
     assert persisted and isinstance(persisted, list)
     row = persisted[0]
-    assert row["pdf_path"] == str(tmp_path / "cache" / "characters" / "Legacy_Hero.pdf")
+    assert row["sheet_id"] == player_sheets.sheet_id_for_entry(entry)
+    assert row["pdf_path"] == str(player_sheets.character_sheet_pdf_path(row["sheet_id"]))
     assert row["archive_path"] == str(archive_path)
 
 
@@ -345,10 +346,11 @@ def test_ensure_network_linked_sheet_entry_creates_local_sheet_when_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    sheet_id = "Hero_A_sheet_20260226120000_deadbeefcafebabe"
 
     ok, message, payload = player_sheets.ensure_network_linked_sheet_entry(
-        "Hero_A",
-        "Hero_A",
+        sheet_id,
+        "Hero A",
         {
             "inventory": ["item_a"],
             "inventory_notes": "synced",
@@ -368,7 +370,8 @@ def test_ensure_network_linked_sheet_entry_creates_local_sheet_when_missing(
     entries = player_sheets.load_entries_from_storage()
     assert len(entries) == 1
     entry = entries[0]
-    assert player_sheets.sheet_id_for_entry(entry) == "Hero_A"
+    assert player_sheets.sheet_id_for_entry(entry) == sheet_id
+    assert entry.name == "Hero A"
     assert Path(entry.pdf_path).exists()
     assert Path(entry.archive_path).exists()
 

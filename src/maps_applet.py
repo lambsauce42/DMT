@@ -55,7 +55,7 @@ from player_sheets import (
     resolve_selection,
     sanitize_filename,
 )
-from unique_ids import generate_probabilistic_unique_id
+from unique_ids import generate_named_object_id
 
 MAPS_DIR_NAME = "maps"
 MAPS_IMAGES_DIR_NAME = "images"
@@ -528,7 +528,7 @@ class MapDialog(QDialog):
             else ""
         )
         if not map_id:
-            map_id = generate_probabilistic_unique_id("map")
+            map_id = generate_named_object_id(name, "map")
         map_stem = sanitize_filename(name) or sanitize_filename(map_id)
         image_dir = maps_images_dir()
         image_dir.mkdir(parents=True, exist_ok=True)
@@ -1251,7 +1251,7 @@ class MapsWidget(QWidget):
         expected_files: set[Path] = set()
         for entry in self._manager.entries:
             if not str(entry.id or "").strip():
-                entry.id = generate_probabilistic_unique_id("map")
+                entry.id = generate_named_object_id(str(entry.name or "map"), "map")
             resolved_image = self._resolve_map_image_path(entry)
             if not resolved_image:
                 continue

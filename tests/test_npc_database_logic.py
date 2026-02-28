@@ -10,7 +10,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from npc_database import NPCEntry, matches_filters, filter_entries, _split_search
-from dmt_package import write_dmt_package
+from dmt_package import read_dmt_package_info, write_dmt_package
 
 class TestNPCDatabaseLogic(unittest.TestCase):
     def test_split_search(self):
@@ -101,6 +101,29 @@ class TestNPCDatabaseLogic(unittest.TestCase):
                 npc_database.save_npc_entries_to_storage([])
                 self.assertTrue(unknown_file.exists())
             finally:
+                npc_database.default_sheet_save_dir = original_sheet_save_dir
+
+    def test_save_npc_assigns_long_object_id_in_package(self):
+        import npc_database
+
+        with TemporaryDirectory() as tmpdir:
+            original_sheet_save_dir = npc_database.default_sheet_save_dir
+            original_now_timestamp = npc_database._now_timestamp
+            npc_database.default_sheet_save_dir = lambda: str(Path(tmpdir))
+            npc_database._now_timestamp = lambda: "2026-02-26T12:00:00"
+            try:
+                entry = NPCEntry(id="", name="Bob")
+                npc_database.save_npc_entries_to_storage([entry])
+
+                self.assertTrue(entry.id.startswith("Bob_"))
+                self.assertIn("_npc_", entry.id)
+
+                path = npc_database.npc_file_path(entry.id)
+                payload = read_dmt_package_info(path)
+                self.assertIsInstance(payload, dict)
+                self.assertEqual(payload["object_id"], entry.id)
+            finally:
+                npc_database._now_timestamp = original_now_timestamp
                 npc_database.default_sheet_save_dir = original_sheet_save_dir
 
 if __name__ == "__main__":

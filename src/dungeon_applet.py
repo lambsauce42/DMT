@@ -139,7 +139,7 @@ from item_file_format import (
     list_item_file_paths,
     load_item_payload,
 )
-from unique_ids import generate_probabilistic_unique_id, machine_entropy_string
+from unique_ids import generate_named_object_id, generate_probabilistic_unique_id, machine_entropy_string
 
 class ToolType(Enum):
     SELECT = auto()
@@ -4200,7 +4200,7 @@ class DungeonAppletWidget(QWidget):
         self._suppress_remote_apply = False
         self._view_mode = "dm"
         self._collection_name = "Dungeon Collection"
-        self._collection_id = generate_probabilistic_unique_id("collection")
+        self._collection_id = generate_named_object_id(self._collection_name, "collection")
         self._collection_path: Path | None = None
         self._collection_meta_dirty = False
         self._collection_dirty = False
@@ -10228,7 +10228,7 @@ class DungeonAppletWidget(QWidget):
 
     def _init_collection(self) -> None:
         self._collection_path = None
-        self._collection_id = generate_probabilistic_unique_id("collection")
+        self._collection_id = generate_named_object_id(self._collection_name, "collection")
         self._collection_meta_dirty = False
         self._collection_dirty = False
         self._dungeons = []
@@ -11441,7 +11441,7 @@ class DungeonAppletWidget(QWidget):
             path = path.with_suffix(COLLECTION_FILE_EXTENSION)
         payload, assets = self._build_collection_payload()
         if not str(payload.get("object_id") or "").strip():
-            payload["object_id"] = generate_probabilistic_unique_id("collection")
+            payload["object_id"] = generate_named_object_id(self._collection_name, "collection")
             self._collection_id = str(payload["object_id"])
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -11525,7 +11525,7 @@ class DungeonAppletWidget(QWidget):
         if loaded_object_id:
             self._collection_id = loaded_object_id
         else:
-            self._collection_id = generate_probabilistic_unique_id("collection")
+            self._collection_id = generate_named_object_id(str(name or "collection"), "collection")
         dungeons: list[dict] = []
         for entry in payload.get("dungeons", []):
             dungeon_id = entry.get("id") or uuid.uuid4().hex

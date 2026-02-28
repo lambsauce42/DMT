@@ -22,6 +22,14 @@ def machine_entropy_string() -> str:
     return "|".join(str(value or "").strip() for value in parts if str(value or "").strip())
 
 
+def sanitize_id_component(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    cleaned = cleaned.strip("._-")
+    fallback_clean = re.sub(r"[^A-Za-z0-9._-]+", "_", str(fallback or "").strip())
+    fallback_clean = fallback_clean.strip("._-")
+    return cleaned or fallback_clean or "id"
+
+
 def generate_probabilistic_unique_id(prefix: str) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     machine_entropy = machine_entropy_string()
@@ -31,3 +39,14 @@ def generate_probabilistic_unique_id(prefix: str) -> str:
     ).hexdigest()[:24]
     safe_prefix = re.sub(r"[^a-z0-9_]+", "", str(prefix or "id").strip().lower()) or "id"
     return f"{safe_prefix}_{timestamp}_{digest}_{random_entropy[:16]}"
+
+
+def generate_named_object_id(name: str, object_type: str) -> str:
+    safe_type = sanitize_id_component(object_type, "object")
+    safe_name = sanitize_id_component(name, safe_type)
+    readable_prefix = sanitize_id_component(
+        f"{safe_name}_{datetime.now().isoformat(timespec='seconds')}",
+        safe_name,
+    )
+    probabilistic_suffix = generate_probabilistic_unique_id(safe_type)
+    return sanitize_id_component(f"{readable_prefix}_{probabilistic_suffix}", safe_type)
