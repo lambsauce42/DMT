@@ -577,6 +577,12 @@ class MapDialog(QDialog):
         self.accept()
 
 
+@dataclass
+class _MapViewState:
+    zoom: float
+    center: QPointF
+
+
 class MapViewPanel(QGraphicsView):
     zoomChanged = Signal(int)
 
@@ -598,10 +604,13 @@ class MapViewPanel(QGraphicsView):
         self._scene.addItem(self._placeholder_item)
 
         self._zoom = 1.0
+        self._fit_zoom = 1.0
         self._panning = False
         self._pan_last_pos: Optional[QPoint] = None
         self._pan_center_scene: Optional[QPointF] = None
         self._auto_fit_active = False
+        self._view_states: dict[str, _MapViewState] = {}
+        self._current_view_state_key: Optional[str] = None
 
         self._update_placeholder()
 
@@ -610,13 +619,17 @@ class MapViewPanel(QGraphicsView):
         self._placeholder_item.setPlainText(text)
         self._update_placeholder()
 
-    def load_image(self, path: Optional[str]) -> None:
+    def load_image(self, path: Optional[str], *, view_state_key: Optional[str] = None) -> None:
+        self.save_current_view_state()
+        self._current_view_state_key = view_state_key
         if not path or not os.path.exists(path):
             self._pixmap_item.setPixmap(QPixmap())
             self._placeholder_item.setPlainText(self._placeholder_text)
             self._placeholder_item.setVisible(True)
             self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
             self._zoom = 1.0
+            self._fit_zoom = 1.0
+            self._auto_fit_active = False
             self.resetTransform()
             self.zoomChanged.emit(100)
             self._update_scene_rect()
@@ -629,6 +642,8 @@ class MapViewPanel(QGraphicsView):
             self._placeholder_item.setVisible(True)
             self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
             self._zoom = 1.0
+            self._fit_zoom = 1.0
+            self._auto_fit_active = False
             self.resetTransform()
             self.zoomChanged.emit(100)
             self._update_scene_rect()
@@ -637,31 +652,18 @@ class MapViewPanel(QGraphicsView):
         self._pixmap_item.setPixmap(pixmap)
         self._placeholder_item.setVisible(False)
         self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
-        
-        # Enable auto-fit mode for this image
-        self._auto_fit_active = True
-        self.fit_to_view()
-        self._center_view()
+        self._update_scene_rect()
+        if not self._restore_view_state(view_state_key):
+            self.reset_view()
 
     def fit_to_view(self) -> None:
-        pixmap = self._pixmap_item.pixmap()
-        if pixmap.isNull() or pixmap.width() == 0:
+        if not self._refresh_fit_zoom():
             return
-        
-        viewport_size = self.viewport().size()
-        if viewport_size.width() <= 10:
-            viewport_size = self.size()
-
-        if viewport_size.width() <= 10 or viewport_size.height() <= 10:
-            return
-            
-        # Calculate fit factors for both dimensions
-        zoom_w = viewport_size.width() / pixmap.width()
-        zoom_h = viewport_size.height() / pixmap.height()
-        
-        # Use the smaller factor to ensure the whole image fits, but don't over-zoom small images
-        fit_zoom = min(zoom_w, zoom_h)
-        self.set_zoom(min(1.0, fit_zoom))
+        previous_zoom = self._zoom
+        self._zoom = 1.0
+        self._apply_zoom_transform(
+            emit_signal=abs(previous_zoom - self._zoom) >= 1e-9,
+        )
         self._center_view()
 
     def showEvent(self, event) -> None:
@@ -670,14 +672,28 @@ class MapViewPanel(QGraphicsView):
             self.fit_to_view()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
+        preserved_center: Optional[QPointF] = None
+        if not self._panning and not self._auto_fit_active and not self._pixmap_item.pixmap().isNull():
+            preserved_center = self.mapToScene(self.viewport().rect().center())
         super().resizeEvent(event)
-        
+
+        pixmap = self._pixmap_item.pixmap()
+        has_pixmap = not pixmap.isNull()
+        if has_pixmap and not self._refresh_fit_zoom():
+            self._fit_zoom = 1.0
         if self._auto_fit_active:
             self.fit_to_view()
-            
+        elif has_pixmap:
+            self._apply_zoom_transform(emit_signal=False)
+
         self._update_scene_rect()
-        if not self._panning:
+        if self._panning:
+            return
+        if self._auto_fit_active or not has_pixmap:
             self._center_view()
+            return
+        if preserved_center is not None:
+            self.centerOn(preserved_center)
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         delta = event.angleDelta().y()
@@ -714,7 +730,7 @@ class MapViewPanel(QGraphicsView):
             if delta_px.isNull():
                 event.accept()
                 return
-            inv_zoom = 1.0 / max(self._zoom, 1e-6)
+            inv_zoom = 1.0 / max(self._effective_zoom(), 1e-6)
             self._pan_center_scene = QPointF(
                 self._pan_center_scene.x() - (float(delta_px.x()) * inv_zoom),
                 self._pan_center_scene.y() - (float(delta_px.y()) * inv_zoom),
@@ -744,28 +760,89 @@ class MapViewPanel(QGraphicsView):
         self.set_zoom(self._zoom / 1.15)
 
     def reset_zoom(self) -> None:
-        self.set_zoom(1.0)
+        self.reset_view()
+
+    def reset_view(self) -> None:
+        if self._pixmap_item.pixmap().isNull():
+            return
+        self._auto_fit_active = True
+        self.fit_to_view()
+        self.save_current_view_state()
 
     def set_zoom(self, zoom: float, *, anchor: str = "center") -> None:
         zoom = float(max(0.1, min(6.0, zoom)))
-        if abs(zoom - self._zoom) < 1e-9:
-            self._update_scene_rect()
-            return
-        if anchor == "mouse":
-            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        else:
-            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        zoom_changed = abs(zoom - self._zoom) >= 1e-9
         self._zoom = zoom
-        self.resetTransform()
-        self.scale(self._zoom, self._zoom)
-        self.zoomChanged.emit(int(round(self._zoom * 100)))
-        self._update_scene_rect()
+        self._apply_zoom_transform(anchor=anchor, emit_signal=zoom_changed)
 
     def _center_view(self) -> None:
         if not self._pixmap_item.pixmap().isNull():
             self.centerOn(self._pixmap_item)
         else:
             self.centerOn(self._scene.sceneRect().center())
+
+    def save_current_view_state(self) -> None:
+        if not self._current_view_state_key:
+            return
+        if self._pixmap_item.pixmap().isNull():
+            return
+        state = self.current_view_state()
+        if state is not None:
+            self._view_states[self._current_view_state_key] = state
+
+    def _restore_view_state(self, key: Optional[str]) -> bool:
+        if not key:
+            return False
+        state = self._view_states.get(key)
+        if state is None:
+            return False
+        self.restore_view_state(state)
+        return True
+
+    def current_view_state(self) -> Optional[_MapViewState]:
+        if self._pixmap_item.pixmap().isNull():
+            return None
+        center = self.mapToScene(self.viewport().rect().center())
+        return _MapViewState(
+            zoom=self._zoom,
+            center=QPointF(center),
+        )
+
+    def restore_view_state(self, state: _MapViewState) -> None:
+        self._auto_fit_active = False
+        self.set_zoom(state.zoom)
+        self.centerOn(state.center)
+
+    def _effective_zoom(self) -> float:
+        return self._fit_zoom * self._zoom
+
+    def _apply_zoom_transform(self, *, anchor: str = "center", emit_signal: bool = True) -> None:
+        if anchor == "mouse":
+            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        else:
+            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.resetTransform()
+        effective_zoom = max(1e-6, self._effective_zoom())
+        self.scale(effective_zoom, effective_zoom)
+        if emit_signal:
+            self.zoomChanged.emit(int(round(self._zoom * 100)))
+        self._update_scene_rect()
+
+    def _refresh_fit_zoom(self) -> bool:
+        pixmap = self._pixmap_item.pixmap()
+        if pixmap.isNull() or pixmap.width() == 0 or pixmap.height() == 0:
+            return False
+
+        viewport_size = self.viewport().size()
+        if viewport_size.width() <= 10:
+            viewport_size = self.size()
+        if viewport_size.width() <= 10 or viewport_size.height() <= 10:
+            return False
+
+        zoom_w = viewport_size.width() / pixmap.width()
+        zoom_h = viewport_size.height() / pixmap.height()
+        self._fit_zoom = min(zoom_w, zoom_h)
+        return True
 
     def _update_scene_rect(self) -> None:
         pixmap = self._pixmap_item.pixmap()
@@ -804,6 +881,8 @@ class MapsWidget(QWidget):
         self._load_entries_error = ""
         self._manager = MapsManager(entries=self._load_entries())
         self._current_entry: Optional[MapAsset] = None
+        self._map_preview_states: dict[str, _MapViewState] = {}
+        self._current_preview_state_key: Optional[str] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -991,10 +1070,14 @@ class MapsWidget(QWidget):
         self._zoom_in_button.setObjectName("SecondaryButton")
         self._zoom_in_button.setIcon(QIcon(os.path.join(ICON_DIR, "plus.svg")))
         self._zoom_in_button.setToolTip("Zoom In")
+        self._reset_view_button = QToolButton(preview_header)
+        self._reset_view_button.setObjectName("SecondaryButton")
+        self._reset_view_button.setIcon(QIcon(RESET_ICON))
+        self._reset_view_button.setToolTip("Reset View (Fit & Center)")
         self._zoom_label = QLabel("100%")
         self._zoom_label.setObjectName("Subheader")
 
-        for button in (self._zoom_out_button, self._zoom_in_button):
+        for button in (self._reset_view_button, self._zoom_out_button, self._zoom_in_button):
             button.setProperty("compact", True)
             button.setFixedSize(36, 36)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -1011,6 +1094,7 @@ class MapsWidget(QWidget):
             )
             button.setCursor(Qt.CursorShape.PointingHandCursor)
         preview_header_layout.addWidget(self._zoom_label)
+        preview_header_layout.addWidget(self._reset_view_button)
         preview_header_layout.addWidget(self._zoom_out_button)
         preview_header_layout.addWidget(self._zoom_in_button)
 
@@ -1039,6 +1123,7 @@ class MapsWidget(QWidget):
 
         self._zoom_out_button.clicked.connect(self._preview_panel.zoom_out)
         self._zoom_in_button.clicked.connect(self._preview_panel.zoom_in)
+        self._reset_view_button.clicked.connect(self._preview_panel.reset_view)
         self._preview_panel.zoomChanged.connect(self._on_zoom_changed)
         if self._load_entries_error and not self._is_test_env():
             QTimer.singleShot(
@@ -1337,6 +1422,8 @@ class MapsWidget(QWidget):
             self._edit_button.setEnabled(False)
             self._delete_button.setEnabled(False)
             self._disintegrate_button.setEnabled(False)
+            self._save_current_preview_state()
+            self._current_preview_state_key = None
             self._preview_panel.load_image(None)
             return
 
@@ -1384,14 +1471,35 @@ class MapsWidget(QWidget):
         return bool(self._current_entry and self._current_entry.id == clean_id)
 
     def _load_map_preview(self, entry: Optional[MapAsset]) -> None:
+        self._save_current_preview_state()
         if not entry:
+            self._current_preview_state_key = None
             self._preview_panel.load_image(None)
             return
         path = self._resolve_map_image_path(entry)
         if not path:
+            self._current_preview_state_key = None
             self._preview_panel.load_image(None)
             return
+        state_key = self._preview_state_key(entry, path)
+        self._current_preview_state_key = state_key
+        saved_state = self._map_preview_states.get(state_key)
         self._preview_panel.load_image(path)
+        if saved_state is not None:
+            self._preview_panel.restore_view_state(saved_state)
+        else:
+            self._preview_panel.reset_view()
+
+    def _save_current_preview_state(self) -> None:
+        if not self._current_preview_state_key:
+            return
+        state = self._preview_panel.current_view_state()
+        if state is None:
+            return
+        self._map_preview_states[self._current_preview_state_key] = state
+
+    def _preview_state_key(self, entry: MapAsset, path: str) -> str:
+        return f"{map_id_for_entry(entry)}::{Path(path).resolve()}"
 
     def _resolve_map_image_path(
         self, entry: MapAsset, source_path: Optional[str] = None

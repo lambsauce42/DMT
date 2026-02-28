@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QImage
 
@@ -22,8 +22,8 @@ from maps_applet import (
 from dmt_package import write_dmt_package
 
 
-def _write_png(path: Path) -> None:
-    image = QImage(32, 32, QImage.Format.Format_ARGB32)
+def _write_png(path: Path, *, width: int = 32, height: int = 32) -> None:
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
     image.fill(0xFF336699)
     assert image.save(str(path), "PNG")
 
@@ -145,6 +145,8 @@ def test_map_view_panel_uses_infinite_padding_and_no_scrollbars(qtbot, tmp_path)
     pixmap_rect = view._pixmap_item.boundingRect()
     assert int(rect.width()) == int(pixmap_rect.width()) + 100000
     assert int(rect.height()) == int(pixmap_rect.height()) + 100000
+    assert abs(view._zoom - 1.0) < 0.01
+    assert view.transform().m11() > 1.0
 
 
 def test_map_view_panel_pan_is_stable_without_vertical_jitter(qtbot, tmp_path):
@@ -189,3 +191,65 @@ def test_map_view_panel_pan_is_stable_without_vertical_jitter(qtbot, tmp_path):
     y_values = [entry[2] for entry in samples]
     y_jitter = max(y_values) - min(y_values)
     assert y_jitter < 0.05
+
+
+def test_maps_widget_restores_map_view_state_and_reset_view(qtbot, monkeypatch, tmp_path):
+    maps_dir = tmp_path / "maps"
+    images_dir = maps_dir / "images"
+    thumbs_dir = images_dir / ".thumbs"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    first = images_dir / "first.png"
+    second = images_dir / "second.png"
+    _write_png(first, width=96, height=96)
+    _write_png(second, width=420, height=180)
+
+    monkeypatch.setattr("maps_applet.load_navigation_data", lambda: [])
+    monkeypatch.setattr("maps_applet.maps_storage_dir", lambda: maps_dir)
+    monkeypatch.setattr("maps_applet.maps_images_dir", lambda: images_dir)
+    monkeypatch.setattr("maps_applet.maps_thumbs_dir", lambda: thumbs_dir)
+
+    widget = MapsWidget()
+    qtbot.addWidget(widget)
+    widget.resize(1200, 800)
+    widget.show()
+
+    first_entry = MapAsset(id="map-a", name="Alpha", image_path=str(first))
+    second_entry = MapAsset(id="map-b", name="Beta", image_path=str(second))
+    widget._manager.entries = [first_entry, second_entry]
+    widget._apply_filters()
+    widget._load_map_preview(first_entry)
+
+    panel = widget._preview_panel
+    assert abs(panel._zoom - 1.0) < 0.01
+    assert widget._zoom_label.text() == "100%"
+    saved_center = panel._pixmap_item.boundingRect().center() + QPointF(8.0, 6.0)
+    panel.set_zoom(2.0)
+    panel.centerOn(saved_center)
+    first_effective_zoom = panel.transform().m11()
+
+    widget._map_list.setCurrentRow(1)
+
+    switched_center = panel.mapToScene(panel.viewport().rect().center())
+    expected_second_center = panel._pixmap_item.boundingRect().center()
+    assert abs(panel._zoom - 1.0) < 0.01
+    assert widget._zoom_label.text() == "100%"
+    assert abs(panel.transform().m11() - first_effective_zoom) > 0.5
+    assert abs(switched_center.x() - expected_second_center.x()) < 1.25
+    assert abs(switched_center.y() - expected_second_center.y()) < 1.25
+
+    widget._map_list.setCurrentRow(0)
+
+    restored_center = panel.mapToScene(panel.viewport().rect().center())
+    assert abs(panel._zoom - 2.0) < 0.01
+    assert abs(restored_center.x() - saved_center.x()) < 1.25
+    assert abs(restored_center.y() - saved_center.y()) < 1.25
+
+    qtbot.mouseClick(widget._reset_view_button, Qt.MouseButton.LeftButton)
+
+    expected_center = panel._pixmap_item.boundingRect().center()
+    reset_center = panel.mapToScene(panel.viewport().rect().center())
+    assert abs(panel._zoom - 1.0) < 0.01
+    assert abs(reset_center.x() - expected_center.x()) < 1.25
+    assert abs(reset_center.y() - expected_center.y()) < 1.25

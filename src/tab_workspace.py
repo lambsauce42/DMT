@@ -17,6 +17,9 @@ TAB_TEXT_RIGHT_PADDING = 10
 TAB_CLOSE_RIGHT_PADDING = 6
 TAB_CLOSE_GAP = 8
 TAB_CLOSE_SIZE = 12
+TAB_CLOSE_HIT_SLOP_X = 4
+TAB_CLOSE_HIT_SLOP_Y = 5
+TAB_CLOSE_HOVER_PAD = 2
 TAB_ACTIVE_LINE_HEIGHT = 2
 
 DROP_TARGET_TOP_SLOP_PX = 4
@@ -44,6 +47,19 @@ def compute_workspace_tab_close_rect(tab_rect: QRect) -> QRect:
     close_x = int(tab_rect.right() - TAB_CLOSE_RIGHT_PADDING - TAB_CLOSE_SIZE + 1)
     close_y = int(tab_rect.y() + max(0, (tab_rect.height() - TAB_CLOSE_SIZE) // 2))
     return QRect(close_x, close_y, TAB_CLOSE_SIZE, TAB_CLOSE_SIZE)
+
+
+def compute_workspace_tab_close_hit_rect(tab_rect: QRect) -> QRect:
+    close_rect = compute_workspace_tab_close_rect(tab_rect)
+    if close_rect.isNull():
+        return QRect()
+    expanded = close_rect.adjusted(
+        -TAB_CLOSE_HIT_SLOP_X,
+        -TAB_CLOSE_HIT_SLOP_Y,
+        TAB_CLOSE_HIT_SLOP_X,
+        TAB_CLOSE_HIT_SLOP_Y,
+    )
+    return expanded.intersected(tab_rect)
 
 
 def compute_workspace_tab_name_rect(tab_rect: QRect, *, closable: bool) -> QRect:
@@ -461,6 +477,7 @@ class WorkspaceTabStrip(QWidget):
         self._layout_dirty = True
 
         self._hover_tab_id: Optional[int] = None
+        self._hover_close_tab_id: Optional[int] = None
         self._press_tab_id: Optional[int] = None
         self._press_on_close = False
         self._suppress_release_activation = False
@@ -651,9 +668,16 @@ class WorkspaceTabStrip(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         local_pos = event.position().toPoint()
-        tab_id, _ = self._hit_test(local_pos)
+        tab_id, on_close = self._hit_test(local_pos)
+        hover_changed = False
         if tab_id != self._hover_tab_id:
             self._hover_tab_id = tab_id
+            hover_changed = True
+        close_tab_id = int(tab_id) if tab_id is not None and on_close else None
+        if close_tab_id != self._hover_close_tab_id:
+            self._hover_close_tab_id = close_tab_id
+            hover_changed = True
+        if hover_changed:
             self.update()
 
         if self._press_tab_id is None:
@@ -729,6 +753,7 @@ class WorkspaceTabStrip(QWidget):
     def leaveEvent(self, event) -> None:  # type: ignore[override]
         _ = event
         self._hover_tab_id = None
+        self._hover_close_tab_id = None
         self.update()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -855,6 +880,7 @@ class WorkspaceTabStrip(QWidget):
 
         is_active = (self._host.tab_id_for_index(self._host.currentIndex()) == tab_id)
         is_hover = (self._hover_tab_id == tab_id) and not dragged and self._drag_tab_id is None
+        is_close_hover = (self._hover_close_tab_id == tab_id) and not dragged and self._drag_tab_id is None
 
         text_color = QColor(139, 148, 158)
         if is_active:
@@ -869,7 +895,20 @@ class WorkspaceTabStrip(QWidget):
         )
 
         if entry.closable and not close_rect.isNull():
-            painter.setPen(QColor(189, 198, 207))
+            if is_close_hover:
+                painter.fillRect(
+                    close_rect.adjusted(
+                        -TAB_CLOSE_HOVER_PAD,
+                        -TAB_CLOSE_HOVER_PAD,
+                        TAB_CLOSE_HOVER_PAD,
+                        TAB_CLOSE_HOVER_PAD,
+                    ),
+                    QColor(240, 246, 252, 24),
+                )
+            close_color = QColor(189, 198, 207)
+            if is_close_hover:
+                close_color = QColor(230, 237, 243)
+            painter.setPen(close_color)
             painter.drawText(close_rect, Qt.AlignmentFlag.AlignCenter, "x")
 
         if is_active:
@@ -888,7 +927,7 @@ class WorkspaceTabStrip(QWidget):
             if not rect.contains(pos):
                 continue
             if entry.closable:
-                close_rect = compute_workspace_tab_close_rect(rect)
+                close_rect = compute_workspace_tab_close_hit_rect(rect)
                 if close_rect.contains(pos):
                     return int(tab_id), True
             return int(tab_id), False
