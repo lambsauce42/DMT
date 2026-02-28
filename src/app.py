@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEventLoop
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import (
     QColor,
     QIcon,
@@ -1314,6 +1314,20 @@ class AppletLoadingOverlay(QWidget):
     def stop_animation(self) -> None:
         self._spinner.stop()
 
+    def show_loading(self, message: str) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.set_message(message)
+        self.start_animation()
+        self.show()
+        self.raise_()
+        self._paint_now()
+
+    def hide_loading(self) -> None:
+        self.stop_animation()
+        self.hide()
+
     def set_message(self, message: str) -> None:
         self._label.setText(str(message or "Loading applet..."))
         self._label.adjustSize()
@@ -1325,6 +1339,10 @@ class AppletLoadingOverlay(QWidget):
         x = max(0, (self.width() - card_size.width()) // 2)
         y = max(0, (self.height() - card_size.height()) // 2)
         self._card.setGeometry(x, y, card_size.width(), card_size.height())
+
+    def _paint_now(self) -> None:
+        self._card.repaint()
+        self.repaint()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -1391,7 +1409,6 @@ class _WorkspaceTabWindow(QMainWindow):
 
         self._workspace_controller.register_window(self, primary=self._workspace_primary)
         self._tab_by_key = self._workspace_controller.tab_by_key
-        self._loading_tabs = self._workspace_controller.loading_keys
 
     def workspace_host(self) -> WorkspaceTabsHost:
         return self.tabs
@@ -1405,6 +1422,17 @@ class _WorkspaceTabWindow(QMainWindow):
     def _disable_tab_close(self, index: int) -> None:
         self.tabs.setTabClosable(index, False)
 
+    def begin_applet_load(self, key: str, title: str) -> None:
+        _ = key
+        self._show_applet_loading_overlay(f"Loading {title or 'applet'}...")
+
+    def end_applet_load(self, key: str) -> None:
+        _ = key
+        self._hide_applet_loading_overlay()
+
+    def build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
+        return self._build_applet_widget(key, applet)
+
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         if hasattr(self, "_loading_overlay"):
@@ -1413,24 +1441,10 @@ class _WorkspaceTabWindow(QMainWindow):
             self._workspace_controller.sync_tab_bar_extent(self)
 
     def _show_applet_loading_overlay(self, message: str) -> None:
-        self._loading_overlay.setGeometry(self.tabs.rect())
-        self._loading_overlay.set_message(message)
-        self._loading_overlay.start_animation()
-        self._loading_overlay.show()
-        self._loading_overlay.raise_()
+        self._loading_overlay.show_loading(message)
 
     def _hide_applet_loading_overlay(self) -> None:
-        self._loading_overlay.stop_animation()
-        self._loading_overlay.hide()
-
-    def _warmup_loading_overlay(self, *, frames: int = 2, frame_ms: int = 75) -> None:
-        target_frames = max(0, int(frames))
-        delay_ms = max(1, int(frame_ms))
-        for _ in range(target_frames):
-            QApplication.processEvents()
-            loop = QEventLoop(self)
-            QTimer.singleShot(delay_ms, loop.quit)
-            loop.exec()
+        self._loading_overlay.hide_loading()
 
     def _build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
         return build_applet_widget(self.tabs, key, applet)
@@ -1451,7 +1465,9 @@ class DetachedTabWindow(_WorkspaceTabWindow):
         )
 
     def closeEvent(self, event) -> None:
-        self._workspace_controller.prepare_window_close(self)
+        if not self._workspace_controller.prepare_window_close(self):
+            event.ignore()
+            return
         self._workspace_controller.unregister_window(self)
         super().closeEvent(event)
 
@@ -1475,8 +1491,13 @@ class MainLauncherWindow(_WorkspaceTabWindow):
         self.tabs.setCurrentIndex(0)
 
     def closeEvent(self, event) -> None:
-        self._workspace_controller.begin_primary_shutdown(self)
-        self._workspace_controller.prepare_window_close(self)
+        if not self._workspace_controller.begin_primary_shutdown(self):
+            event.ignore()
+            return
+        if not self._workspace_controller.prepare_window_close(self):
+            self._workspace_controller.is_shutting_down = False
+            event.ignore()
+            return
         self._workspace_controller.unregister_window(self)
         clear_all_online_runtime_caches()
         super().closeEvent(event)

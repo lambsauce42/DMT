@@ -996,6 +996,10 @@ class NPCDatabaseWidget(QWidget):
 
         self._apply_filters()
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._refresh_navigation_filters()
+
     # def _add_current_npc_to_encounter(self) -> None:
     #     # Placeholder for future integration
     #     QMessageBox.information(self, "Add NPC", "This feature is coming soon!")
@@ -1046,6 +1050,25 @@ class NPCDatabaseWidget(QWidget):
         label.setObjectName("ColumnHeader")
         layout.addWidget(label)
         return section
+
+    def _refresh_navigation_filters(self) -> None:
+        latest = load_navigation_data()
+        if not isinstance(latest, list) or latest == self._world_data:
+            return
+        world = _combo_optional_value(self._world_combo)
+        campaign = _combo_optional_value(self._campaign_combo)
+        group = _combo_optional_value(self._group_combo)
+        self._world_data = latest
+        for combo in (self._world_combo, self._campaign_combo, self._group_combo):
+            combo.blockSignals(True)
+        try:
+            _populate_combo(self._world_combo, list_worlds(self._world_data), world)
+            selected_campaign = self._refresh_campaigns(current_value=campaign)
+            self._refresh_groups(current_value=group, campaign=selected_campaign)
+        finally:
+            for combo in (self._world_combo, self._campaign_combo, self._group_combo):
+                combo.blockSignals(False)
+        self._apply_filters()
 
     def _make_field_label(self, text: str) -> QLabel:
         label = QLabel(text)

@@ -67,6 +67,35 @@ def test_close_veto_is_respected(qtbot, monkeypatch) -> None:
     assert widget.close_calls >= 1
 
 
+def test_window_close_veto_is_respected_during_shutdown(qtbot, monkeypatch) -> None:
+    _DEBUG_LOG.write_text("", encoding="utf-8")
+    window = MainLauncherWindow()
+    qtbot.addWidget(window)
+    window.show()
+    applet = {
+        "key": "close_veto_applet",
+        "tab": "Close Veto",
+        "title": "Close Veto",
+        "actions": [],
+        "panels": [],
+    }
+    monkeypatch.setattr(window, "_build_applet_widget", lambda key, _: _CloseVetoWidget(window.tabs))
+    window.open_applet(applet, focus_if_new=True)
+
+    widget = window._tab_by_key["close_veto_applet"]
+    closed = window.close()
+
+    _debug_log(
+        "window_close_veto "
+        f"closed={int(bool(closed))} visible={int(window.isVisible())} "
+        f"registered={int('close_veto_applet' in window._tab_by_key)} calls={widget.close_calls}"
+    )
+    assert closed is False
+    assert window.isVisible() is True
+    assert "close_veto_applet" in window._tab_by_key
+    assert widget.close_calls >= 1
+
+
 def test_closing_last_tab_in_detached_window_closes_window(qtbot) -> None:
     _DEBUG_LOG.write_text("", encoding="utf-8")
     window = MainLauncherWindow()

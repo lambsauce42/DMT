@@ -51,6 +51,18 @@ except Exception:
 
 from save_paths import trash_json_path, navigation_json_path
 from navigation_storage import load_navigation_world_data, save_navigation_world_data
+from navigation_repository import (
+    campaign_trash_entry_matches_world,
+    clean_navigation_id,
+    group_trash_entry_matches_campaign,
+    load_navigation_data as shared_load_navigation_data,
+    load_trash as shared_load_trash,
+    normalize_campaign_entry,
+    normalize_group_entry,
+    normalize_world_entry,
+    save_navigation_data as shared_save_navigation_data,
+    save_trash as shared_save_trash,
+)
 
 # Icons directory
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
@@ -141,65 +153,22 @@ def _write_navigation_legacy_file(path: Path, data: list) -> None:
 
 def load_navigation_data() -> list:
     """Load navigation data from persistent storage."""
-    base_dir = _navigation_base_dir()
-    legacy_path = Path(NAVIGATION_PATH).expanduser().resolve()
-    packaged: list | None = None
-    try:
-        data = load_navigation_world_data(base_dir=base_dir)
-        packaged = data if isinstance(data, list) else None
-    except Exception as exc:
-        print(f"[WARN] Failed to load package navigation data from '{base_dir}': {exc}", file=sys.stderr)
-    if packaged:
-        return packaged
-    legacy = _load_navigation_legacy_file(legacy_path)
-    if legacy is not None:
-        if packaged == [] and legacy:
-            print(
-                f"[INFO] Loaded legacy navigation data from '{legacy_path}', migrating to package storage.",
-                file=sys.stderr,
-            )
-            try:
-                save_navigation_world_data(legacy, base_dir=base_dir)
-            except Exception as exc:
-                print(
-                    f"[WARN] Failed to migrate legacy navigation data to '{base_dir}': {exc}",
-                    file=sys.stderr,
-                )
-        return legacy
-    return packaged if isinstance(packaged, list) else WORLD_DATA
+    return shared_load_navigation_data(navigation_path=NAVIGATION_PATH)
 
 
 def save_navigation_data(data: list) -> None:
     """Save navigation data to persistent storage."""
-    base_dir = _navigation_base_dir()
-    legacy_path = Path(NAVIGATION_PATH).expanduser().resolve()
-    try:
-        save_navigation_world_data(data if isinstance(data, list) else [], base_dir=base_dir)
-    except Exception as exc:
-        print(f"[WARN] Failed to save package navigation data in '{base_dir}': {exc}", file=sys.stderr)
-    if legacy_path.exists() and legacy_path.is_file():
-        _write_navigation_legacy_file(legacy_path, data)
+    shared_save_navigation_data(data, navigation_path=NAVIGATION_PATH)
 
 
 def load_trash() -> list[dict]:
     """Load trash entries from storage."""
-    path = trash_json_path()
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    return shared_load_trash(path=str(trash_json_path()))
 
 
 def save_trash(entries: list[dict]) -> None:
     """Save trash entries to storage."""
-    path = trash_json_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(entries, handle, ensure_ascii=False, indent=2)
+    shared_save_trash(entries, path=str(trash_json_path()))
 
 
 class NameIconDialog(QDialog):
@@ -541,7 +510,7 @@ class CompactNavTree(QWidget):
 
     @staticmethod
     def _clean_id(value: object) -> str:
-        return str(value or "").strip()
+        return clean_navigation_id(value)
 
     def _campaign_entry_matches_world(
         self,
@@ -550,32 +519,11 @@ class CompactNavTree(QWidget):
         *,
         allow_renamed_legacy: bool,
     ) -> bool:
-        parent = entry.get("parent", {})
-        if not isinstance(parent, dict):
-            parent = {}
-        payload = entry.get("payload", {})
-        if not isinstance(payload, dict):
-            payload = {}
-
-        world_id = self._clean_id(world.get("id"))
-        parent_world_id = self._clean_id(parent.get("world_id"))
-        payload_world_id = self._clean_id(payload.get("world_id"))
-        world_name = str(world.get("name") or "").strip()
-        parent_world_name = str(parent.get("world") or "").strip()
-
-        if world_id:
-            for candidate_id in (parent_world_id, payload_world_id):
-                if candidate_id:
-                    return candidate_id == world_id
-            if not allow_renamed_legacy:
-                return not parent_world_name or parent_world_name == world_name
-            return True
-
-        if parent_world_id or payload_world_id:
-            return False
-        if not parent_world_name or parent_world_name == world_name:
-            return True
-        return allow_renamed_legacy
+        return campaign_trash_entry_matches_world(
+            entry,
+            world,
+            allow_renamed_legacy=allow_renamed_legacy,
+        )
 
     def _group_entry_matches_campaign(
         self,
@@ -585,44 +533,12 @@ class CompactNavTree(QWidget):
         *,
         allow_renamed_legacy: bool,
     ) -> bool:
-        parent = entry.get("parent", {})
-        if not isinstance(parent, dict):
-            parent = {}
-        payload = entry.get("payload", {})
-        if not isinstance(payload, dict):
-            payload = {}
-
-        world_id = self._clean_id(world.get("id"))
-        campaign_id = self._clean_id(campaign.get("id"))
-        parent_world_id = self._clean_id(parent.get("world_id"))
-        parent_campaign_id = self._clean_id(parent.get("campaign_id"))
-        payload_world_id = self._clean_id(payload.get("world_id"))
-        payload_campaign_id = self._clean_id(payload.get("campaign_id"))
-
-        if world_id:
-            for candidate_world_id in (parent_world_id, payload_world_id):
-                if candidate_world_id and candidate_world_id != world_id:
-                    return False
-        elif parent_world_id or payload_world_id:
-            return False
-
-        if campaign_id:
-            for candidate_campaign_id in (parent_campaign_id, payload_campaign_id):
-                if candidate_campaign_id:
-                    return candidate_campaign_id == campaign_id
-            if allow_renamed_legacy:
-                return True
-            campaign_name = str(campaign.get("name") or "").strip()
-            parent_campaign_name = str(parent.get("campaign") or "").strip()
-            return not parent_campaign_name or parent_campaign_name == campaign_name
-
-        if parent_campaign_id or payload_campaign_id:
-            return False
-        campaign_name = str(campaign.get("name") or "").strip()
-        parent_campaign_name = str(parent.get("campaign") or "").strip()
-        if not parent_campaign_name or parent_campaign_name == campaign_name:
-            return True
-        return allow_renamed_legacy
+        return group_trash_entry_matches_campaign(
+            entry,
+            world,
+            campaign,
+            allow_renamed_legacy=allow_renamed_legacy,
+        )
     
     def _rebuild_tree(self) -> None:
         """Rebuild the tree widget from data."""
@@ -1302,45 +1218,23 @@ class CompactNavTree(QWidget):
     
     def _normalize_group(self, group: object) -> dict:
         """Normalize a group entry."""
-        if isinstance(group, dict):
-            name = str(group.get("name", "")).strip()
-            icon = group.get("icon") or self._default_group_icon
-            group_id = self._clean_id(group.get("id")) or None
-            normalized = {"name": name, "icon": icon}
-            if group_id:
-                normalized["id"] = group_id
-            return normalized
-        name = str(group).strip()
-        return {"name": name, "icon": self._default_group_icon}
+        return normalize_group_entry(group, default_icon=self._default_group_icon)
     
     def _normalize_campaign(self, campaign: dict) -> dict:
         """Normalize a campaign entry."""
-        name = str(campaign.get("name", "")).strip()
-        icon = campaign.get("icon") or self._default_campaign_icon
-        campaign_id = self._clean_id(campaign.get("id")) or None
-        groups = []
-        for group in campaign.get("groups", []):
-            normalized = self._normalize_group(group)
-            if normalized["name"]:
-                groups.append(normalized)
-        normalized_campaign = {"name": name, "icon": icon, "groups": groups}
-        if campaign_id:
-            normalized_campaign["id"] = campaign_id
-        return normalized_campaign
+        return normalize_campaign_entry(
+            campaign,
+            default_icon=self._default_campaign_icon,
+            default_group_icon=self._default_group_icon,
+        )
     
     def _normalize_world(self, world: dict) -> dict:
         """Normalize a world entry."""
-        name = str(world.get("name", "")).strip()
-        icon = world.get("icon") or self._default_world_icon
-        world_id = self._clean_id(world.get("id")) or None
-        campaigns = []
-        for campaign in world.get("campaigns", []):
-            normalized = self._normalize_campaign(campaign)
-            if normalized["name"]:
-                campaigns.append(normalized)
-        normalized_world = {"name": name, "icon": icon, "campaigns": campaigns}
-        if world_id:
-            normalized_world["id"] = world_id
-        return normalized_world
+        return normalize_world_entry(
+            world,
+            default_icon=self._default_world_icon,
+            default_campaign_icon=self._default_campaign_icon,
+            default_group_icon=self._default_group_icon,
+        )
 
 

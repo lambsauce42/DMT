@@ -7795,10 +7795,62 @@ class DungeonAppletWidget(QWidget):
                 request_id=request_id,
             )
             return
+        normalized_inventory = normalize_inventory_payload(inventory_payload)
+        try:
+            from player_sheets import (
+                ensure_network_linked_sheet_entry,
+                set_inventory_payload_for_sheet_id,
+            )
+        except Exception:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Player sheets integration unavailable",
+                request_id=request_id,
+            )
+            return
+
+        self._suppress_external_inventory_forward = True
+        try:
+            ok, message, saved_payload = set_inventory_payload_for_sheet_id(
+                sheet_id,
+                normalized_inventory,
+                emit_event=True,
+            )
+            if not ok and str(message or "").strip().lower().startswith("character not found"):
+                ensure_ok, ensure_message, _ = ensure_network_linked_sheet_entry(
+                    sheet_id,
+                    sheet_id,
+                    normalized_inventory,
+                    emit_event=False,
+                )
+                if ensure_ok:
+                    ok, message, saved_payload = set_inventory_payload_for_sheet_id(
+                        sheet_id,
+                        normalized_inventory,
+                        emit_event=True,
+                    )
+                else:
+                    message = ensure_message or message
+        finally:
+            self._suppress_external_inventory_forward = False
+
+        if not ok:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=str(message or "Unable to synchronize inventory."),
+                request_id=request_id,
+            )
+            return
+
+        authoritative_payload = (
+            saved_payload if isinstance(saved_payload, dict) else normalized_inventory
+        )
         updated = self._apply_inventory_sync_to_linked_entities(
             owner_player_id=player_id,
             sheet_id=sheet_id,
-            inventory_payload=inventory_payload,
+            inventory_payload=authoritative_payload,
         )
         self._host_controller.send_command_result(
             player_id,
@@ -10681,7 +10733,17 @@ class DungeonAppletWidget(QWidget):
         clean_sheet = str(sheet_id or "").strip()
         if not clean_sheet:
             return
-        payload = normalize_inventory_payload(inventory_payload if isinstance(inventory_payload, dict) else {})
+        payload = normalize_inventory_payload(
+            inventory_payload if isinstance(inventory_payload, dict) else {}
+        )
+        try:
+            from player_sheets import inventory_payload_for_sheet_id
+        except Exception:
+            inventory_payload_for_sheet_id = None  # type: ignore[assignment]
+        if inventory_payload_for_sheet_id is not None:
+            persisted_payload = inventory_payload_for_sheet_id(clean_sheet)
+            if isinstance(persisted_payload, dict):
+                payload = normalize_inventory_payload(persisted_payload)
         if (
             self._online_mode == ONLINE_MODE_PLAYER
             and self._client_controller is not None

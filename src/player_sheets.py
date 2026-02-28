@@ -1322,6 +1322,48 @@ def _apply_entry_meta(entry: PlayerSheetEntry, meta: dict) -> None:
             )
 
 
+def _apply_inventory_payload_to_entry(
+    entry: PlayerSheetEntry, inventory_payload: object
+) -> dict:
+    normalized = normalize_inventory_payload(
+        inventory_payload if isinstance(inventory_payload, dict) else {}
+    )
+    entry.inventory = list(
+        normalized.get("inventory", [])
+        if isinstance(normalized.get("inventory"), list)
+        else []
+    )
+    entry.inventory_notes = str(normalized.get("inventory_notes", ""))
+    entry.equipment = _normalize_equipment(normalized.get("equipment", {}))
+    try:
+        entry.gold = max(0, int(normalized.get("gold", 0)))
+    except (TypeError, ValueError):
+        entry.gold = 0
+    try:
+        entry.silver = max(0, int(normalized.get("silver", 0)))
+    except (TypeError, ValueError):
+        entry.silver = 0
+    try:
+        entry.copper = max(0, int(normalized.get("copper", 0)))
+    except (TypeError, ValueError):
+        entry.copper = 0
+    return normalized
+
+
+def _load_entry_from_archive(entry: PlayerSheetEntry) -> bool:
+    archive_path = _entry_archive_path(entry)
+    if not archive_path.exists():
+        return False
+    entry.archive_path = str(archive_path)
+    _apply_entry_meta(entry, read_character_meta(archive_path))
+    if not entry.pdf_path or not Path(entry.pdf_path).exists():
+        target_pdf = character_sheet_pdf_path(sheet_id_for_entry(entry))
+        if extract_character_pdf(archive_path, target_pdf):
+            entry.pdf_path = str(target_pdf)
+    _apply_inventory_payload_to_entry(entry, read_character_inventory(archive_path))
+    return True
+
+
 def _entry_from_archive(archive_path: Path) -> Optional[PlayerSheetEntry]:
     archive_meta = read_character_meta(archive_path)
     sheet_id = sanitize_filename(
@@ -1335,8 +1377,8 @@ def _entry_from_archive(archive_path: Path) -> Optional[PlayerSheetEntry]:
         pdf_path=str(character_sheet_pdf_path(sheet_id)),
         archive_path=str(archive_path),
     )
-    _apply_entry_meta(entry, archive_meta)
-    ensure_entry_archive(entry)
+    if not _load_entry_from_archive(entry):
+        return None
     return entry
 
 
@@ -1357,28 +1399,10 @@ def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
     archive_path = _entry_archive_path(entry)
     if archive_path.exists():
         entry.archive_path = str(archive_path)
-        archive_meta = read_character_meta(archive_path)
-        _apply_entry_meta(entry, archive_meta)
         if not entry.pdf_path or not Path(entry.pdf_path).exists():
             target_pdf = character_sheet_pdf_path(sheet_id_for_entry(entry))
             if extract_character_pdf(archive_path, target_pdf):
                 entry.pdf_path = str(target_pdf)
-        archive_inventory = read_character_inventory(archive_path)
-        entry.inventory = list(archive_inventory.get("inventory", []))
-        entry.inventory_notes = str(archive_inventory.get("inventory_notes", ""))
-        entry.equipment = _normalize_equipment(archive_inventory.get("equipment", {}))
-        try:
-            entry.gold = max(0, int(archive_inventory.get("gold", entry.gold)))
-        except (TypeError, ValueError):
-            pass
-        try:
-            entry.silver = max(0, int(archive_inventory.get("silver", entry.silver)))
-        except (TypeError, ValueError):
-            pass
-        try:
-            entry.copper = max(0, int(archive_inventory.get("copper", entry.copper)))
-        except (TypeError, ValueError):
-            pass
         return True
 
     source_pdf = Path(entry.pdf_path)
@@ -1445,6 +1469,8 @@ def load_entries_from_storage() -> List[PlayerSheetEntry]:
     path = player_sheets_storage_path()
     entries: List[PlayerSheetEntry] = []
     removed_legacy_mock_entry = False
+    migrated_legacy_entries = False
+    raw_cache: list[object] = []
 
     if path.exists():
         try:
@@ -1452,6 +1478,7 @@ def load_entries_from_storage() -> List[PlayerSheetEntry]:
         except Exception:
             raw = []
         if isinstance(raw, list):
+            raw_cache = list(raw)
             for payload in raw:
                 entry = entry_from_dict(payload)
                 if entry is None:
@@ -1459,37 +1486,57 @@ def load_entries_from_storage() -> List[PlayerSheetEntry]:
                 if _is_legacy_mock_entry(entry):
                     removed_legacy_mock_entry = True
                     continue
-                ensure_entry_archive(entry)
+                if _entry_archive_path(entry).exists():
+                    continue
+                if ensure_entry_archive(entry):
+                    migrated_legacy_entries = True
+                    continue
                 entries.append(entry)
 
     archive_entries = _scan_archive_entries()
-    if archive_entries:
-        by_sheet_id: dict[str, PlayerSheetEntry] = {}
-        for entry in entries:
-            by_sheet_id[sheet_id_for_entry(entry)] = entry
-        for entry in archive_entries:
-            by_sheet_id[sheet_id_for_entry(entry)] = entry
-        entries = sorted(
-            by_sheet_id.values(),
-            key=lambda row: (str(row.name or "").casefold(), str(row.archive_path or "")),
-        )
+    by_sheet_id: dict[str, PlayerSheetEntry] = {}
+    for entry in entries:
+        by_sheet_id[sheet_id_for_entry(entry)] = entry
+    for entry in archive_entries:
+        by_sheet_id[sheet_id_for_entry(entry)] = entry
+    entries = sorted(
+        by_sheet_id.values(),
+        key=lambda row: (str(row.name or "").casefold(), str(row.archive_path or "")),
+    )
 
-    if removed_legacy_mock_entry or archive_entries or not path.exists():
+    expected_cache = _storage_payload_from_entries(entries)
+    should_persist = (
+        removed_legacy_mock_entry
+        or migrated_legacy_entries
+        or not path.exists()
+        or raw_cache != expected_cache
+    )
+    if should_persist:
         try:
-            save_entries_to_storage(entries)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(expected_cache, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception:
             logger.exception("Failed to persist character sheet cache index.")
     return entries
 
 
-def save_entries_to_storage(entries: List[PlayerSheetEntry]) -> None:
-    """Persist character sheet list metadata to cache (archives remain canonical payload)."""
-    path = player_sheets_storage_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _storage_payload_from_entries(entries: List[PlayerSheetEntry]) -> list[dict]:
     payload: list[dict] = []
     for entry in entries:
-        sync_entry_archive(entry)
-        payload.append(entry_to_dict(entry))
+        ensure_entry_archive(entry)
+        archive_entry = _entry_from_archive(_entry_archive_path(entry))
+        payload.append(entry_to_dict(archive_entry or entry))
+    return payload
+
+
+def save_entries_to_storage(entries: List[PlayerSheetEntry]) -> None:
+    """Persist a cache mirror of the authoritative character archives."""
+    path = player_sheets_storage_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _storage_payload_from_entries(entries)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -1506,6 +1553,9 @@ def inventory_payload_for_sheet_id(sheet_id: str) -> Optional[dict]:
     target = str(sheet_id or "").strip()
     if not target:
         return None
+    archive_path = character_sheet_archive_path(target)
+    if archive_path.exists():
+        return read_character_inventory(archive_path)
     for entry in load_entries_from_storage():
         if sheet_id_for_entry(entry) == target:
             return _entry_inventory_payload(entry)
@@ -1555,28 +1605,7 @@ def ensure_network_linked_sheet_entry(
         )
         entries.append(target_entry)
 
-    normalized = normalize_inventory_payload(
-        inventory_payload if isinstance(inventory_payload, dict) else {}
-    )
-    target_entry.inventory = list(
-        normalized.get("inventory", [])
-        if isinstance(normalized.get("inventory"), list)
-        else []
-    )
-    target_entry.inventory_notes = str(normalized.get("inventory_notes", ""))
-    target_entry.equipment = _normalize_equipment(normalized.get("equipment", {}))
-    try:
-        target_entry.gold = max(0, int(normalized.get("gold", 0)))
-    except (TypeError, ValueError):
-        target_entry.gold = 0
-    try:
-        target_entry.silver = max(0, int(normalized.get("silver", 0)))
-    except (TypeError, ValueError):
-        target_entry.silver = 0
-    try:
-        target_entry.copper = max(0, int(normalized.get("copper", 0)))
-    except (TypeError, ValueError):
-        target_entry.copper = 0
+    normalized = _apply_inventory_payload_to_entry(target_entry, inventory_payload)
 
     sync_entry_archive(target_entry)
     save_entries_to_storage(entries)
@@ -1604,28 +1633,7 @@ def set_inventory_payload_for_sheet_id(
     if target_entry is None:
         return False, "Character not found.", None
 
-    normalized = normalize_inventory_payload(
-        inventory_payload if isinstance(inventory_payload, dict) else {}
-    )
-    target_entry.inventory = list(
-        normalized.get("inventory", [])
-        if isinstance(normalized.get("inventory"), list)
-        else []
-    )
-    target_entry.inventory_notes = str(normalized.get("inventory_notes", ""))
-    target_entry.equipment = _normalize_equipment(normalized.get("equipment", {}))
-    try:
-        target_entry.gold = max(0, int(normalized.get("gold", 0)))
-    except (TypeError, ValueError):
-        target_entry.gold = 0
-    try:
-        target_entry.silver = max(0, int(normalized.get("silver", 0)))
-    except (TypeError, ValueError):
-        target_entry.silver = 0
-    try:
-        target_entry.copper = max(0, int(normalized.get("copper", 0)))
-    except (TypeError, ValueError):
-        target_entry.copper = 0
+    normalized = _apply_inventory_payload_to_entry(target_entry, inventory_payload)
 
     sync_entry_archive(target_entry)
     save_entries_to_storage(entries)
@@ -3602,11 +3610,7 @@ class PlayerSheetsWidget(QWidget):
         return []
 
     def _load_entries(self) -> List[PlayerSheetEntry]:
-        path = self._storage_path
-        if not path.exists():
-            return []
-        entries = load_entries_from_storage()
-        return entries
+        return load_entries_from_storage()
 
     def _save_entries(self) -> None:
         for entry in self._manager.entries:
@@ -3624,18 +3628,7 @@ class PlayerSheetsWidget(QWidget):
                 break
         if target_entry is None:
             return
-        normalized = normalize_inventory_payload(
-            inventory_payload if isinstance(inventory_payload, dict) else {}
-        )
-        target_entry.inventory = list(normalized.get("inventory", []))
-        target_entry.inventory_notes = str(normalized.get("inventory_notes", ""))
-        target_entry.equipment = _normalize_equipment(normalized.get("equipment", {}))
-        try:
-            target_entry.gold = max(0, int(normalized.get("gold", target_entry.gold)))
-            target_entry.silver = max(0, int(normalized.get("silver", target_entry.silver)))
-            target_entry.copper = max(0, int(normalized.get("copper", target_entry.copper)))
-        except (TypeError, ValueError):
-            pass
+        _apply_inventory_payload_to_entry(target_entry, inventory_payload)
         if self._current_entry is target_entry:
             self._set_inventory(target_entry)
 
@@ -4978,8 +4971,28 @@ class PlayerSheetsWidget(QWidget):
                 self._blur_effect.setBlurRadius(self._expanded_blur_radius)
         super().hideEvent(event)
 
+    def _refresh_navigation_filters(self) -> None:
+        latest = load_navigation_data()
+        if not isinstance(latest, list) or latest == self._world_data:
+            return
+        world = _combo_optional_value(self._world_combo)
+        campaign = _combo_optional_value(self._campaign_combo)
+        group = _combo_optional_value(self._group_combo)
+        self._world_data = latest
+        for combo in (self._world_combo, self._campaign_combo, self._group_combo):
+            combo.blockSignals(True)
+        try:
+            _populate_combo(self._world_combo, list_worlds(self._world_data), world)
+            selected_campaign = self._refresh_campaigns(current_value=campaign)
+            self._refresh_groups(current_value=group, campaign=selected_campaign)
+        finally:
+            for combo in (self._world_combo, self._campaign_combo, self._group_combo):
+                combo.blockSignals(False)
+        self._apply_filters()
+
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._refresh_navigation_filters()
         if not self._sheet_expanded or self._details_panel is None:
             self._schedule_splitter_restore()
             return

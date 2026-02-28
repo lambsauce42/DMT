@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import os
-import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Protocol, Tuple
 
-from PySide6.QtCore import QEvent, QEventLoop, QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFontMetrics, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QStackedWidget, QVBoxLayout, QWidget
 
@@ -95,6 +93,15 @@ class WorkspaceWindow(Protocol):
         ...
 
     def is_primary_window(self) -> bool:
+        ...
+
+    def begin_applet_load(self, key: str, title: str) -> None:
+        ...
+
+    def end_applet_load(self, key: str) -> None:
+        ...
+
+    def build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
         ...
 
 
@@ -911,7 +918,6 @@ class TabWorkspaceController(QObject):
         if primary:
             self._primary_window = window
         setattr(window, "_tab_by_key", self.tab_by_key)
-        setattr(window, "_loading_tabs", self.loading_keys)
         host = window.workspace_host()
         host.configure(self, window)
         host.tabCloseRequested.connect(lambda index: self.close_tab_by_index(window, index))
@@ -955,19 +961,17 @@ class TabWorkspaceController(QObject):
             return
 
         if key in self.loading_keys:
+            self._debug_log("open_applet_skip_loading", key=key)
             return
         self.loading_keys.add(key)
+        self._debug_log("open_applet_begin", key=key)
 
-        if hasattr(window, "_show_applet_loading_overlay"):
-            window._show_applet_loading_overlay(f"Loading {applet.get('title', 'applet')}...")
-        if hasattr(window, "_warmup_loading_overlay"):
-            window._warmup_loading_overlay()
-        QApplication.processEvents()
-
+        widget: Optional[QWidget] = None
         try:
-            builder = getattr(window, "_build_applet_widget", None)
-            widget = self._build_widget_with_animation_pump(builder, key, applet)
+            window.begin_applet_load(key, str(applet.get("title", "applet")))
+            widget = window.build_applet_widget(key, applet)
             if widget is None:
+                self._debug_log("open_applet_builder_empty", key=key)
                 return
             title = str(applet.get("tab", applet.get("title", key)))
             self._register_widget(key, widget, window, title)
@@ -980,45 +984,11 @@ class TabWorkspaceController(QObject):
             )
             if focus_if_new:
                 host.setCurrentIndex(index)
+            self._debug_log("open_applet_ready", key=key)
         finally:
             self.loading_keys.discard(key)
-            if hasattr(window, "_hide_applet_loading_overlay"):
-                window._hide_applet_loading_overlay()
-
-    def _build_widget_with_animation_pump(
-        self,
-        builder: object,
-        key: str,
-        applet: Dict[str, object],
-    ) -> Optional[QWidget]:
-        if not callable(builder):
-            return None
-        previous_profile = sys.getprofile()
-        pump_interval_s = 0.016
-        last_pump = time.perf_counter()
-        reentrant = False
-
-        def _profile(frame, event, arg):  # type: ignore[no-untyped-def]
-            nonlocal last_pump, reentrant
-            if previous_profile is not None:
-                previous_profile(frame, event, arg)
-            if reentrant:
-                return
-            now = time.perf_counter()
-            if now - last_pump < pump_interval_s:
-                return
-            reentrant = True
-            try:
-                QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 1)
-            finally:
-                last_pump = now
-                reentrant = False
-
-        sys.setprofile(_profile)
-        try:
-            return builder(key, applet)
-        finally:
-            sys.setprofile(previous_profile)
+            window.end_applet_load(key)
+            self._debug_log("open_applet_end", key=key, opened=widget is not None)
 
     def focus_widget(self, window: WorkspaceWindow, widget: QWidget) -> None:
         host = window.workspace_host()
@@ -1173,9 +1143,9 @@ class TabWorkspaceController(QObject):
         self._debug_log("detach_widget", key=str(self.key_by_widget.get(widget, "")))
         return new_window
 
-    def begin_primary_shutdown(self, primary_window: WorkspaceWindow) -> None:
+    def begin_primary_shutdown(self, primary_window: WorkspaceWindow) -> bool:
         if self.is_shutting_down:
-            return
+            return True
         if self._drag_session is not None:
             self.finish_tab_drag(QCursor.pos(), detach_on_invalid_drop=False)
         self.is_shutting_down = True
@@ -1183,9 +1153,13 @@ class TabWorkspaceController(QObject):
             if window is primary_window:
                 continue
             if hasattr(window, "close"):
-                window.close()
+                closed = bool(window.close())
+                if not closed or window in self.registered_windows:
+                    self.is_shutting_down = False
+                    return False
+        return True
 
-    def prepare_window_close(self, window: WorkspaceWindow) -> None:
+    def prepare_window_close(self, window: WorkspaceWindow) -> bool:
         session = self._drag_session
         if session is not None:
             owner = self.window_by_widget.get(session.widget)
@@ -1196,15 +1170,9 @@ class TabWorkspaceController(QObject):
             widget = host.widget(index)
             if widget is None or self.is_home_widget(widget):
                 continue
-            key = self.key_by_widget.pop(widget, None)
-            if key:
-                self.tab_by_key.pop(key, None)
-            self.title_by_widget.pop(widget, None)
-            self.window_by_widget.pop(widget, None)
-            try:
-                widget.close()
-            except RuntimeError:
-                pass
+            if not self.close_tab_by_index(window, index, auto_close_window=False):
+                return False
+        return True
 
     def start_tab_drag(
         self,

@@ -1050,12 +1050,35 @@ class MapsWidget(QWidget):
                 ),
             )
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._refresh_navigation_filters()
+
     def _is_test_env(self) -> bool:
         if os.environ.get("DMT_TEST_MODE") == "1":
             return True
         if os.environ.get("PYTEST_CURRENT_TEST"):
             return True
         return "pytest" in sys.modules
+
+    def _refresh_navigation_filters(self) -> None:
+        latest = load_navigation_data()
+        if not isinstance(latest, list) or latest == self._world_data:
+            return
+        world = _combo_optional_value(self._world_combo)
+        campaign = _combo_optional_value(self._campaign_combo)
+        group = _combo_optional_value(self._group_combo)
+        self._world_data = latest
+        for combo in (self._world_combo, self._campaign_combo, self._group_combo):
+            combo.blockSignals(True)
+        try:
+            _populate_combo(self._world_combo, list_worlds(self._world_data), world)
+            selected_campaign = self._refresh_campaigns(current_value=campaign)
+            self._refresh_groups(current_value=group, campaign=selected_campaign)
+        finally:
+            for combo in (self._world_combo, self._campaign_combo, self._group_combo):
+                combo.blockSignals(False)
+        self._apply_filters()
 
     def _make_reset_button(self, tooltip: str) -> QToolButton:
         btn = QToolButton(self)

@@ -63,6 +63,34 @@ class NavigationContextSourceTests(unittest.TestCase):
                 widget._on_campaign_changed()
                 self.assertNotEqual(widget.group_combo.findText("Silver Lances"), -1)
 
+    def test_session_creator_refreshes_navigation_context_after_tab_return(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            nav_path = _seed_navigation(base_dir)
+            with patch.object(navigate_widget, "NAVIGATION_PATH", nav_path):
+                widget = SessionCreatorWidget()
+                self.addCleanup(widget.close)
+                widget.show()
+                self._app.processEvents()
+                self.assertEqual(widget.world_combo.findText("Moonfall"), -1)
+
+                save_navigation_world_data(
+                    [
+                        {
+                            "name": "Moonfall",
+                            "campaigns": [{"name": "Night Tide", "groups": []}],
+                        }
+                    ],
+                    base_dir=base_dir,
+                )
+
+                widget.hide()
+                self._app.processEvents()
+                widget.show()
+                self._app.processEvents()
+
+                self.assertNotEqual(widget.world_combo.findText("Moonfall"), -1)
+
     def test_maps_widget_uses_navigation_storage_for_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             nav_path = _seed_navigation(Path(tmpdir))
@@ -78,4 +106,3 @@ class NavigationContextSourceTests(unittest.TestCase):
                 widget = NPCDatabaseWidget()
                 self.addCleanup(widget.close)
                 self.assertNotEqual(widget._world_combo.findText("Eldervale"), -1)
-

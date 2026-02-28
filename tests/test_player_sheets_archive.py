@@ -113,6 +113,82 @@ def test_load_entries_rebuilds_cache_index_from_archives_when_missing(
     assert cache_index.exists()
     assert not root_index.exists()
 
+
+def test_load_entries_prefers_archive_over_stale_cache_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    source_pdf = tmp_path / "source.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4 source")
+    sheet_id = "Hero"
+    archive_path = player_sheets.character_sheet_archive_path(sheet_id)
+    write_character_archive(
+        archive_path,
+        pdf_path=source_pdf,
+        inventory_payload={
+            "inventory": ["rope"],
+            "inventory_notes": "from archive",
+            "equipment": {"head": "helm_1"},
+            "gold": 5,
+            "silver": 1,
+            "copper": 0,
+        },
+        meta={
+            "name": "Hero",
+            "sheet_id": sheet_id,
+            "world": "Eldervale",
+            "campaign": "Ashen Crown",
+            "group": "Silver Lances",
+            "tags": ["fighter", "tank"],
+        },
+    )
+
+    cache_index = player_sheets.player_sheets_storage_path()
+    cache_index.parent.mkdir(parents=True, exist_ok=True)
+    cache_index.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "Hero",
+                    "pdf_path": str(tmp_path / "stale.pdf"),
+                    "archive_path": str(archive_path),
+                    "world": "Wrong World",
+                    "campaign": "Wrong Campaign",
+                    "group": "Wrong Group",
+                    "tags": ["stale"],
+                    "inventory": ["stale_item"],
+                    "inventory_notes": "stale note",
+                    "equipment": {"head": "stale_helm"},
+                    "gold": 99,
+                    "silver": 98,
+                    "copper": 97,
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    entries = player_sheets.load_entries_from_storage()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.world == "Eldervale"
+    assert entry.campaign == "Ashen Crown"
+    assert entry.group == "Silver Lances"
+    assert sorted(entry.tags) == ["fighter", "tank"]
+    assert entry.inventory == ["rope"]
+    assert entry.inventory_notes == "from archive"
+    assert entry.gold == 5
+    assert entry.silver == 1
+    assert entry.copper == 0
+
+    persisted = json.loads(cache_index.read_text(encoding="utf-8"))
+    assert persisted[0]["world"] == "Eldervale"
+    assert persisted[0]["inventory"] == ["rope"]
+    assert persisted[0]["gold"] == 5
+
+
 def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> None:
     source_pdf = tmp_path / "sheet.pdf"
     source_pdf.write_bytes(b"%PDF-1.4 test sheet")

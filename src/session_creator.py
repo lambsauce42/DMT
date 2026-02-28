@@ -66,10 +66,6 @@ from models import Session, SessionAttachment, SessionLogEntry
 from save_paths import default_dnd_save_dir
 from navigate_widget import load_navigation_data
 from player_sheets import (
-    PlayerSheetsManager,
-    PlayerSheetEntry,
-    entry_from_dict as sheet_entry_from_dict,
-    player_sheets_storage_path,
     list_worlds,
     list_campaigns,
     list_groups,
@@ -546,10 +542,8 @@ class SessionCreatorWidget(QWidget):
         self._files_list_collapsed = False
         self._files_last_expanded_width = 320
         self._text_link_controllers: list[SessionTextLinkController] = []
-        
+
         self._world_data = _navigation_world_data()
-        
-        self.sheets_manager = PlayerSheetsManager(entries=self._load_sheet_entries())
 
         # Auto-save timer
         self.auto_save_timer = QTimer(self)
@@ -577,6 +571,7 @@ class SessionCreatorWidget(QWidget):
                 )
 
     def closeEvent(self, event) -> None:
+        self._persist_pending_session_edits()
         self.auto_save_timer.stop()
         if hasattr(self, "_files_splitter_animation"):
             try:
@@ -589,6 +584,11 @@ class SessionCreatorWidget(QWidget):
             except Exception:
                 pass
         super().closeEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._refresh_navigation_context_options()
+        self._position_files_edge_toggle()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -661,18 +661,6 @@ class SessionCreatorWidget(QWidget):
             if group not in options:
                 options.append(group)
         return options
-
-    def _load_sheet_entries(self) -> List[PlayerSheetEntry]:
-        path = player_sheets_storage_path()
-        if not path.exists():
-            return []
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, list):
-                return [e for e in (sheet_entry_from_dict(p) for p in raw) if e]
-        except Exception:
-            pass
-        return []
 
     def _init_ui(self) -> None:
         layout = QHBoxLayout(self)
@@ -1251,6 +1239,13 @@ class SessionCreatorWidget(QWidget):
             self._set_current_session_dirty(True)
         self.auto_save_timer.start()
 
+    def _persist_pending_session_edits(self) -> bool:
+        if not self._current_session or not self._current_session_dirty:
+            return True
+        self.auto_save_timer.stop()
+        self._save_current_session()
+        return not self._current_session_dirty
+
     def _report_io_failure(self, title: str, message: str) -> None:
         QMessageBox.warning(self, title, message)
 
@@ -1412,6 +1407,7 @@ class SessionCreatorWidget(QWidget):
 
     def _on_session_list_changed(self, current: QListWidgetItem, previous: QListWidgetItem) -> None:
         if not current:
+            self._persist_pending_session_edits()
             self._current_session = None
             self._clear_dashboard()
             return
@@ -1453,6 +1449,9 @@ class SessionCreatorWidget(QWidget):
 
     def _set_current_session_from_item(self, item: QListWidgetItem, *, apply_context: bool) -> None:
         session_id = item.data(Qt.ItemDataRole.UserRole)
+        current_id = self._current_session.id if self._current_session else None
+        if current_id and current_id != session_id:
+            self._persist_pending_session_edits()
         self._current_session = next((s for s in self.manager.sessions if s.id == session_id), None)
         if self._current_session:
             self._load_session_to_ui(self._current_session, apply_context=apply_context)
@@ -1483,6 +1482,39 @@ class SessionCreatorWidget(QWidget):
     def _sync_reference_tabs(self) -> None:
         # Reference tabs currently do not require context-specific sync.
         return
+
+    def _refresh_navigation_context_options(self) -> None:
+        if not all(hasattr(self, name) for name in ("world_combo", "campaign_combo", "group_combo")):
+            return
+        latest = _navigation_world_data()
+        if latest == self._world_data:
+            return
+        world = _combo_optional_value(self.world_combo)
+        campaign = _combo_optional_value(self.campaign_combo)
+        group = _combo_optional_value(self.group_combo)
+        self._world_data = latest
+        for combo in (self.world_combo, self.campaign_combo, self.group_combo):
+            combo.blockSignals(True)
+        try:
+            _populate_combo(self.world_combo, self._world_options(), world or None)
+            selected_world = _combo_optional_value(self.world_combo)
+            selected_campaign = self._campaign_options(selected_world)
+            _populate_combo(self.campaign_combo, selected_campaign, campaign or None)
+            selected_campaign_value = _combo_optional_value(self.campaign_combo)
+            _populate_combo(
+                self.group_combo,
+                self._group_options(selected_world, selected_campaign_value),
+                group or None,
+            )
+        finally:
+            for combo in (self.world_combo, self.campaign_combo, self.group_combo):
+                combo.blockSignals(False)
+        current_world = _combo_optional_value(self.world_combo)
+        current_campaign = _combo_optional_value(self.campaign_combo)
+        current_group = _combo_optional_value(self.group_combo)
+        self._sync_reference_tabs()
+        if (current_world, current_campaign, current_group) != (world, campaign, group):
+            self._refresh_session_list(preserve_current_session=True)
 
     def _init_text_link_controllers(self) -> None:
         self._text_link_controllers = [
