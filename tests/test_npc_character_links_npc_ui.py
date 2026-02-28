@@ -49,6 +49,20 @@ def test_npc_details_show_linked_character_field(npc_widget):
     assert npc_widget._detail_linked_character.text() == "None"
 
 
+def test_npc_header_shows_linked_character_button(npc_widget, monkeypatch):
+    monkeypatch.setattr(
+        npc_database,
+        "_character_sheet_name_map",
+        lambda: {"Hero_One": "Hero One"},
+    )
+
+    npc_widget._current_entry.linked_sheet_id = "Hero_One"
+    npc_widget._set_details(npc_widget._current_entry)
+
+    assert npc_widget._header_name.text() == "NPC: Guard"
+    assert [button.text() for button in npc_widget._header_links.link_buttons()] == ["Hero One"]
+
+
 def test_manage_character_link_links_and_unlinks(npc_widget, monkeypatch):
     entries = [
         PlayerSheetEntry(

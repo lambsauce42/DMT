@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
 
 
@@ -52,6 +53,11 @@ def test_character_list_shows_linked_npc_summary_line(tmp_path, qtbot, monkeypat
         "_linked_npc_names_by_sheet_id",
         lambda: {"Hero_One": ["Guard", "Merchant", "Wizard"]},
     )
+    monkeypatch.setattr(
+        player_sheets,
+        "_linked_npc_targets_by_sheet_id",
+        lambda: {"Hero_One": [("npc_1", "Guard"), ("npc_2", "Merchant"), ("npc_3", "Wizard")]},
+    )
 
     widget = PlayerSheetsWidget()
     qtbot.addWidget(widget)
@@ -66,11 +72,87 @@ def test_character_header_shows_linked_npc_summary(tmp_path, qtbot, monkeypatch)
         "_linked_npc_names_by_sheet_id",
         lambda: {"Hero_One": ["Guard", "Merchant", "Wizard"]},
     )
+    monkeypatch.setattr(
+        player_sheets,
+        "_linked_npc_targets_by_sheet_id",
+        lambda: {"Hero_One": [("npc_1", "Guard"), ("npc_2", "Merchant"), ("npc_3", "Wizard")]},
+    )
 
     widget = PlayerSheetsWidget()
     qtbot.addWidget(widget)
     widget._sheet_list.setCurrentRow(0)
-    assert "| NPCs: Guard, Merchant (+1)" in widget._header_name.text()
+    assert widget._header_name.text() == "Character: Hero One"
+    assert [button.text() for button in widget._header_links.link_buttons()] == [
+        "Guard",
+        "Merchant",
+        "Wizard",
+    ]
+    assert widget._header_links.overflow_text() == ""
+
+
+def test_character_unsaved_indicator_stays_on_name_not_links(tmp_path, qtbot, monkeypatch):
+    _seed_character_entries(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        player_sheets,
+        "_linked_npc_targets_by_sheet_id",
+        lambda: {"Hero_One": [("npc_1", "Guard"), ("npc_2", "Merchant")]},
+    )
+
+    widget = PlayerSheetsWidget()
+    qtbot.addWidget(widget)
+    widget._sheet_list.setCurrentRow(0)
+    widget._set_unsaved_indicator(True)
+
+    assert widget._header_name.text() == "Character: Hero One *"
+    assert [button.text() for button in widget._header_links.link_buttons()] == [
+        "Guard",
+        "Merchant",
+    ]
+
+
+def test_character_overflow_opens_linked_npc_picker(tmp_path, qtbot, monkeypatch):
+    _seed_character_entries(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        player_sheets,
+        "_linked_npc_targets_by_sheet_id",
+        lambda: {
+            "Hero_One": [
+                ("npc_1", "Guard"),
+                ("npc_2", "Merchant"),
+                ("npc_3", "Wizard"),
+                ("npc_4", "Scout"),
+            ]
+        },
+    )
+
+    widget = PlayerSheetsWidget()
+    qtbot.addWidget(widget)
+    widget._sheet_list.setCurrentRow(0)
+
+    chosen: dict[str, object] = {}
+    monkeypatch.setattr(
+        widget,
+        "_choose_linked_npc_from_overflow",
+        lambda links: chosen.setdefault("links", list(links)) and "npc_4",
+    )
+    monkeypatch.setattr(
+        widget,
+        "_open_linked_npc_from_header",
+        lambda target_id: chosen.setdefault("target_id", target_id) or True,
+    )
+
+    overflow = widget._header_links.overflow_button()
+    assert overflow is not None
+    assert overflow.text() == "(+1)"
+    qtbot.mouseClick(overflow, Qt.MouseButton.LeftButton)
+
+    assert chosen["links"] == [
+        ("npc_1", "Guard"),
+        ("npc_2", "Merchant"),
+        ("npc_3", "Wizard"),
+        ("npc_4", "Scout"),
+    ]
+    assert chosen["target_id"] == "npc_4"
 
 
 def test_manage_npc_links_applies_selected_ids(tmp_path, qtbot, monkeypatch):

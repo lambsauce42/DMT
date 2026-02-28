@@ -56,9 +56,11 @@ from unique_ids import generate_probabilistic_unique_id
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
 from player_sheets import (
+    HeaderLinkStrip,
     _combo_optional_value,
     _populate_combo,
     default_sheet_save_dir,
+    link_indicator_icon,
     list_character_link_targets,
     list_campaigns,
     list_groups,
@@ -827,13 +829,24 @@ class NPCDatabaseWidget(QWidget):
         header_layout.setSpacing(8)
         header_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
+        header_title = QWidget(header_panel)
+        header_title_layout = QHBoxLayout(header_title)
+        header_title_layout.setContentsMargins(0, 0, 0, 0)
+        header_title_layout.setSpacing(6)
+
         self._header_name = QLabel("NPC: None")
         self._header_name.setObjectName("PanelTitle")
-        header_layout.addWidget(self._header_name, 1)
+        self._header_links = HeaderLinkStrip(link_indicator_icon(14), header_title)
+        self._header_links.setFont(self._header_name.font())
+
+        header_title_layout.addWidget(self._header_name, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_title_layout.addWidget(self._header_links, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_title_layout.addStretch(1)
+        header_layout.addWidget(header_title, 1)
 
         self._manage_link_button = QToolButton()
         self._manage_link_button.setObjectName("SecondaryButton")
-        self._manage_link_button.setIcon(QIcon(os.path.join(ICON_DIR, "person.svg")))
+        self._manage_link_button.setIcon(link_indicator_icon(20))
         self._manage_link_button.setToolTip("Manage Character Link")
         self._manage_link_button.clicked.connect(self._manage_character_link)
 
@@ -1184,6 +1197,7 @@ class NPCDatabaseWidget(QWidget):
         self._current_entry = entry
         if not entry:
             self._header_name.setText("NPC: None")
+            self._header_links.set_links([])
             self._manage_link_button.setEnabled(False)
             self._edit_button.setEnabled(False)
             self._duplicate_button.setEnabled(False)
@@ -1204,6 +1218,16 @@ class NPCDatabaseWidget(QWidget):
             return
 
         self._header_name.setText(f"NPC: {entry.name}")
+        linked_sheet_id = str(entry.linked_sheet_id or "").strip()
+        header_links: list[tuple[str, str]] = []
+        if linked_sheet_id:
+            linked_name = _character_sheet_name_map().get(linked_sheet_id, linked_sheet_id)
+            header_links.append((linked_sheet_id, linked_name))
+        self._header_links.set_links(
+            header_links,
+            self._open_linked_character_from_header,
+            tooltip_prefix="Open linked character",
+        )
         self._manage_link_button.setEnabled(True)
         self._edit_button.setEnabled(True)
         self._duplicate_button.setEnabled(True)
@@ -1294,6 +1318,36 @@ class NPCDatabaseWidget(QWidget):
         self._apply_filters()
         if entry_id:
             self._select_entry_by_id(entry_id)
+
+    def _open_linked_character_from_header(self, sheet_id: str) -> bool:
+        clean_sheet_id = str(sheet_id or "").strip()
+        if not clean_sheet_id:
+            return False
+        host = self.window()
+        if not hasattr(host, "open_applet"):
+            logger.warning("NPC header link routing host is unavailable.")
+            return False
+        try:
+            host.open_applet(
+                {"key": "player_sheets", "title": "Characters", "tab": "Characters"},
+                focus_if_new=True,
+            )
+        except Exception as exc:
+            logger.warning("Unable to open character applet for NPC header link: %s", exc)
+            return False
+        target_widget = None
+        if hasattr(host, "_tab_by_key") and isinstance(getattr(host, "_tab_by_key"), dict):
+            target_widget = host._tab_by_key.get("player_sheets")
+        if target_widget is None:
+            logger.warning(
+                "Character applet did not provide a target widget for header link routing."
+            )
+            return False
+        open_method = getattr(target_widget, "open_linked_sheet", None)
+        if not callable(open_method):
+            logger.warning("Character applet does not expose open_linked_sheet for header links.")
+            return False
+        return bool(open_method(clean_sheet_id))
 
 
 

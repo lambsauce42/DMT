@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
-from typing import Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional, Sequence
 import logging
 
 from save_paths import default_dnd_save_dir, items_dir
@@ -182,6 +182,10 @@ def _unlink_npc_links_for_sheet(sheet_id: str) -> int:
 
 ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
+LINK_INDICATOR_ICON = os.path.join(ICON_DIR, "link_indicator.svg")
+LINK_INDICATOR_ICON_14 = os.path.join(ICON_DIR, "link_indicator_14.png")
+LINK_INDICATOR_ICON_20 = os.path.join(ICON_DIR, "link_indicator_20.png")
+_SUPERSAMPLED_ICON_CACHE: dict[tuple[str, int], QPixmap] = {}
 EQUIPMENT_BACKGROUNDS_DIR = Path(__file__).resolve().parent.parent / "assets" / "equipment backgrounds"
 EQUIPMENT_DEFAULT_BACKGROUND_NAME = "ring_simple.png"
 EQUIPMENT_SILHOUETTE_CANDIDATES: tuple[Path, ...] = (
@@ -1868,6 +1872,264 @@ def _format_linked_npc_summary(names: Iterable[str], max_names: int = 2) -> str:
     return ", ".join(visible)
 
 
+def _supersampled_icon_pixmap(icon_source: str | QIcon, size: int) -> QPixmap:
+    safe_size = max(1, int(round(size)))
+    cache_key = (
+        icon_source if isinstance(icon_source, str) else f"qicon::{id(icon_source)}",
+        safe_size,
+    )
+    cached = _SUPERSAMPLED_ICON_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    icon = QIcon(icon_source) if isinstance(icon_source, str) else icon_source
+    oversample = 4
+    raw = icon.pixmap(QSize(safe_size * oversample, safe_size * oversample))
+    if raw.isNull():
+        return raw
+    pixmap = raw.scaled(
+        safe_size,
+        safe_size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    _SUPERSAMPLED_ICON_CACHE[cache_key] = pixmap
+    return pixmap
+
+
+def link_indicator_icon(size: int = 16) -> QIcon:
+    safe_size = max(1, int(round(size)))
+    if safe_size <= 14 and os.path.exists(LINK_INDICATOR_ICON_14):
+        return QIcon(LINK_INDICATOR_ICON_14)
+    if safe_size <= 20 and os.path.exists(LINK_INDICATOR_ICON_20):
+        return QIcon(LINK_INDICATOR_ICON_20)
+    pixmap = _supersampled_icon_pixmap(LINK_INDICATOR_ICON, safe_size)
+    if pixmap.isNull():
+        return QIcon(LINK_INDICATOR_ICON)
+    return QIcon(pixmap)
+
+
+def _linked_npc_targets_by_sheet_id() -> dict[str, list[tuple[str, str]]]:
+    try:
+        from npc_database import load_npc_entries_from_storage
+    except Exception as exc:
+        logger.warning("Unable to import NPC link targets: %s", exc)
+        return {}
+    try:
+        valid_sheet_ids = {
+            str(sheet_id_for_entry(entry) or "").strip()
+            for entry in list_character_link_targets()
+            if str(sheet_id_for_entry(entry) or "").strip()
+        }
+    except Exception as exc:
+        logger.warning("Unable to resolve valid character sheets for NPC links: %s", exc)
+        valid_sheet_ids = set()
+    try:
+        entries = list(load_npc_entries_from_storage())
+    except Exception as exc:
+        logger.warning("Unable to load NPC link targets: %s", exc)
+        return {}
+    result: dict[str, list[tuple[str, str]]] = {}
+    for entry in entries:
+        linked_sheet_id = str(getattr(entry, "linked_sheet_id", "") or "").strip()
+        npc_id = str(getattr(entry, "id", "") or "").strip()
+        npc_name = str(getattr(entry, "name", "") or "").strip()
+        if not linked_sheet_id or not npc_id or not npc_name:
+            continue
+        if valid_sheet_ids and linked_sheet_id not in valid_sheet_ids:
+            continue
+        result.setdefault(linked_sheet_id, []).append((npc_id, npc_name))
+    for sheet_id, items in result.items():
+        result[sheet_id] = sorted(items, key=lambda value: value[1].casefold())
+    return result
+
+
+class HeaderLinkChip(QFrame):
+    def __init__(
+        self,
+        icon: QIcon,
+        target_id: str,
+        label: str,
+        callback: Optional[Callable[[str], object]] = None,
+        *,
+        tooltip: str = "",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._target_id = str(target_id or "").strip()
+        self._label_text = str(label or "").strip()
+        self._callback = callback
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("QFrame { background: transparent; }")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        self._icon_label = QLabel(self)
+        self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._icon_label.setFixedSize(14, 14)
+        icon_pixmap = _supersampled_icon_pixmap(icon, 14)
+        if not icon_pixmap.isNull():
+            self._icon_label.setPixmap(icon_pixmap)
+        layout.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._text_label = QLabel(self._label_text, self)
+        self._text_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._text_label.setContentsMargins(0, 0, 0, 2)
+        self._text_label.setStyleSheet("background: transparent;")
+        layout.addWidget(self._text_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        if tooltip:
+            self.setToolTip(tooltip)
+
+    def setFont(self, font: QFont) -> None:  # type: ignore[override]
+        super().setFont(font)
+        if hasattr(self, "_text_label"):
+            self._text_label.setFont(font)
+
+    def text(self) -> str:
+        return self._label_text
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._target_id
+            and callable(self._callback)
+        ):
+            self._callback(self._target_id)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class HeaderTextChip(QFrame):
+    def __init__(
+        self,
+        label: str,
+        callback: Optional[Callable[[], object]] = None,
+        *,
+        text_color: str = "",
+        tooltip: str = "",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._label_text = str(label or "").strip()
+        self._callback = callback
+        self._text_color = str(text_color or "").strip()
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if callable(callback)
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.setStyleSheet("QFrame { background: transparent; }")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._text_label = QLabel(self._label_text, self)
+        self._text_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._text_label.setContentsMargins(0, 0, 0, 2)
+        text_style = "background: transparent;"
+        if self._text_color:
+            text_style = f"{text_style} color: {self._text_color};"
+        self._text_label.setStyleSheet(text_style.strip())
+        layout.addWidget(self._text_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        if tooltip:
+            self.setToolTip(tooltip)
+
+    def setFont(self, font: QFont) -> None:  # type: ignore[override]
+        super().setFont(font)
+        if hasattr(self, "_text_label"):
+            self._text_label.setFont(font)
+
+    def text(self) -> str:
+        return self._label_text
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton and callable(self._callback):
+            self._callback()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class HeaderLinkStrip(QWidget):
+    def __init__(self, icon_source: str | QIcon, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._icon = QIcon(icon_source) if isinstance(icon_source, str) else icon_source
+        self._link_buttons: list[HeaderLinkChip] = []
+        self._overflow_button: Optional[HeaderTextChip] = None
+        self._overflow_text = ""
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._layout = layout
+        self.hide()
+
+    def set_links(
+        self,
+        links: Sequence[tuple[str, str]],
+        callback: Optional[Callable[[str], object]] = None,
+        *,
+        overflow: int = 0,
+        overflow_callback: Optional[Callable[[], object]] = None,
+        overflow_tooltip: str = "",
+        tooltip_prefix: str = "Open link",
+    ) -> None:
+        self._overflow_text = ""
+        self._overflow_button = None
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._link_buttons.clear()
+
+        clean_prefix = str(tooltip_prefix or "").strip()
+        for target_id, label in links:
+            clean_target = str(target_id or "").strip()
+            clean_label = str(label or "").strip()
+            if not clean_target or not clean_label:
+                continue
+            tooltip = f"{clean_prefix}: {clean_label}" if clean_prefix else ""
+            button = HeaderLinkChip(
+                self._icon,
+                clean_target,
+                clean_label,
+                callback,
+                tooltip=tooltip,
+                parent=self,
+            )
+            button.setFont(self.font())
+            self._layout.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._link_buttons.append(button)
+
+        if overflow > 0:
+            self._overflow_text = f"(+{int(overflow)})"
+            overflow_button = HeaderTextChip(
+                self._overflow_text,
+                overflow_callback,
+                text_color="#2563eb",
+                tooltip=str(overflow_tooltip or "").strip(),
+                parent=self,
+            )
+            overflow_button.setFont(self.font())
+            self._layout.addWidget(overflow_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._overflow_button = overflow_button
+
+        self.setVisible(bool(self._link_buttons) or bool(self._overflow_text))
+
+    def link_buttons(self) -> list[HeaderLinkChip]:
+        return list(self._link_buttons)
+
+    def overflow_text(self) -> str:
+        return self._overflow_text
+
+    def overflow_button(self) -> Optional[HeaderTextChip]:
+        return self._overflow_button
+
+
 def _combo_optional_value(combo: QComboBox) -> Optional[str]:
     value = combo.currentText().strip()
     if not value or value == ANY_LABEL:
@@ -2840,6 +3102,10 @@ class PlayerSheetsWidget(QWidget):
         self._inventory_notepad: Optional[QTextEdit] = None
         self._syncing_inventory_notes = False
         self._linked_npc_names_map: dict[str, list[str]] = {}
+        self._linked_npc_targets_map: dict[str, list[tuple[str, str]]] = {}
+        self._header_all_link_targets: list[tuple[str, str]] = []
+        self._header_link_targets: list[tuple[str, str]] = []
+        self._header_link_overflow = 0
         self._header_name_text = "Character: None"
         self._sheet_unsaved = False
         self._sheet_expanded = False
@@ -2987,15 +3253,44 @@ class PlayerSheetsWidget(QWidget):
         self._header_name = QLabel(self._header_name_text)
         self._header_name.setObjectName("PanelTitle")
         self._header_name.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._header_links = HeaderLinkStrip(
+            link_indicator_icon(14), self._header_title_container
+        )
         self._header_name_center = QLabel(self._header_name_text)
         self._header_name_center.setObjectName("PanelTitle")
         self._header_name_center.setAlignment(
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         )
+        self._header_links_center = HeaderLinkStrip(
+            link_indicator_icon(14), self._header_title_container
+        )
+        self._header_links.setFont(self._header_name.font())
+        self._header_links_center.setFont(self._header_name_center.font())
 
-        self._header_title_stack.addWidget(self._header_name)
-        self._header_title_stack.addWidget(self._header_name_center)
-        self._header_title_stack.setCurrentWidget(self._header_name)
+        header_title_left = QWidget(self._header_title_container)
+        header_title_left_layout = QHBoxLayout(header_title_left)
+        header_title_left_layout.setContentsMargins(0, 0, 0, 0)
+        header_title_left_layout.setSpacing(6)
+        header_title_left_layout.addWidget(self._header_name, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_title_left_layout.addWidget(self._header_links, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_title_left_layout.addStretch(1)
+
+        header_title_center = QWidget(self._header_title_container)
+        header_title_center_layout = QHBoxLayout(header_title_center)
+        header_title_center_layout.setContentsMargins(0, 0, 0, 0)
+        header_title_center_layout.setSpacing(6)
+        header_title_center_layout.addStretch(1)
+        header_title_center_layout.addWidget(
+            self._header_name_center, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        header_title_center_layout.addWidget(
+            self._header_links_center, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        header_title_center_layout.addStretch(1)
+
+        self._header_title_stack.addWidget(header_title_left)
+        self._header_title_stack.addWidget(header_title_center)
+        self._header_title_stack.setCurrentIndex(0)
         header_layout.addWidget(self._header_title_container, 1)
 
         self._open_pdf_button = QToolButton()
@@ -3012,7 +3307,7 @@ class PlayerSheetsWidget(QWidget):
 
         self._manage_npc_links_button = QToolButton()
         self._manage_npc_links_button.setObjectName("SecondaryButton")
-        self._manage_npc_links_button.setIcon(QIcon(os.path.join(ICON_DIR, "person.svg")))
+        self._manage_npc_links_button.setIcon(link_indicator_icon(20))
         self._manage_npc_links_button.setToolTip("Manage NPC Links")
         self._manage_npc_links_button.clicked.connect(self._open_manage_npc_links_dialog)
 
@@ -3677,6 +3972,7 @@ class PlayerSheetsWidget(QWidget):
 
     def _reload_linked_npc_name_map(self) -> None:
         self._linked_npc_names_map = _linked_npc_names_by_sheet_id()
+        self._linked_npc_targets_map = _linked_npc_targets_by_sheet_id()
 
     def _linked_npc_names_for_entry(self, entry: PlayerSheetEntry) -> list[str]:
         sheet_id = str(sheet_id_for_entry(entry) or "").strip()
@@ -3684,6 +3980,19 @@ class PlayerSheetsWidget(QWidget):
             return []
         names = self._linked_npc_names_map.get(sheet_id, [])
         return [str(name).strip() for name in names if str(name).strip()]
+
+    def _linked_npc_targets_for_entry(self, entry: PlayerSheetEntry) -> list[tuple[str, str]]:
+        sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+        if not sheet_id:
+            return []
+        targets = self._linked_npc_targets_map.get(sheet_id, [])
+        cleaned: list[tuple[str, str]] = []
+        for npc_id, npc_name in targets:
+            clean_id = str(npc_id or "").strip()
+            clean_name = str(npc_name or "").strip()
+            if clean_id and clean_name:
+                cleaned.append((clean_id, clean_name))
+        return cleaned
 
     def _linked_npc_summary_for_entry(self, entry: PlayerSheetEntry) -> str:
         return _format_linked_npc_summary(self._linked_npc_names_for_entry(entry))
@@ -3789,6 +4098,7 @@ class PlayerSheetsWidget(QWidget):
         self._set_unsaved_indicator(False)
         if not entry:
             self._set_header_name("Character: None")
+            self._set_header_links([])
             self._open_pdf_button.setEnabled(False)
             self._edit_button.setEnabled(False)
             self._manage_npc_links_button.setEnabled(False)
@@ -3797,8 +4107,9 @@ class PlayerSheetsWidget(QWidget):
             self._set_inventory(None)
             return
 
-        linked_summary = self._linked_npc_summary_for_entry(entry)
-        self._set_header_name(f"Character: {entry.name} | NPCs: {linked_summary}")
+        linked_targets = self._linked_npc_targets_for_entry(entry)
+        self._set_header_name(f"Character: {entry.name}")
+        self._set_header_links(linked_targets)
         self._open_pdf_button.setEnabled(bool(entry.pdf_path or entry.archive_path))
         self._edit_button.setEnabled(True)
         self._manage_npc_links_button.setEnabled(True)
@@ -3810,13 +4121,15 @@ class PlayerSheetsWidget(QWidget):
         self._current_entry = entry
         if not entry:
             self._set_header_name("Character: None")
+            self._set_header_links([])
             self._open_pdf_button.setEnabled(False)
             self._edit_button.setEnabled(False)
             self._manage_npc_links_button.setEnabled(False)
             self._save_button.setEnabled(False)
             return
-        linked_summary = self._linked_npc_summary_for_entry(entry)
-        self._set_header_name(f"Character: {entry.name} | NPCs: {linked_summary}")
+        linked_targets = self._linked_npc_targets_for_entry(entry)
+        self._set_header_name(f"Character: {entry.name}")
+        self._set_header_links(linked_targets)
         self._open_pdf_button.setEnabled(bool(entry.pdf_path or entry.archive_path))
         self._edit_button.setEnabled(True)
         self._manage_npc_links_button.setEnabled(True)
@@ -5186,6 +5499,24 @@ class PlayerSheetsWidget(QWidget):
         self._update_header_labels()
         self._sync_sheet_toolbar_title()
 
+    def _set_header_links(
+        self,
+        links: Sequence[tuple[str, str]],
+        *,
+        max_visible: int = 3,
+    ) -> None:
+        self._header_all_link_targets = [
+            (str(target_id or "").strip(), str(label or "").strip())
+            for target_id, label in links
+            if str(target_id or "").strip() and str(label or "").strip()
+        ]
+        visible_count = max(0, int(max_visible))
+        self._header_link_targets = self._header_all_link_targets[:visible_count]
+        self._header_link_overflow = max(
+            0, len(self._header_all_link_targets) - len(self._header_link_targets)
+        )
+        self._update_header_links()
+
     def _update_header_labels(self) -> None:
         if not hasattr(self, "_header_name") or not hasattr(self, "_header_name_center"):
             return
@@ -5195,10 +5526,30 @@ class PlayerSheetsWidget(QWidget):
         self._header_name.setText(display_text)
         self._header_name_center.setText(display_text)
 
+    def _update_header_links(self) -> None:
+        if not hasattr(self, "_header_links") or not hasattr(self, "_header_links_center"):
+            return
+        self._header_links.set_links(
+            self._header_link_targets,
+            self._open_linked_npc_from_header,
+            overflow=self._header_link_overflow,
+            overflow_callback=self._open_header_link_overflow_dialog,
+            overflow_tooltip="Show all linked NPCs",
+            tooltip_prefix="Open linked NPC",
+        )
+        self._header_links_center.set_links(
+            self._header_link_targets,
+            self._open_linked_npc_from_header,
+            overflow=self._header_link_overflow,
+            overflow_callback=self._open_header_link_overflow_dialog,
+            overflow_tooltip="Show all linked NPCs",
+            tooltip_prefix="Open linked NPC",
+        )
+
     def _update_header_mode(self) -> None:
         if not hasattr(self, "_header_title_stack"):
             return
-        self._header_title_stack.setCurrentWidget(self._header_name)
+        self._header_title_stack.setCurrentIndex(1 if self._sheet_expanded else 0)
 
     def _sync_sheet_toolbar_title(self) -> None:
         if self._sheet_panel is None:
@@ -5209,6 +5560,99 @@ class PlayerSheetsWidget(QWidget):
             return
         self._sheet_panel.set_center_title(self._header_name_text)
         self._sheet_panel.set_center_unsaved(self._sheet_unsaved)
+
+    def _open_linked_npc_from_header(self, entry_id: str) -> bool:
+        clean_entry_id = str(entry_id or "").strip()
+        if not clean_entry_id:
+            return False
+        host = self.window()
+        if not hasattr(host, "open_applet"):
+            logger.warning("Character header link routing host is unavailable.")
+            return False
+        try:
+            host.open_applet(
+                {"key": "npc_database", "title": "NPCs", "tab": "NPCs"},
+                focus_if_new=True,
+            )
+        except Exception as exc:
+            logger.warning("Unable to open NPC applet for character header link: %s", exc)
+            return False
+        target_widget = None
+        if hasattr(host, "_tab_by_key") and isinstance(getattr(host, "_tab_by_key"), dict):
+            target_widget = host._tab_by_key.get("npc_database")
+        if target_widget is None:
+            logger.warning("NPC applet did not provide a target widget for header link routing.")
+            return False
+        open_method = getattr(target_widget, "open_linked_entry", None)
+        if not callable(open_method):
+            logger.warning("NPC applet does not expose open_linked_entry for header links.")
+            return False
+        return bool(open_method(clean_entry_id))
+
+    def _choose_linked_npc_from_overflow(
+        self, links: Sequence[tuple[str, str]]
+    ) -> Optional[str]:
+        clean_links = [
+            (str(target_id or "").strip(), str(label or "").strip())
+            for target_id, label in links
+            if str(target_id or "").strip() and str(label or "").strip()
+        ]
+        if not clean_links:
+            return None
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Linked NPCs")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        heading = QLabel("Open a linked NPC", dialog)
+        heading.setObjectName("PanelTitle")
+        layout.addWidget(heading)
+
+        npc_list = QListWidget(dialog)
+        npc_list.setObjectName("NavList")
+        npc_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        for target_id, label in clean_links:
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, target_id)
+            npc_list.addItem(item)
+        if npc_list.count():
+            npc_list.setCurrentRow(0)
+        layout.addWidget(npc_list, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_button is not None:
+            ok_button.setText("Open")
+            ok_button.setEnabled(npc_list.currentItem() is not None)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        npc_list.itemSelectionChanged.connect(
+            lambda: ok_button.setEnabled(npc_list.currentItem() is not None)
+            if ok_button is not None
+            else None
+        )
+        npc_list.itemDoubleClicked.connect(lambda _item: dialog.accept())
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        current_item = npc_list.currentItem()
+        if current_item is None:
+            return None
+        target_id = str(current_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        return target_id or None
+
+    def _open_header_link_overflow_dialog(self) -> None:
+        target_id = self._choose_linked_npc_from_overflow(self._header_all_link_targets)
+        if not target_id:
+            return
+        self._open_linked_npc_from_header(target_id)
 
     def _open_new_sheet_dialog(self) -> None:
         dialog = PlayerSheetDialog(
