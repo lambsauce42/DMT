@@ -253,3 +253,73 @@ def test_maps_widget_restores_map_view_state_and_reset_view(qtbot, monkeypatch, 
     assert abs(panel._zoom - 1.0) < 0.01
     assert abs(reset_center.x() - expected_center.x()) < 1.25
     assert abs(reset_center.y() - expected_center.y()) < 1.25
+
+
+def test_maps_widget_preserves_fit_scale_for_untouched_maps_across_switches(
+    qtbot, monkeypatch, tmp_path
+):
+    maps_dir = tmp_path / "maps"
+    images_dir = maps_dir / "images"
+    thumbs_dir = images_dir / ".thumbs"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    large = images_dir / "large.png"
+    small = images_dir / "small.png"
+    _write_png(large, width=640, height=320)
+    _write_png(small, width=96, height=96)
+
+    monkeypatch.setattr("maps_applet.load_navigation_data", lambda: [])
+    monkeypatch.setattr("maps_applet.maps_storage_dir", lambda: maps_dir)
+    monkeypatch.setattr("maps_applet.maps_images_dir", lambda: images_dir)
+    monkeypatch.setattr("maps_applet.maps_thumbs_dir", lambda: thumbs_dir)
+
+    widget = MapsWidget()
+    qtbot.addWidget(widget)
+    widget.resize(1200, 800)
+    widget.show()
+
+    large_entry = MapAsset(id="map-large", name="Large", image_path=str(large))
+    small_entry = MapAsset(id="map-small", name="Small", image_path=str(small))
+    widget._manager.entries = [large_entry, small_entry]
+    widget._apply_filters()
+
+    panel = widget._preview_panel
+    initial_large_zoom = panel.transform().m11()
+    initial_large_center = panel.mapToScene(panel.viewport().rect().center())
+
+    widget._map_list.setCurrentRow(1)
+    small_zoom = panel.transform().m11()
+
+    widget._map_list.setCurrentRow(0)
+    restored_large_zoom = panel.transform().m11()
+    restored_large_center = panel.mapToScene(panel.viewport().rect().center())
+    expected_large_center = panel._pixmap_item.boundingRect().center()
+
+    debug_root = Path(ROOT) / "debug"
+    debug_root.mkdir(parents=True, exist_ok=True)
+    debug_log = debug_root / "map_view_untouched_restore.log"
+    debug_log.write_text(
+        "\n".join(
+            [
+                f"initial_large_zoom={initial_large_zoom:.6f}",
+                f"small_zoom={small_zoom:.6f}",
+                f"restored_large_zoom={restored_large_zoom:.6f}",
+                (
+                    "initial_large_center="
+                    f"({float(initial_large_center.x()):.6f},{float(initial_large_center.y()):.6f})"
+                ),
+                (
+                    "restored_large_center="
+                    f"({float(restored_large_center.x()):.6f},{float(restored_large_center.y()):.6f})"
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert small_zoom > initial_large_zoom
+    assert abs(restored_large_zoom - initial_large_zoom) < 0.01
+    assert abs(restored_large_center.x() - expected_large_center.x()) < 1.25
+    assert abs(restored_large_center.y() - expected_large_center.y()) < 1.25

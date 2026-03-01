@@ -3,15 +3,20 @@ from __future__ import annotations
 import json
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from item_file_format import (
     ITEM_FILE_EXTENSION,
+    ITEM_FILE_FORMAT,
     build_item_document,
+    item_id_from_payload,
     list_item_file_paths,
+    load_item_document,
     load_item_payload,
+    write_item_document,
 )
 
 _PNG_1X1_BYTES = (
@@ -36,15 +41,38 @@ def test_build_document_with_embedded_icon_round_trip(tmp_path: Path) -> None:
     }
     document = build_item_document(payload, str(icon_source))
     item_path = tmp_path / f"blade{ITEM_FILE_EXTENSION}"
-    item_path.write_text(json.dumps(document), encoding="utf-8")
+    write_item_document(item_path, document)
+
+    with zipfile.ZipFile(item_path, "r") as zf:
+        names = set(zf.namelist())
+        assert "info.json" in names
+        assert "assets/icon.png" in names
+        info = json.loads(zf.read("info.json").decode("utf-8"))
+        assert info["format"] == ITEM_FILE_FORMAT
+        assert info["payload"]["title"] == "Blade"
+        assert info["payload"]["item_id"]
+        assert info["icon_asset_name"] == "assets/icon.png"
 
     loaded = load_item_payload(item_path)
     assert isinstance(loaded, dict)
     assert loaded["title"] == "Blade"
     assert loaded["rarity"] == "common"
+    assert item_id_from_payload(loaded)
     embedded_icon_path = Path(str(loaded.get("icon_path") or ""))
     assert embedded_icon_path.exists()
     assert embedded_icon_path.suffix == ".png"
+
+
+def test_load_item_document_rejects_legacy_raw_json_payload(tmp_path: Path) -> None:
+    legacy_document = {
+        "format": "dmtitem.v1",
+        "payload": {"title": "Legacy Blade", "rarity": "common", "level": 1},
+    }
+    legacy_path = tmp_path / f"legacy{ITEM_FILE_EXTENSION}"
+    legacy_path.write_text(json.dumps(legacy_document), encoding="utf-8")
+
+    document = load_item_document(legacy_path)
+    assert document is None
 
 
 def test_list_item_file_paths_includes_only_dmtitem(tmp_path: Path) -> None:

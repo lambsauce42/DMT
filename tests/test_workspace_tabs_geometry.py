@@ -16,6 +16,7 @@ from tab_workspace import (
     TAB_CLOSE_RIGHT_PADDING,
     TAB_CLOSE_SIZE,
     WorkspaceTabsHost,
+    compute_workspace_tab_close_hit_rect,
     compute_workspace_tab_close_rect,
     compute_workspace_tab_name_rect,
     compute_workspace_tab_width,
@@ -54,6 +55,21 @@ def test_name_rect_is_left_of_close_button() -> None:
         f"close=({close_rect.x()},{close_rect.y()},{close_rect.width()},{close_rect.height()})"
     )
     assert name_rect.right() < close_rect.left()
+
+
+def test_close_hit_rect_keeps_usable_slop(qapp) -> None:
+    _ = qapp
+    rect = QRect(0, 0, 120, 36)
+    font = QLabel().font()
+    close_rect = compute_workspace_tab_close_rect(rect)
+    hit_rect = compute_workspace_tab_close_hit_rect(rect, font)
+    _debug_log(
+        "close_hit_rect "
+        f"close=({close_rect.x()},{close_rect.y()},{close_rect.width()},{close_rect.height()}) "
+        f"hit=({hit_rect.x()},{hit_rect.y()},{hit_rect.width()},{hit_rect.height()})"
+    )
+    assert hit_rect.width() >= close_rect.width() + 8
+    assert hit_rect.height() >= close_rect.height() + 10
 
 
 def test_active_line_visibility_tracks_current_tab(qtbot) -> None:

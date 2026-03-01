@@ -36,7 +36,7 @@ from dungeon_constants import (
 )
 from dungeon_items import EntityItem
 from dmt_package import read_dmt_package_info
-from item_file_format import build_item_document, load_item_payload
+from item_file_format import build_item_document, load_item_payload, write_item_document
 
 _PNG_1X1_BYTES = (
     base64.b64decode(
@@ -699,6 +699,7 @@ def test_inventory_loot_rows_include_equipment_slots(monkeypatch, dungeon_widget
             "copper": 0,
         },
         EQUIPMENT_SLOT_LABELS={"head": "Head"},
+        loot_item_path_for_id=lambda _item_id: None,
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
 
@@ -783,21 +784,142 @@ def test_local_loot_claim_runs_through_local_action_path(dungeon_widget, monkeyp
     assert [entry["entry_id"] for entry in dungeon_widget._session_loot_pool] == ["loot-2"]
 
 
+def test_apply_claim_entries_to_sheet_uses_canonical_item_ids(dungeon_widget, monkeypatch, tmp_path):
+    items_root = tmp_path / "items"
+    source_dir = tmp_path / "remote"
+    items_root.mkdir(parents=True, exist_ok=True)
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / "claimed_sword.dmtitem"
+
+    document = build_item_document(
+        {
+            "title": "Claimed Sword",
+            "rarity": "common",
+            "level": 1,
+        },
+        "",
+    )
+    write_item_document(source_path, document)
+    payload = document["payload"]
+    assert isinstance(payload, dict)
+    item_id = str(payload["item_id"])
+
+    captured = {}
+
+    def _apply_claim_to_sheet(sheet_id, *, item_ids, note_lines):
+        captured["sheet_id"] = sheet_id
+        captured["item_ids"] = list(item_ids)
+        captured["note_lines"] = list(note_lines)
+        return True, "Claim applied.", {}
+
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: items_root)
+    monkeypatch.setitem(sys.modules, "player_sheets", types.SimpleNamespace(apply_claim_to_sheet=_apply_claim_to_sheet))
+
+    ok, message = dungeon_widget._apply_claim_entries_to_sheet(
+        "sheet-1",
+        [
+            {
+                "entry_id": "loot-1",
+                "type": "item",
+                "item_id": item_id,
+                "title": "Claimed Sword",
+                "path": str(source_path),
+                "item_document": document,
+            }
+        ],
+    )
+
+    assert ok is True
+    assert message == "Claim applied."
+    assert captured["sheet_id"] == "sheet-1"
+    assert captured["item_ids"] == [item_id]
+    persisted_files = list(items_root.glob("*.dmtitem"))
+    assert len(persisted_files) == 1
+    persisted_payload = load_item_payload(persisted_files[0])
+    assert isinstance(persisted_payload, dict)
+    assert persisted_payload["item_id"] == item_id
+
+
+def test_apply_claim_entries_to_sheet_requires_overwrite_confirmation_for_same_item_id(
+    dungeon_widget, monkeypatch, tmp_path
+):
+    items_root = tmp_path / "items"
+    source_dir = tmp_path / "remote"
+    items_root.mkdir(parents=True, exist_ok=True)
+    source_dir.mkdir(parents=True, exist_ok=True)
+
+    existing_document = build_item_document(
+        {
+            "item_id": "item_shared_unique",
+            "title": "Old Sword",
+            "rarity": "common",
+            "level": 1,
+        },
+        "",
+    )
+    incoming_document = build_item_document(
+        {
+            "item_id": "item_shared_unique",
+            "title": "New Sword",
+            "rarity": "rare",
+            "level": 2,
+        },
+        "",
+    )
+    existing_path = items_root / "old_sword.dmtitem"
+    source_path = source_dir / "new_sword.dmtitem"
+    write_item_document(existing_path, existing_document)
+    write_item_document(source_path, incoming_document)
+
+    apply_calls = {"count": 0}
+
+    def _apply_claim_to_sheet(*args, **kwargs):
+        apply_calls["count"] += 1
+        return True, "Claim applied.", {}
+
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: items_root)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_confirm_claimed_item_overwrite",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setitem(sys.modules, "player_sheets", types.SimpleNamespace(apply_claim_to_sheet=_apply_claim_to_sheet))
+
+    ok, message = dungeon_widget._apply_claim_entries_to_sheet(
+        "sheet-1",
+        [
+            {
+                "entry_id": "loot-1",
+                "type": "item",
+                "item_id": "item_shared_unique",
+                "title": "New Sword",
+                "path": str(source_path),
+                "item_document": incoming_document,
+            }
+        ],
+    )
+
+    assert ok is False
+    assert "overwrite" in message.lower() or "cancelled" in message.lower()
+    assert apply_calls["count"] == 0
+    persisted_payload = load_item_payload(existing_path)
+    assert isinstance(persisted_payload, dict)
+    assert persisted_payload["title"] == "Old Sword"
+
+
 def test_loot_add_from_library_dialog_contract_and_selection(monkeypatch, dungeon_widget, tmp_path):
     chosen_path = tmp_path / "sword.dmtitem"
-    chosen_path.write_text(
-        json.dumps(
+    write_item_document(
+        chosen_path,
+        build_item_document(
             {
-                "format": "dmtitem.v1",
-                "payload": {
-                    "item_id": "item-sword",
-                    "title": "Sword",
-                    "rarity": "common",
-                    "level": 1,
-                },
-            }
+                "item_id": "item-sword",
+                "title": "Sword",
+                "rarity": "common",
+                "level": 1,
+            },
+            "",
         ),
-        encoding="utf-8",
     )
     selected_item = types.SimpleNamespace(
         item_id="item-sword",
@@ -863,19 +985,17 @@ def test_loot_add_from_library_ignores_missing_selected_item(monkeypatch, dungeo
 
 def test_loot_pool_resolve_item_path_supports_absolute_item_id_path(dungeon_widget, tmp_path):
     item_path = tmp_path / "abs_item.dmtitem"
-    item_path.write_text(
-        json.dumps(
+    write_item_document(
+        item_path,
+        build_item_document(
             {
-                "format": "dmtitem.v1",
-                "payload": {
-                    "item_id": "abs-item",
-                    "title": "Absolute Item",
-                    "rarity": "common",
-                    "level": 1,
-                },
-            }
+                "item_id": "abs-item",
+                "title": "Absolute Item",
+                "rarity": "common",
+                "level": 1,
+            },
+            "",
         ),
-        encoding="utf-8",
     )
     resolved = dungeon_widget._loot_pool_resolve_item_path({"item_id": str(item_path)})
     assert resolved == item_path
@@ -2263,9 +2383,12 @@ def test_client_claim_result_materializes_item_document_for_item_id(monkeypatch,
     assert captured["sheet_id"] == "sheet-1"
     assert len(captured["item_ids"]) == 1
     claimed_item_id = captured["item_ids"][0]
-    assert claimed_item_id.endswith(".dmtitem")
-    assert Path(claimed_item_id).exists()
-    assert Path(claimed_item_id).parent == library_dir
+    assert claimed_item_id == "remote-item"
+    persisted_files = list(library_dir.glob("*.dmtitem"))
+    assert len(persisted_files) == 1
+    persisted_payload = load_item_payload(persisted_files[0])
+    assert isinstance(persisted_payload, dict)
+    assert persisted_payload["item_id"] == "remote-item"
     assert dungeon_widget._client_controller.calls
     action, payload, request_id = dungeon_widget._client_controller.calls[-1]
     assert action == "claim_loot_finalize"
@@ -2276,19 +2399,17 @@ def test_client_claim_result_materializes_item_document_for_item_id(monkeypatch,
 
 def test_loot_pool_displays_items_before_notes_with_icons(dungeon_widget, tmp_path):
     item_path = tmp_path / "blade.dmtitem"
-    item_path.write_text(
-        json.dumps(
+    write_item_document(
+        item_path,
+        build_item_document(
             {
-                "format": "dmtitem.v1",
-                "payload": {
-                    "item_id": "blade_1",
-                    "title": "Blade",
-                    "rarity": "common",
-                    "level": 1,
-                },
-            }
+                "item_id": "blade_1",
+                "title": "Blade",
+                "rarity": "common",
+                "level": 1,
+            },
+            "",
         ),
-        encoding="utf-8",
     )
     dungeon_widget._session_loot_pool = [
         {"entry_id": "n-1", "type": "note", "title": "Remember trap", "note": "Remember trap"},
@@ -3250,6 +3371,7 @@ def test_player_link_character_sends_host_sync_command(monkeypatch, dungeon_widg
 
     entry = types.SimpleNamespace(name="Test Hero", pdf_path=str(pdf_path))
     fake_module = types.SimpleNamespace(
+        character_id_for_entry=lambda _entry: "character-sheet-1",
         list_character_link_targets=lambda: [entry],
         sheet_id_for_entry=lambda _entry: "sheet-1",
         inventory_payload_for_sheet_id=lambda _sheet_id: {"inventory": ["item-1"]},
@@ -3318,6 +3440,7 @@ def test_join_snapshot_prompts_resolution_instead_of_auto_overwrite_push(monkeyp
     pdf_path.write_bytes(b"%PDF-1.4")
     entry = types.SimpleNamespace(name="Join Hero", pdf_path=str(pdf_path), archive_path="")
     fake_module = types.SimpleNamespace(
+        character_id_for_entry=lambda _entry: "character-sheet-1",
         list_character_link_targets=lambda: [entry],
         sheet_id_for_entry=lambda _entry: "sheet-1",
         inventory_payload_for_sheet_id=lambda _sheet_id: {"inventory": ["item-join"]},
@@ -3382,6 +3505,7 @@ def test_snapshot_conflict_replaces_local_sheet_without_auto_host_overwrite(monk
     pdf_path.write_bytes(b"%PDF-1.4")
     entry = types.SimpleNamespace(name="Local Hero", pdf_path=str(pdf_path), archive_path="")
     fake_module = types.SimpleNamespace(
+        character_id_for_entry=lambda _entry: "character-sheet-1",
         list_character_link_targets=lambda: [entry],
         sheet_id_for_entry=lambda _entry: "sheet-1",
         inventory_payload_for_sheet_id=lambda _sheet_id: {"inventory": ["item-local"]},
@@ -3461,6 +3585,7 @@ def test_player_link_character_extracts_archive_when_runtime_pdf_missing(monkeyp
 
     entry = types.SimpleNamespace(name="Archive Hero", pdf_path="", archive_path=str(archive_path))
     fake_module = types.SimpleNamespace(
+        character_id_for_entry=lambda _entry: "character-sheet-1",
         list_character_link_targets=lambda: [entry],
         sheet_id_for_entry=lambda _entry: "sheet-1",
         inventory_payload_for_sheet_id=lambda _sheet_id: {"inventory": []},

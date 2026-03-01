@@ -18,7 +18,8 @@ TAB_CLOSE_RIGHT_PADDING = 6
 TAB_CLOSE_GAP = 8
 TAB_CLOSE_SIZE = 12
 TAB_CLOSE_HOVER_PAD = 2
-TAB_CLOSE_HITBOX_SCALE = 1.3
+TAB_CLOSE_HIT_SLOP_X = 4
+TAB_CLOSE_HIT_SLOP_Y = 5
 TAB_ACTIVE_LINE_HEIGHT = 2
 
 DROP_TARGET_TOP_SLOP_PX = 4
@@ -48,12 +49,6 @@ def compute_workspace_tab_close_rect(tab_rect: QRect) -> QRect:
     close_x = int(tab_rect.right() - TAB_CLOSE_RIGHT_PADDING - TAB_CLOSE_SIZE + 1)
     close_y = int(tab_rect.y() + max(0, (tab_rect.height() - TAB_CLOSE_SIZE) // 2))
     return QRect(close_x, close_y, TAB_CLOSE_SIZE, TAB_CLOSE_SIZE)
-
-
-def _centered_square(center: QPoint, size: int) -> QRect:
-    side = max(1, int(size) | 1)
-    half = side // 2
-    return QRect(center.x() - half, center.y() - half, side, side)
 
 
 def _rendered_centered_text_pixel_rect(size: QSize, font: QFont, text: str) -> QRect:
@@ -106,11 +101,18 @@ def compute_workspace_tab_close_glyph_rect(tab_rect: QRect, font: QFont) -> QRec
 
 def compute_workspace_tab_close_hit_rect(tab_rect: QRect, font: QFont) -> QRect:
     base_rect = _compute_workspace_tab_close_base_highlight_rect(tab_rect, font)
-    if base_rect.isNull():
+    close_rect = compute_workspace_tab_close_rect(tab_rect)
+    if close_rect.isNull():
         return QRect()
-    base_side = max(int(base_rect.width()), int(base_rect.height()))
-    hit_side = max(base_side, int(round(base_side * TAB_CLOSE_HITBOX_SCALE)))
-    return _centered_square(base_rect.center(), hit_side).intersected(tab_rect)
+    legacy_rect = close_rect.adjusted(
+        -TAB_CLOSE_HIT_SLOP_X,
+        -TAB_CLOSE_HIT_SLOP_Y,
+        TAB_CLOSE_HIT_SLOP_X,
+        TAB_CLOSE_HIT_SLOP_Y,
+    ).intersected(tab_rect)
+    if base_rect.isNull():
+        return legacy_rect
+    return legacy_rect.united(base_rect).intersected(tab_rect)
 
 
 def _compute_workspace_tab_close_base_highlight_rect(tab_rect: QRect, font: QFont) -> QRect:

@@ -136,8 +136,12 @@ from item_file_format import (
     ITEM_FILE_EXTENSION,
     ITEM_FILE_FORMAT,
     build_item_document,
+    item_document_matches,
+    item_id_from_payload,
     list_item_file_paths,
+    load_item_document,
     load_item_payload,
+    write_item_document,
 )
 from unique_ids import generate_named_object_id, generate_probabilistic_unique_id, machine_entropy_string
 
@@ -5189,33 +5193,17 @@ class DungeonAppletWidget(QWidget):
         candidate = Path(item_path).expanduser()
         if not candidate.exists():
             return None
-        try:
-            parsed = json.loads(candidate.read_text(encoding="utf-8"))
-        except Exception:
-            parsed = None
-        if (
-            isinstance(parsed, dict)
-            and str(parsed.get("format") or "").strip().lower() == ITEM_FILE_FORMAT
-            and isinstance(parsed.get("payload"), dict)
-        ):
-            return parsed
+        document = load_item_document(candidate)
+        if isinstance(document, dict):
+            return document
         payload = load_item_payload(candidate)
         if not isinstance(payload, dict):
             return None
-        icon_source = (
-            payload.get("icon_path")
-            or payload.get("icon")
-            or payload.get("preview_image")
-        )
+        icon_source = payload.get("icon_path") or payload.get("icon") or payload.get("preview_image")
         try:
-            document = build_item_document(payload, str(icon_source or ""))
+            return build_item_document(payload, str(icon_source or ""))
         except Exception:
             return None
-        if not isinstance(document.get("payload"), dict):
-            return None
-        if str(document.get("format") or "").strip().lower() != ITEM_FILE_FORMAT:
-            return None
-        return document
 
     def _loot_pool_materialized_items_dir(self) -> Path:
         session_key = str(self._online_session_id or self._collection_name or "local")
@@ -5255,10 +5243,7 @@ class DungeonAppletWidget(QWidget):
         )
         if not target_path.exists():
             try:
-                target_path.write_text(
-                    json.dumps(item_document, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                write_item_document(target_path, item_document)
             except Exception:
                 return None
         return target_path
@@ -5270,24 +5255,43 @@ class DungeonAppletWidget(QWidget):
         except Exception:
             return False
 
+    def _confirm_claimed_item_overwrite(
+        self,
+        *,
+        item_id: str,
+        item_title: str,
+        existing_path: Path,
+    ) -> bool:
+        if _in_test_env():
+            return True
+        display_title = item_title or item_id or existing_path.stem or "Item"
+        response = QMessageBox.question(
+            self,
+            "Overwrite Item",
+            (
+                f"The claimed item '{display_title}' already exists in your library.\n\n"
+                "Overwrite the existing local copy with the claimed version?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return response == QMessageBox.StandardButton.Yes
+
     def _persist_claimed_item_to_default_library(
         self,
         entry: dict,
         resolved_path: Path | None,
-    ) -> Path | None:
-        def _normalize_similarity_id(value: str) -> str:
-            return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
-
+    ) -> tuple[Path | None, str | None]:
         if resolved_path is None:
-            return None
+            return None, None
         source = Path(resolved_path).expanduser()
         if not source.exists():
-            return None
+            return None, None
         library_root = items_dir()
         try:
             library_root.mkdir(parents=True, exist_ok=True)
         except Exception:
-            return source
+            return source, None
         try:
             source_resolved = source.resolve()
         except Exception:
@@ -5297,7 +5301,7 @@ class DungeonAppletWidget(QWidget):
         except Exception:
             library_resolved = library_root
         if self._path_is_within(source_resolved, library_resolved):
-            return source_resolved
+            return source_resolved, None
 
         item_document: dict | None = None
         raw_document = entry.get("item_document")
@@ -5315,35 +5319,38 @@ class DungeonAppletWidget(QWidget):
         if isinstance(item_document, dict):
             payload = item_document.get("payload")
             if isinstance(payload, dict):
-                payload_item_id = str(payload.get("item_id") or "").strip()
+                payload_item_id = item_id_from_payload(payload, fallback_path=source_resolved)
                 payload_title = str(payload.get("title") or "").strip()
             else:
                 payload_title = ""
             if payload_item_id:
-                normalized_payload_id = _normalize_similarity_id(payload_item_id)
                 replacement_target: Path | None = None
                 for existing_path in list_item_file_paths(library_root):
                     existing_payload = load_item_payload(existing_path)
                     if not isinstance(existing_payload, dict):
                         continue
-                    existing_item_id = str(existing_payload.get("item_id") or "").strip()
+                    existing_item_id = item_id_from_payload(existing_payload, fallback_path=existing_path)
                     if not existing_item_id:
                         continue
                     if existing_item_id == payload_item_id:
                         replacement_target = existing_path
                         break
-                    if normalized_payload_id and _normalize_similarity_id(existing_item_id) == normalized_payload_id:
-                        replacement_target = existing_path
-                        break
                 if replacement_target is not None:
-                    try:
-                        replacement_target.write_text(
-                            json.dumps(item_document, indent=2, ensure_ascii=False),
-                            encoding="utf-8",
-                        )
+                    existing_document = load_item_document(replacement_target)
+                    if existing_document is not None and item_document_matches(existing_document, item_document):
                         persisted_path = replacement_target
-                    except Exception:
-                        persisted_path = None
+                    elif not self._confirm_claimed_item_overwrite(
+                        item_id=payload_item_id,
+                        item_title=payload_title,
+                        existing_path=replacement_target,
+                    ):
+                        return None, "Claim cancelled. Local item overwrite was not confirmed."
+                    if persisted_path is None:
+                        try:
+                            write_item_document(replacement_target, item_document)
+                            persisted_path = replacement_target
+                        except Exception:
+                            persisted_path = None
             try:
                 digest = hashlib.sha256(
                     json.dumps(
@@ -5370,12 +5377,16 @@ class DungeonAppletWidget(QWidget):
             )
             if persisted_path is None:
                 target_path = library_root / filename
-                if not target_path.exists():
+                if target_path.exists():
+                    existing_document = load_item_document(target_path)
+                    if not item_document_matches(existing_document, item_document):
+                        try:
+                            write_item_document(target_path, item_document)
+                        except Exception:
+                            target_path = None
+                else:
                     try:
-                        target_path.write_text(
-                            json.dumps(item_document, indent=2, ensure_ascii=False),
-                            encoding="utf-8",
-                        )
+                        write_item_document(target_path, item_document)
                     except Exception:
                         target_path = None
                 persisted_path = target_path
@@ -5384,9 +5395,9 @@ class DungeonAppletWidget(QWidget):
             try:
                 raw = source_resolved.read_bytes()
             except Exception:
-                return source_resolved
+                return source_resolved, None
             if not raw:
-                return source_resolved
+                return source_resolved, None
             digest = hashlib.sha256(raw).hexdigest()[:16]
             extension = source_resolved.suffix or ITEM_FILE_EXTENSION
             item_hint = (
@@ -5401,11 +5412,11 @@ class DungeonAppletWidget(QWidget):
                 try:
                     target_path.write_bytes(raw)
                 except Exception:
-                    return source_resolved
+                    return source_resolved, None
             persisted_path = target_path
 
         if persisted_path is None or not persisted_path.exists():
-            return source_resolved
+            return source_resolved, None
         try:
             persisted_resolved = persisted_path.resolve()
         except Exception:
@@ -5416,7 +5427,7 @@ class DungeonAppletWidget(QWidget):
         if payload_item_id:
             self._loot_pool_item_path_by_id[payload_item_id] = persisted_resolved
         self._loot_pool_item_path_by_id[str(persisted_resolved)] = persisted_resolved
-        return persisted_resolved
+        return persisted_resolved, None
 
     def _set_loot_pool_entries(self, entries: list[dict], *, broadcast: bool = False) -> None:
         self._loot_claim_reservations.clear()
@@ -5528,7 +5539,7 @@ class DungeonAppletWidget(QWidget):
             payload = load_item_payload(item_path)
             if not isinstance(payload, dict):
                 continue
-            candidate_id = str(payload.get("item_id") or "").strip()
+            candidate_id = item_id_from_payload(payload, fallback_path=item_path)
             if candidate_id:
                 self._loot_pool_item_path_by_id.setdefault(candidate_id, item_path)
             self._loot_pool_item_path_by_id.setdefault(str(item_path.resolve()), item_path)
@@ -5728,10 +5739,15 @@ class DungeonAppletWidget(QWidget):
         if not clean_sheet_id:
             return []
         try:
-            from player_sheets import inventory_payload_for_sheet_id, EQUIPMENT_SLOT_LABELS
+            from player_sheets import (
+                inventory_payload_for_sheet_id,
+                EQUIPMENT_SLOT_LABELS,
+                loot_item_path_for_id,
+            )
         except Exception:
             inventory_payload_for_sheet_id = None  # type: ignore[assignment]
             EQUIPMENT_SLOT_LABELS = {}  # type: ignore[assignment]
+            loot_item_path_for_id = None  # type: ignore[assignment]
         if inventory_payload_for_sheet_id is None:
             return []
         inventory_payload = inventory_payload_for_sheet_id(clean_sheet_id)
@@ -5747,9 +5763,10 @@ class DungeonAppletWidget(QWidget):
             if not item_id:
                 continue
             title = Path(item_id).stem or item_id
-            path = str(item_id)
+            resolved_path = loot_item_path_for_id(item_id) if loot_item_path_for_id is not None else None
+            path = str(resolved_path) if resolved_path is not None else str(item_id)
             item_document = None
-            candidate_path = Path(item_id).expanduser()
+            candidate_path = resolved_path or Path(item_id).expanduser()
             if candidate_path.exists():
                 item_document = self._loot_pool_item_document_from_path(candidate_path)
                 payload = load_item_payload(candidate_path)
@@ -5775,9 +5792,10 @@ class DungeonAppletWidget(QWidget):
                 if not slot_id or not item_id:
                     continue
                 title = Path(item_id).stem or item_id
-                path = str(item_id)
+                resolved_path = loot_item_path_for_id(item_id) if loot_item_path_for_id is not None else None
+                path = str(resolved_path) if resolved_path is not None else str(item_id)
                 item_document = None
-                candidate_path = Path(item_id).expanduser()
+                candidate_path = resolved_path or Path(item_id).expanduser()
                 if candidate_path.exists():
                     item_document = self._loot_pool_item_document_from_path(candidate_path)
                     payload = load_item_payload(candidate_path)
@@ -6018,7 +6036,7 @@ class DungeonAppletWidget(QWidget):
                     if not isinstance(data, dict):
                         continue
                     title = str(data.get("title") or data.get("name") or item_path.stem).strip()
-                    item_id = str(item_path.resolve())
+                    item_id = item_id_from_payload(data, fallback_path=item_path)
                     library.append((title, item_id, str(item_path)))
             if not library:
                 QMessageBox.information(self, "Loot Pool", "No item library entries found.")
@@ -6180,11 +6198,17 @@ class DungeonAppletWidget(QWidget):
                 continue
             item_id = str(entry.get("item_id") or "").strip()
             resolved = self._loot_pool_resolve_item_path(entry)
-            persisted = self._persist_claimed_item_to_default_library(entry, resolved)
+            persisted, persist_error = self._persist_claimed_item_to_default_library(entry, resolved)
+            if persist_error:
+                return False, persist_error
             if persisted is not None and persisted.exists():
-                item_ids.append(str(persisted.resolve()))
+                persisted_payload = load_item_payload(persisted)
+                canonical_item_id = item_id_from_payload(persisted_payload, fallback_path=persisted)
+                item_ids.append(canonical_item_id or str(persisted.resolve()))
             elif resolved is not None and resolved.exists():
-                item_ids.append(str(resolved.resolve()))
+                resolved_payload = load_item_payload(resolved)
+                canonical_item_id = item_id_from_payload(resolved_payload, fallback_path=resolved)
+                item_ids.append(canonical_item_id or str(resolved.resolve()))
             elif item_id:
                 item_ids.append(item_id)
         ok, message, _payload = apply_claim_to_sheet(sheet_id, item_ids=item_ids, note_lines=notes)
@@ -9042,6 +9066,7 @@ class DungeonAppletWidget(QWidget):
             return None
         try:
             from player_sheets import (
+                character_id_for_entry,
                 list_character_link_targets,
                 sheet_id_for_entry,
                 inventory_payload_for_sheet_id,
@@ -9094,7 +9119,8 @@ class DungeonAppletWidget(QWidget):
         return {
             "sheet_id": clean_sheet,
             "sheet_name": sheet_name,
-            "character_id": self._character_id_for_sheet(clean_sheet, sheet_name=sheet_name),
+            "character_id": str(character_id_for_entry(target_entry) or "").strip()
+            or self._character_id_for_sheet(clean_sheet, sheet_name=sheet_name),
             "inventory": linked_inventory,
             "stats": stats,
         }
@@ -10322,16 +10348,27 @@ class DungeonAppletWidget(QWidget):
         QTimer.singleShot(0, self._refresh_hover_state)
 
     def _refresh_hover_state(self) -> None:
-        if not self._dungeon_list:
+        list_widget = self._dungeon_list
+        if list_widget is None:
             return
-        hover_item = self._dungeon_list.itemAt(self._dungeon_list.viewport().mapFromGlobal(QCursor.pos()))
+        try:
+            viewport = list_widget.viewport()
+            hover_item = list_widget.itemAt(viewport.mapFromGlobal(QCursor.pos()))
+        except RuntimeError:
+            return
         hover_widget = None
         if hover_item is not None:
-            hover_widget = self._dungeon_list.itemWidget(hover_item)
+            try:
+                hover_widget = list_widget.itemWidget(hover_item)
+            except RuntimeError:
+                return
         for dungeon_id, widget in self._tile_widgets.items():
             if widget is None:
                 continue
-            widget._set_hovered(widget is hover_widget)
+            try:
+                widget._set_hovered(widget is hover_widget)
+            except RuntimeError:
+                continue
 
     def _on_dungeon_selection_changed(
         self,
@@ -10578,6 +10615,7 @@ class DungeonAppletWidget(QWidget):
             return
         try:
             from player_sheets import (
+                character_id_for_entry,
                 list_character_link_targets,
                 sheet_id_for_entry,
                 inventory_payload_for_sheet_id,
@@ -10615,6 +10653,7 @@ class DungeonAppletWidget(QWidget):
             return
         try:
             sheet_id = sheet_id_for_entry(entry)  # type: ignore[arg-type]
+            stored_character_id = character_id_for_entry(entry)  # type: ignore[arg-type]
             ensure_entry_archive(entry)  # type: ignore[arg-type]
             sheet_name = str(getattr(entry, "name", "") or sheet_id)
             pdf_path = str(getattr(entry, "pdf_path", "") or "").strip()
@@ -10642,7 +10681,10 @@ class DungeonAppletWidget(QWidget):
 
         stats = _extract_character_stats_from_pdf(str(pdf_candidate))
         linked_inventory = inventory_payload_for_sheet_id(sheet_id) or {}
-        character_id = self._character_id_for_sheet(sheet_id, sheet_name=sheet_name)
+        character_id = str(stored_character_id or "").strip() or self._character_id_for_sheet(
+            sheet_id,
+            sheet_name=sheet_name,
+        )
         self._apply_character_link_to_entity(
             entity,
             sheet_id=sheet_id,

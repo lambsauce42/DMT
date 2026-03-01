@@ -48,7 +48,7 @@ def test_attached_text_edit_persists_without_touching_source(qtbot, monkeypatch,
 
     assert source.read_text(encoding="utf-8") == "original source text"
 
-    package_path = session_file_path(session_id, tmp_path)
+    package_path = session_file_path(widget._current_session.name, tmp_path)
     info = read_dmt_package_info(package_path)
     assert isinstance(info, dict)
     attachments = info.get("attachments") or []
@@ -90,7 +90,7 @@ def test_remove_attachment_persists_in_package(qtbot, monkeypatch, tmp_path):
     widget._remove_selected_file()
     widget._save_now()
 
-    package_path = session_file_path(session_id, tmp_path)
+    package_path = session_file_path(widget._current_session.name, tmp_path)
     info = read_dmt_package_info(package_path)
     assert isinstance(info, dict)
     assert info.get("attachments") == []

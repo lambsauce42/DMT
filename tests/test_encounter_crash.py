@@ -101,3 +101,24 @@ def test_click_all_buttons_recursively(encounter_panel, qtbot, monkeypatch):
             continue
 
         qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+
+
+def test_save_creates_missing_encounters_dir_before_dialog(encounter_panel, monkeypatch, tmp_path):
+    encounters_dir = tmp_path / "DMT" / "encounters"
+    if encounters_dir.exists():
+        encounters_dir.rmdir()
+
+    captured = {}
+
+    def fake_get_save_file_name(*args):
+        captured["dialog_dir"] = args[2]
+        captured["dir_exists"] = encounters_dir.exists()
+        return (str(encounters_dir / "created-on-save.dmtencounter"), "Encounter")
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", fake_get_save_file_name)
+
+    encounter_panel.save_encounter()
+
+    assert captured["dialog_dir"] == str(encounters_dir)
+    assert captured["dir_exists"] is True
+    assert encounters_dir.exists()

@@ -12,6 +12,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import (
     QIcon,
+    QKeySequence,
+    QShortcut,
     QTextCursor,
     QTextListFormat,
     QTextCharFormat,
@@ -98,8 +100,8 @@ def npc_storage_path() -> Path:
     return npc_storage_dir() / "npcs.dmtindex"
 
 
-def npc_file_path(npc_id: str) -> Path:
-    safe_name = sanitize_filename(str(npc_id or "").strip()) or "npc"
+def npc_file_path(npc_name: str) -> Path:
+    safe_name = sanitize_filename(str(npc_name or "").strip()) or "npc"
     return npc_storage_dir() / f"{safe_name}{NPCS_FILE_EXTENSION}"
 
 
@@ -269,7 +271,7 @@ def save_npc_entries_to_storage(entries: List[NPCEntry]) -> None:
     for entry in entries:
         if not str(entry.id or "").strip():
             entry.id = generate_named_object_id(str(entry.name or "npc"), "npc")
-        path = npc_file_path(entry.id)
+        path = npc_file_path(entry.name)
         expected.add(path.resolve())
         write_dmt_package(
             path,
@@ -710,6 +712,11 @@ class NPCDatabaseWidget(QWidget):
         self._storage_path = npc_storage_path()
         self._manager = NPCManager(entries=self._load_entries())
         self._current_entry: Optional[NPCEntry] = None
+        self._saved_descriptions: dict[str, str] = {
+            str(entry.id or "").strip(): str(entry.description or "")
+            for entry in self._manager.entries
+            if str(entry.id or "").strip()
+        }
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -817,6 +824,10 @@ class NPCDatabaseWidget(QWidget):
 
         splitter.addWidget(list_panel)
 
+        self._save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        self._save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._save_shortcut.activated.connect(self._save_current_npc)
+
         right_container = QWidget(self)
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -865,7 +876,7 @@ class NPCDatabaseWidget(QWidget):
         self._save_button = QToolButton()
         self._save_button.setObjectName("SecondaryButton")
         self._save_button.setIcon(QIcon(os.path.join(ICON_DIR, "save.svg")))
-        self._save_button.setToolTip("Save")
+        self._save_button.setToolTip("Save (Ctrl+S)")
         self._save_button.clicked.connect(self._save_current_npc)
 
         self._delete_button = QToolButton()
@@ -1093,6 +1104,32 @@ class NPCDatabaseWidget(QWidget):
 
     def _save_entries(self) -> None:
         save_npc_entries_to_storage(self._manager.entries)
+        self._saved_descriptions = {
+            str(entry.id or "").strip(): str(entry.description or "")
+            for entry in self._manager.entries
+            if str(entry.id or "").strip()
+        }
+        self._update_header_name()
+
+    def _is_entry_dirty(self, entry: Optional[NPCEntry]) -> bool:
+        if entry is None:
+            return False
+        entry_id = str(entry.id or "").strip()
+        if not entry_id:
+            return False
+        return str(entry.description or "") != self._saved_descriptions.get(
+            entry_id,
+            str(entry.description or ""),
+        )
+
+    def _update_header_name(self) -> None:
+        if not self._current_entry:
+            self._header_name.setText("NPC: None")
+            return
+        text = f"NPC: {self._current_entry.name}"
+        if self._is_entry_dirty(self._current_entry):
+            text = f"{text} *"
+        self._header_name.setText(text)
 
     def _on_world_changed(self) -> None:
         selected_campaign = self._refresh_campaigns()
@@ -1195,13 +1232,15 @@ class NPCDatabaseWidget(QWidget):
 
     def _set_details(self, entry: Optional[NPCEntry]) -> None:
         self._current_entry = entry
+        self._update_header_name()
         if not entry:
-            self._header_name.setText("NPC: None")
             self._header_links.set_links([])
             self._manage_link_button.setEnabled(False)
             self._edit_button.setEnabled(False)
             self._duplicate_button.setEnabled(False)
+            self._save_button.setEnabled(False)
             self._delete_button.setEnabled(False)
+            self._disintegrate_button.setEnabled(False)
             self._description_text.setPlainText("")
             self._description_text.setPlaceholderText("Select an NPC to see details.")
             self._detail_name.setText("-")
@@ -1217,7 +1256,6 @@ class NPCDatabaseWidget(QWidget):
 
             return
 
-        self._header_name.setText(f"NPC: {entry.name}")
         linked_sheet_id = str(entry.linked_sheet_id or "").strip()
         header_links: list[tuple[str, str]] = []
         if linked_sheet_id:
@@ -1231,7 +1269,9 @@ class NPCDatabaseWidget(QWidget):
         self._manage_link_button.setEnabled(True)
         self._edit_button.setEnabled(True)
         self._duplicate_button.setEnabled(True)
+        self._save_button.setEnabled(True)
         self._delete_button.setEnabled(True)
+        self._disintegrate_button.setEnabled(True)
         self._detail_name.setText(entry.name or "-")
         self._detail_role.setText(entry.role or "None")
         self._detail_world.setText(entry.world or "Unassigned")
@@ -1358,6 +1398,11 @@ class NPCDatabaseWidget(QWidget):
         entry = dialog.entry()
         if not entry:
             return
+        conflict = self._find_name_conflict(entry.name)
+        if conflict is not None and not self._confirm_replace_entry(conflict.name):
+            return
+        if conflict is not None:
+            self._manager.delete_entry(conflict.id)
         entry.id = self._make_unique_id(entry.id)
         self._manager.add_entry(entry)
         self._save_entries()
@@ -1373,6 +1418,11 @@ class NPCDatabaseWidget(QWidget):
         entry = dialog.entry()
         if not entry:
             return
+        conflict = self._find_name_conflict(entry.name, ignore_entry=self._current_entry)
+        if conflict is not None and not self._confirm_replace_entry(conflict.name):
+            return
+        if conflict is not None:
+            self._manager.delete_entry(conflict.id)
         entry.id = self._current_entry.id
         entry.linked_sheet_id = self._current_entry.linked_sheet_id
         self._manager.update_entry(entry)
@@ -1395,6 +1445,11 @@ class NPCDatabaseWidget(QWidget):
         if not new_name:
             QMessageBox.warning(self, "Missing Name", "Please enter a name.")
             return
+        conflict = self._find_name_conflict(new_name)
+        if conflict is not None and not self._confirm_replace_entry(conflict.name):
+            return
+        if conflict is not None:
+            self._manager.delete_entry(conflict.id)
         now = _now_timestamp()
         entry = NPCEntry(
             id=self._make_unique_id(sanitize_filename(new_name)),
@@ -1471,6 +1526,35 @@ class NPCDatabaseWidget(QWidget):
             if candidate not in existing:
                 return candidate
 
+    def _find_name_conflict(
+        self,
+        candidate_name: str,
+        *,
+        ignore_entry: Optional[NPCEntry] = None,
+    ) -> Optional[NPCEntry]:
+        target = sanitize_filename(str(candidate_name or "").strip()).casefold()
+        if not target:
+            return None
+        for entry in self._manager.entries:
+            if entry is ignore_entry:
+                continue
+            if sanitize_filename(str(entry.name or "").strip()).casefold() == target:
+                return entry
+        return None
+
+    def _confirm_replace_entry(self, existing_name: str) -> bool:
+        response = QMessageBox.question(
+            self,
+            "Overwrite NPC",
+            (
+                f"An NPC named '{existing_name}' already exists.\n\n"
+                "Overwrite it with the new NPC?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return response == QMessageBox.StandardButton.Yes
+
     def _show_placeholder(self, title: str) -> None:
         QMessageBox.information(self, "Placeholder", f"{title} is not implemented yet.")
 
@@ -1486,8 +1570,7 @@ class NPCDatabaseWidget(QWidget):
         if not self._current_entry:
             return
         self._current_entry.description = self._description_text.toHtml()
-        self._current_entry.last_modified = _now_timestamp()
-        self._save_entries()
+        self._update_header_name()
 
 
     def _disintegrate_current_npc(self) -> None:

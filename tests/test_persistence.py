@@ -64,10 +64,11 @@ class TestPersistence(unittest.TestCase):
             manager.save()
             session_files = list(self.test_path.glob("*.dmtsession"))
             self.assertEqual(len(session_files), 1)
-            self.assertEqual(session_files[0].name, "test_session.dmtsession")
+            self.assertEqual(session_files[0].name, "Test_Session.dmtsession")
             info = read_dmt_package_info(session_files[0])
             self.assertIsInstance(info, dict)
             self.assertEqual(info.get("format"), "dmtsession.v2")
+            self.assertEqual(info.get("object_id"), "test_session")
             attachments = info.get("attachments") or []
             self.assertEqual(len(attachments), 1)
             self.assertEqual(attachments[0].get("name"), "notes.txt")

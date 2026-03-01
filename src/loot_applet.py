@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
 
 from ui.widgets import PlusMinusSpinBox
 from dmt_package import read_dmt_package_info, write_dmt_package
-from item_file_format import list_item_file_paths, load_item_payload
+from item_file_format import item_id_from_payload, list_item_file_paths, load_item_payload
 from save_paths import default_dnd_save_dir, items_dir
 from unique_ids import generate_named_object_id
 
@@ -88,7 +88,7 @@ RARITY_CURVES = [
     "Linear",
     "Linear (Steep)",
     "Quadratic",
-    "Quadratic (Steep)",
+    "Quadratic (Broad)",
     "Exponential",
     "Poisson",
     "Bell Curve (Narrow)",
@@ -1401,6 +1401,10 @@ class LootAppletWidget(QWidget):
                     continue
                 self._item_library.append(item)
                 self._item_by_id[item.item_id] = item
+                try:
+                    self._item_by_id.setdefault(str(path.resolve()), item)
+                except Exception:
+                    pass
                 for category in sorted(item.categories):
                     if category not in self._category_labels:
                         self._category_labels[category] = category.title()
@@ -1443,7 +1447,7 @@ class LootAppletWidget(QWidget):
             path,
         )
 
-        item_id = str(path.resolve())
+        item_id = item_id_from_payload(data, fallback_path=path)
         show_padding = bool(data.get("show_icon_padding", True))
         return LootItem(
             item_id=item_id,
@@ -2016,9 +2020,9 @@ class LootAppletWidget(QWidget):
         if curve == "Linear (Steep)":
             return self._linear_weights(luck_norm, steep=True)
         if curve == "Quadratic":
-            return self._quadratic_weights(luck_norm, steep=False)
-        if curve == "Quadratic (Steep)":
-            return self._quadratic_weights(luck_norm, steep=True)
+            return self._quadratic_weights(luck_norm, broad=False)
+        if curve == "Quadratic (Broad)":
+            return self._quadratic_weights(luck_norm, broad=True)
         if curve == "Exponential":
             return self._exponential_weights(luck_norm)
         if curve == "Poisson":
@@ -2038,7 +2042,7 @@ class LootAppletWidget(QWidget):
     def _linear_weights(self, luck_norm: float, steep: bool = False) -> Dict[str, float]:
         common_weight = 1.0
         if steep:
-            artifact_weight = 0.01 + 0.9 * luck_norm
+            artifact_weight = 0.01 + 0.55 * luck_norm
         else:
             artifact_weight = 0.08 + 0.6 * luck_norm
         weights: Dict[str, float] = {}
@@ -2050,9 +2054,9 @@ class LootAppletWidget(QWidget):
             weights[rarity] = weight
         return weights
 
-    def _quadratic_weights(self, luck_norm: float, steep: bool = False) -> Dict[str, float]:
+    def _quadratic_weights(self, luck_norm: float, broad: bool = False) -> Dict[str, float]:
         common_weight = 1.0
-        if steep:
+        if broad:
             artifact_weight = 0.01 + 0.9 * luck_norm
             power = 4
         else:
@@ -2237,13 +2241,18 @@ class LootAppletWidget(QWidget):
                 return "Lower Luck makes Common items more frequent."
             return "High rarities are favored; Luck adjusts the slope."
 
-        # Monotonic curves (Linear, Quadratic, Exponential)
-        if "Steep" in curve:
-             if luck >= 75:
-                 return "High luck drastically favors higher rarities."
-             if luck <= 25:
-                 return "Low luck makes higher rarities extremely rare."
-        
+        if curve == "Linear (Steep)":
+            if luck >= 75:
+                return "High luck still keeps upper rarities comparatively scarce."
+            if luck <= 25:
+                return "Low luck makes higher rarities extremely rare."
+
+        if curve == "Quadratic (Broad)":
+            if luck >= 75:
+                return "High luck spreads drops across Rare through Legendary."
+            if luck <= 25:
+                return "Low luck compresses most drops toward Common."
+
         if luck >= 75:
             return "High luck favors Epic and Artifact items."
         if luck <= 25:

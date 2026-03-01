@@ -83,8 +83,8 @@ def maps_storage_path() -> Path:
     return maps_storage_dir() / "maps.dmtindex"
 
 
-def map_file_path(map_id: str) -> Path:
-    safe = sanitize_filename(str(map_id or "").strip()) or "map"
+def map_file_path(map_name: str) -> Path:
+    safe = sanitize_filename(str(map_name or "").strip()) or "map"
     return maps_storage_dir() / f"{safe}{MAP_FILE_EXTENSION}"
 
 
@@ -142,7 +142,7 @@ def _move_path_to_trash(
 
 def move_entry_files_to_trash(entry: MapAsset) -> tuple[Optional[str], Optional[str]]:
     _move_path_to_trash(
-        str(map_file_path(map_id_for_entry(entry))),
+        str(map_file_path(entry.name)),
         map_file_trash_path(entry),
         maps_trash_dir(),
     )
@@ -167,7 +167,7 @@ def move_entry_files_to_trash(entry: MapAsset) -> tuple[Optional[str], Optional[
 def disintegrate_entry_files(entry: MapAsset) -> None:
     map_id = map_id_for_entry(entry)
     candidates: set[Path] = set()
-    candidates.add(map_file_path(map_id))
+    candidates.add(map_file_path(entry.name))
     candidates.add(map_file_trash_path(entry))
     if entry.image_path:
         candidates.add(Path(entry.image_path))
@@ -581,6 +581,7 @@ class MapDialog(QDialog):
 class _MapViewState:
     zoom: float
     center: QPointF
+    auto_fit_active: bool
 
 
 class MapViewPanel(QGraphicsView):
@@ -710,7 +711,8 @@ class MapViewPanel(QGraphicsView):
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
-            self._pan_last_pos = QPoint(event.pos())
+            event_pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            self._pan_last_pos = QPoint(event_pos)
             self._pan_center_scene = self.mapToScene(self.viewport().rect().center())
             self.centerOn(self._pan_center_scene)
             self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
@@ -725,7 +727,8 @@ class MapViewPanel(QGraphicsView):
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         if self._panning and self._pan_last_pos is not None and self._pan_center_scene is not None:
-            current_pos = QPoint(event.pos())
+            event_pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            current_pos = QPoint(event_pos)
             delta_px = current_pos - self._pan_last_pos
             if delta_px.isNull():
                 event.accept()
@@ -770,6 +773,7 @@ class MapViewPanel(QGraphicsView):
         self.save_current_view_state()
 
     def set_zoom(self, zoom: float, *, anchor: str = "center") -> None:
+        self._auto_fit_active = False
         zoom = float(max(0.1, min(6.0, zoom)))
         zoom_changed = abs(zoom - self._zoom) >= 1e-9
         self._zoom = zoom
@@ -806,10 +810,17 @@ class MapViewPanel(QGraphicsView):
         return _MapViewState(
             zoom=self._zoom,
             center=QPointF(center),
+            auto_fit_active=self._auto_fit_active,
         )
 
     def restore_view_state(self, state: _MapViewState) -> None:
+        if state.auto_fit_active:
+            self._auto_fit_active = True
+            self.fit_to_view()
+            return
         self._auto_fit_active = False
+        if not self._refresh_fit_zoom():
+            self._fit_zoom = 1.0
         self.set_zoom(state.zoom)
         self.centerOn(state.center)
 
@@ -881,8 +892,6 @@ class MapsWidget(QWidget):
         self._load_entries_error = ""
         self._manager = MapsManager(entries=self._load_entries())
         self._current_entry: Optional[MapAsset] = None
-        self._map_preview_states: dict[str, _MapViewState] = {}
-        self._current_preview_state_key: Optional[str] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -1273,7 +1282,7 @@ class MapsWidget(QWidget):
                     assets[thumb_asset_name] = Path(entry.thumbnail_path).read_bytes()
                 except Exception:
                     pass
-            file_path = map_file_path(entry.id)
+            file_path = map_file_path(entry.name)
             expected_files.add(file_path.resolve())
             write_dmt_package(
                 file_path,
@@ -1422,8 +1431,6 @@ class MapsWidget(QWidget):
             self._edit_button.setEnabled(False)
             self._delete_button.setEnabled(False)
             self._disintegrate_button.setEnabled(False)
-            self._save_current_preview_state()
-            self._current_preview_state_key = None
             self._preview_panel.load_image(None)
             return
 
@@ -1471,32 +1478,15 @@ class MapsWidget(QWidget):
         return bool(self._current_entry and self._current_entry.id == clean_id)
 
     def _load_map_preview(self, entry: Optional[MapAsset]) -> None:
-        self._save_current_preview_state()
         if not entry:
-            self._current_preview_state_key = None
             self._preview_panel.load_image(None)
             return
         path = self._resolve_map_image_path(entry)
         if not path:
-            self._current_preview_state_key = None
             self._preview_panel.load_image(None)
             return
         state_key = self._preview_state_key(entry, path)
-        self._current_preview_state_key = state_key
-        saved_state = self._map_preview_states.get(state_key)
-        self._preview_panel.load_image(path)
-        if saved_state is not None:
-            self._preview_panel.restore_view_state(saved_state)
-        else:
-            self._preview_panel.reset_view()
-
-    def _save_current_preview_state(self) -> None:
-        if not self._current_preview_state_key:
-            return
-        state = self._preview_panel.current_view_state()
-        if state is None:
-            return
-        self._map_preview_states[self._current_preview_state_key] = state
+        self._preview_panel.load_image(path, view_state_key=state_key)
 
     def _preview_state_key(self, entry: MapAsset, path: str) -> str:
         return f"{map_id_for_entry(entry)}::{Path(path).resolve()}"
@@ -1588,15 +1578,51 @@ class MapsWidget(QWidget):
     def _delete_entry_files(self, entry: MapAsset) -> None:
         disintegrate_entry_files(entry)
 
+    def _find_name_conflict(
+        self,
+        candidate_name: str,
+        *,
+        ignore_entry: Optional[MapAsset] = None,
+    ) -> Optional[MapAsset]:
+        target = sanitize_filename(str(candidate_name or "").strip()).casefold()
+        if not target:
+            return None
+        for entry in self._manager.entries:
+            if entry is ignore_entry:
+                continue
+            if sanitize_filename(str(entry.name or "").strip()).casefold() == target:
+                return entry
+        return None
+
+    def _confirm_replace_entry(self, existing_name: str) -> bool:
+        response = QMessageBox.question(
+            self,
+            "Overwrite Map",
+            (
+                f"A map named '{existing_name}' already exists.\n\n"
+                "Overwrite it with the new map?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return response == QMessageBox.StandardButton.Yes
+
     def _open_new_map_dialog(self) -> None:
         dialog = MapDialog(self._world_data, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             entry = dialog.entry()
             if not entry:
                 return
+            conflict = self._find_name_conflict(entry.name)
+            if conflict is not None and not self._confirm_replace_entry(conflict.name):
+                return
+            if conflict is not None:
+                disintegrate_entry_files(conflict)
+                self._manager.entries = [item for item in self._manager.entries if item is not conflict]
             self._manager.add_map(entry)
             self._save_entries()
             self._apply_filters()
+            self._select_entry_by_id(entry.id)
 
     def _open_edit_map_dialog(self) -> None:
         if not self._current_entry:
@@ -1608,6 +1634,12 @@ class MapsWidget(QWidget):
         updated = dialog.entry()
         if not updated:
             return
+        conflict = self._find_name_conflict(updated.name, ignore_entry=self._current_entry)
+        if conflict is not None and not self._confirm_replace_entry(conflict.name):
+            return
+        if conflict is not None:
+            disintegrate_entry_files(conflict)
+            self._manager.entries = [item for item in self._manager.entries if item is not conflict]
         self._current_entry.name = updated.name
         self._current_entry.image_path = updated.image_path
         self._current_entry.thumbnail_path = updated.thumbnail_path

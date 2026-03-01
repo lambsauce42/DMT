@@ -5,7 +5,7 @@ from __future__ import annotations
 Archive layout:
 - sheet.pdf
 - inventory.json (backpack/equipment/notes/currency only)
-- meta.json
+- info.json
 """
 
 import json
@@ -16,10 +16,11 @@ from typing import Any
 
 
 ARCHIVE_EXTENSION = ".dmtchar"
-ARCHIVE_VERSION = 1
+ARCHIVE_VERSION = 2
 PDF_ENTRY_NAME = "sheet.pdf"
 INVENTORY_ENTRY_NAME = "inventory.json"
-META_ENTRY_NAME = "meta.json"
+INFO_ENTRY_NAME = "info.json"
+META_ENTRY_NAME = INFO_ENTRY_NAME
 
 
 def _utc_now() -> str:
@@ -85,7 +86,7 @@ def write_character_archive(
             json.dumps(normalized_inventory, ensure_ascii=False, indent=2),
         )
         zf.writestr(
-            META_ENTRY_NAME,
+            INFO_ENTRY_NAME,
             json.dumps(meta_payload, ensure_ascii=False, indent=2),
         )
 
@@ -127,9 +128,9 @@ def read_character_meta(archive_path: Path) -> dict[str, Any]:
         return {}
     try:
         with zipfile.ZipFile(archive_path, "r") as zf:
-            if META_ENTRY_NAME not in zf.namelist():
+            if INFO_ENTRY_NAME not in zf.namelist():
                 return {}
-            payload = json.loads(zf.read(META_ENTRY_NAME).decode("utf-8"))
+            payload = json.loads(zf.read(INFO_ENTRY_NAME).decode("utf-8"))
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}

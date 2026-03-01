@@ -48,8 +48,10 @@ import save_paths
 from item_file_format import (
     ITEM_FILE_EXTENSION,
     build_item_document,
+    item_id_from_payload,
     list_item_file_paths,
     load_item_payload,
+    write_item_document,
 )
 
 PREVIEW_WIDTH = 350  # Match export width for 1:1 display
@@ -1097,8 +1099,7 @@ class ItemCreatorWidget(QWidget):
             os.makedirs(base_dir, exist_ok=True)
             spec = self._current_spec()
             document = build_item_document(spec_to_dict(spec), spec.icon_path)
-            with open(save_path, "w", encoding="utf-8") as handle:
-                json.dump(document, handle, indent=2, ensure_ascii=False)
+            write_item_document(Path(save_path), document)
             self._set_dirty(False)
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
@@ -1150,8 +1151,7 @@ class ItemCreatorWidget(QWidget):
         try:
             os.makedirs(self._base_save_dir, exist_ok=True)
             document = build_item_document(spec_to_dict(spec), spec.icon_path)
-            with open(item_path, "w", encoding="utf-8") as handle:
-                json.dump(document, handle, indent=2, ensure_ascii=False)
+            write_item_document(Path(item_path), document)
             self._last_save_path = item_path
             self._set_dirty(False)
         except Exception as exc:
@@ -1311,7 +1311,9 @@ class ItemCreatorWidget(QWidget):
         root = Path(self._base_save_dir)
         target_path = None
         for path in list_item_file_paths(root):
-            if str(path.stem or "").strip() == clean_id:
+            payload = load_item_payload(path)
+            payload_item_id = item_id_from_payload(payload, fallback_path=path) if isinstance(payload, dict) else ""
+            if payload_item_id == clean_id or str(path.stem or "").strip() == clean_id:
                 target_path = path
                 break
         if target_path is None:

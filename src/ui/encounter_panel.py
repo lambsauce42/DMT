@@ -1406,19 +1406,25 @@ class EncounterPanel(QWidget):
     def _encounters_dir(self) -> Path:
         return dnd_saves_dir() / "encounters"
 
+    def _ensure_encounters_dir(self) -> Path:
+        encounters_dir = self._encounters_dir()
+        encounters_dir.mkdir(parents=True, exist_ok=True)
+        return encounters_dir
+
     def save_encounter(self, name: Optional[str] = None) -> None:
         if not name:
+            encounters_dir = self._ensure_encounters_dir()
             filename, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save Encounter",
-                str(self._encounters_dir()),
+                str(encounters_dir),
                 f"Encounter (*{ENCOUNTER_FILE_EXTENSION})",
             )
             if not filename:
                 return
             path = Path(filename)
         else:
-            path = self._encounters_dir() / f"{name}{ENCOUNTER_FILE_EXTENSION}"
+            path = self._ensure_encounters_dir() / f"{name}{ENCOUNTER_FILE_EXTENSION}"
         if path.suffix.lower() != ENCOUNTER_FILE_EXTENSION:
             path = path.with_suffix(ENCOUNTER_FILE_EXTENSION)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1541,10 +1547,11 @@ class EncounterPanel(QWidget):
         write_dmt_package(path, info=data)
 
     def _export_dialog(self) -> None:
+        encounters_dir = self._ensure_encounters_dir()
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Export Encounter",
-            str(self._encounters_dir()),
+            str(encounters_dir),
             f"Encounter (*{ENCOUNTER_FILE_EXTENSION})",
         )
         if not filename:

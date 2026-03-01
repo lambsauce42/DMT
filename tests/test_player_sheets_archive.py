@@ -206,7 +206,7 @@ def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> No
             "copper": "x",
             "hp": 42,  # Should not be persisted in inventory schema.
         },
-        meta={"name": "Hero"},
+        meta={"name": "Hero", "character_id": "character_hero_unique"},
     )
 
     assert archive_path.exists()
@@ -224,6 +224,7 @@ def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> No
         }
         raw_meta = json.loads(zf.read(META_ENTRY_NAME).decode("utf-8"))
         assert raw_meta["name"] == "Hero"
+        assert raw_meta["character_id"] == "character_hero_unique"
 
     payload = read_character_inventory(archive_path)
     assert payload["inventory"] == ["sword", "shield"]
@@ -238,6 +239,30 @@ def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> No
     extracted_pdf = tmp_path / "restored.pdf"
     assert extract_character_pdf(archive_path, extracted_pdf)
     assert extracted_pdf.read_bytes() == source_pdf.read_bytes()
+
+
+def test_entries_with_same_name_get_distinct_stable_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    pdf_one = tmp_path / "one.pdf"
+    pdf_two = tmp_path / "two.pdf"
+    pdf_one.write_bytes(b"%PDF-1.4 one")
+    pdf_two.write_bytes(b"%PDF-1.4 two")
+
+    first = player_sheets.PlayerSheetEntry(name="Shared Hero", pdf_path=str(pdf_one))
+    second = player_sheets.PlayerSheetEntry(name="Shared Hero", pdf_path=str(pdf_two))
+
+    assert player_sheets.ensure_entry_archive(first)
+    assert player_sheets.ensure_entry_archive(second)
+
+    first_sheet_id = player_sheets.sheet_id_for_entry(first)
+    second_sheet_id = player_sheets.sheet_id_for_entry(second)
+    assert first_sheet_id
+    assert second_sheet_id
+    assert first_sheet_id != second_sheet_id
+    assert first.character_id == first_sheet_id
+    assert second.character_id == second_sheet_id
+    assert Path(first.archive_path).exists()
+    assert Path(second.archive_path).exists()
 
 
 def test_legacy_character_sheet_entry_migrates_to_archive(

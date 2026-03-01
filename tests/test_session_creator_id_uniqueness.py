@@ -35,6 +35,10 @@ def test_create_session_produces_unique_ids_and_files(qtbot, monkeypatch, tmp_pa
     assert len(ids) == 2
     assert len(set(ids)) == 2
     assert len(files) == 2
+    assert sorted(path.name for path in files) == [
+        "Untitled_Session.dmtsession",
+        "Untitled_Session_2.dmtsession",
+    ]
     assert all(session_id.startswith("Untitled_Session_") for session_id in ids)
     assert all("_session_" in session_id for session_id in ids)
     assert sorted(package_object_ids) == sorted(ids)

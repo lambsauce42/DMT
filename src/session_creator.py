@@ -225,9 +225,9 @@ def session_storage_dir() -> Path:
 def session_storage_path() -> Path:
     return session_storage_dir() / SESSION_STORAGE_MARKER_NAME
 
-def session_file_path(session_id: str, base_dir: Optional[Path] = None) -> Path:
+def session_file_path(session_name: str, base_dir: Optional[Path] = None) -> Path:
     target_dir = base_dir if base_dir is not None else session_storage_path().parent
-    safe_name = sanitize_filename(session_id)
+    safe_name = sanitize_filename(session_name)
     return target_dir / f"{safe_name}{SESSION_FILE_EXTENSION}"
 
 def _now_timestamp() -> str:
@@ -300,6 +300,17 @@ def _format_size(size_bytes: int) -> str:
     return f"{size:.1f} GB"
 
 
+def _safe_attachment_size_bytes(raw_size: object, *, attachment_id: str, file_name: str) -> int:
+    try:
+        return max(0, int(raw_size or 0))
+    except (TypeError, ValueError):
+        print(
+            f"[WARN] Invalid attachment size metadata for '{attachment_id}' in '{file_name}': {raw_size!r}. Using 0.",
+            file=sys.stderr,
+        )
+        return 0
+
+
 class SessionManager:
     def __init__(self) -> None:
         self.sessions: List[Session] = []
@@ -354,7 +365,7 @@ class SessionManager:
         expected_files: set[Path] = set()
 
         for session in self.sessions:
-            file_path = session_file_path(session.id, storage_root)
+            file_path = session_file_path(session.name, storage_root)
             expected_files.add(file_path.resolve())
             payload = self._session_to_dict(session)
             attachment_assets = self._attachment_assets.setdefault(session.id, {})
@@ -430,7 +441,11 @@ class SessionManager:
                     name=attachment_name,
                     asset_path=attachment_asset_path,
                     mime=attachment_mime,
-                    size_bytes=max(0, int(payload.get("size_bytes") or 0)),
+                    size_bytes=_safe_attachment_size_bytes(
+                        payload.get("size_bytes"),
+                        attachment_id=attachment_id,
+                        file_name=attachment_name,
+                    ),
                     sha256=str(payload.get("sha256") or ""),
                     source_name=str(payload.get("source_name") or attachment_name),
                     source_path=str(payload.get("source_path") or ""),
@@ -507,10 +522,11 @@ class SessionManager:
                 break
         self.save()
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(self, session_id: str, *, save: bool = True) -> None:
         self.sessions = [s for s in self.sessions if s.id != session_id]
         self._attachment_assets.pop(str(session_id), None)
-        self.save()
+        if save:
+            self.save()
 
 
 class FilePoolEdgeToggleButton(QPushButton):
@@ -908,6 +924,8 @@ class SessionCreatorWidget(QWidget):
 
         self.ref_tabs.addTab(plan_tab, "Plan")
         self.ref_tabs.addTab(self._build_files_tab(), "Files")
+        self.ref_tabs.addTab(self._build_placeholder_reference_tab("Transcript"), "Transcript")
+        self.ref_tabs.addTab(self._build_placeholder_reference_tab("Recap"), "Recap")
         self.ref_tabs.currentChanged.connect(self._on_reference_tab_changed)
         
         ref_layout.addWidget(self.ref_tabs)
@@ -1276,6 +1294,18 @@ class SessionCreatorWidget(QWidget):
         QTimer.singleShot(0, self._position_files_edge_toggle)
         return files_tab
 
+    def _build_placeholder_reference_tab(self, label: str) -> QWidget:
+        placeholder_tab = QWidget(self)
+        layout = QVBoxLayout(placeholder_tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        placeholder = QLabel(f"{label} is not available yet.", placeholder_tab)
+        placeholder.setObjectName("Subheader")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setWordWrap(True)
+        layout.addWidget(placeholder, 1)
+        return placeholder_tab
+
     def _trigger_auto_save(self) -> None:
         if self._current_session:
             self._set_current_session_dirty(True)
@@ -1310,19 +1340,23 @@ class SessionCreatorWidget(QWidget):
         dirty_suffix = " *" if self._current_session_dirty else ""
         self.session_title_label.setText(f"Session: {self._current_session.name}{dirty_suffix}")
 
-    def _save_current_session(self) -> None:
+    def _sync_current_session_from_ui(self) -> None:
         if not self._current_session:
             return
-        
-        # Only saving scratchpad and context now, as date/duration/log removed from UI
+
         self._current_session.notes = _normalize_session_link_html(self.scratchpad.toHtml())
         self._current_session.plan_text = self.plan_editor.toPlainText()
         self._current_session.plan_html = _normalize_session_link_html(self.plan_editor.toHtml())
-        
-        # Save linked context
+
         w, c, g = self._current_context_restrictions()
         token = self._context_token(w, c, g)
         self._current_session.group_ids = [token] if token else []
+
+    def _save_current_session(self) -> None:
+        if not self._current_session:
+            return
+
+        self._sync_current_session_from_ui()
 
         if self._current_session.document_path:
             plan_path = Path(self._current_session.document_path)
@@ -1381,16 +1415,48 @@ class SessionCreatorWidget(QWidget):
     def _new_session_id(self, default_name: str) -> str:
         base_id = generate_named_object_id(default_name, "session")
         existing_ids = {str(session.id) for session in self.manager.sessions}
-        storage_root = session_storage_path().parent
         candidate = base_id
         suffix = 2
-        while candidate in existing_ids or session_file_path(candidate, storage_root).exists():
+        while candidate in existing_ids:
             candidate = sanitize_filename(f"{base_id}_{suffix}")
             suffix += 1
         return candidate
 
+    def _new_session_name(self, default_name: str) -> str:
+        storage_root = session_storage_path().parent
+        existing_names = {
+            sanitize_filename(str(session.name or "")).casefold()
+            for session in self.manager.sessions
+        }
+        base_name = str(default_name or "Untitled Session").strip() or "Untitled Session"
+        candidate = base_name
+        suffix = 2
+        while True:
+            normalized = sanitize_filename(candidate).casefold()
+            if normalized not in existing_names and not session_file_path(candidate, storage_root).exists():
+                return candidate
+            candidate = f"{base_name} {suffix}"
+            suffix += 1
+
+    def _find_session_name_conflict(
+        self,
+        candidate_name: str,
+        *,
+        ignore_session_id: str = "",
+    ) -> Optional[Session]:
+        target = sanitize_filename(str(candidate_name or "").strip()).casefold()
+        if not target:
+            return None
+        ignored = str(ignore_session_id or "").strip()
+        for session in self.manager.sessions:
+            if str(session.id) == ignored:
+                continue
+            if sanitize_filename(str(session.name or "").strip()).casefold() == target:
+                return session
+        return None
+
     def _create_session(self) -> None:
-        default_name = "Untitled Session"
+        default_name = self._new_session_name("Untitled Session")
         session = Session(
             id=self._new_session_id(default_name),
             name=default_name,
@@ -1449,11 +1515,33 @@ class SessionCreatorWidget(QWidget):
             self._update_session_title()
             return
 
+        conflict = self._find_session_name_conflict(new_name, ignore_session_id=str(session.id))
+        if conflict is not None:
+            response = QMessageBox.question(
+                self,
+                "Overwrite Session",
+                (
+                    f"A session named '{conflict.name}' already exists.\n\n"
+                    "Overwrite it with this session?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                self.session_list.blockSignals(True)
+                item.setText(session.name)
+                self.session_list.blockSignals(False)
+                return
+            self.manager.delete_session(conflict.id, save=False)
+
+        if self._current_session and self._current_session.id == session.id:
+            self._sync_current_session_from_ui()
         session.name = new_name
         if self._current_session and self._current_session.id == session.id:
             self._current_session = session
             self._update_session_title()
         self.manager.save()
+        self._refresh_session_list(preserve_current_session=True)
 
     def _on_session_list_changed(self, current: QListWidgetItem, previous: QListWidgetItem) -> None:
         if not current:
@@ -2065,6 +2153,8 @@ class SessionCreatorWidget(QWidget):
         if is_files_tab:
             self._position_files_edge_toggle()
             self.files_edge_toggle_btn.show()
+        else:
+            self.files_edge_toggle_btn.hide()
 
     def _refresh_file_table(self, *, selected_attachment_id: Optional[str] = None) -> None:
         session = self._current_session

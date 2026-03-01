@@ -60,19 +60,19 @@ class TestLootCurves(unittest.TestCase):
         # Legendary should be > Common at high luck (Inverted logic: Common is low, Legendary is high)
         self.assertGreater(weights["legendary"], weights["common"])
 
-    def test_linear_steep_vs_linear(self):
-        luck_val = 1 * loot_applet.LUCK_SLIDER_SCALE # Low luck
-        self.widget._luck_slider.setValue(luck_val)
-        
-        self.widget._curve_combo.setCurrentText("Linear")
-        w_linear = self.widget._calculate_weights()
-        
-        self.widget._curve_combo.setCurrentText("Linear (Steep)")
-        w_steep = self.widget._calculate_weights()
-        
-        # Steep should punish high rarities more at low luck
-        # So Legendary weight in Steep should be lower than Normal Linear
-        self.assertLess(w_steep["legendary"], w_linear["legendary"])
+    def test_linear_steep_stays_steeper_than_linear_across_luck_range(self):
+        for luck_val in [1, 50, 100]:
+            with self.subTest(luck=luck_val):
+                self.widget._luck_slider.setValue(luck_val * loot_applet.LUCK_SLIDER_SCALE)
+
+                self.widget._curve_combo.setCurrentText("Linear")
+                w_linear = self.widget._calculate_weights()
+
+                self.widget._curve_combo.setCurrentText("Linear (Steep)")
+                w_steep = self.widget._calculate_weights()
+
+                self.assertLess(w_steep["legendary"], w_linear["legendary"])
+                self.assertGreater(w_steep["common"], w_linear["common"])
 
     def test_bell_curve_variants(self):
         # Luck = 50% (Norm 0.5) -> Peak at Rare (index 2)

@@ -7,11 +7,18 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from dmt_package import (
+    read_dmt_package_asset,
+    read_dmt_package_info,
+    write_dmt_package,
+)
 from save_paths import dnd_saves_dir
+from unique_ids import generate_named_object_id
 
 ITEM_FILE_EXTENSION = ".dmtitem"
-ITEM_FILE_FORMAT = "dmtitem.v1"
+ITEM_FILE_FORMAT = "dmtitem.v2"
 ITEM_FILE_PATTERNS = ("*.dmtitem",)
+ITEM_ICON_ASSET_NAME = "assets/icon"
 
 _ITEM_ICON_DIRS = (
     Path(__file__).resolve().parent.parent / "assets" / "itemicons",
@@ -62,10 +69,48 @@ def resolve_item_icon_source(
     return None
 
 
+def ensure_item_payload_id(payload: dict, *, fallback_name: str = "item") -> dict:
+    normalized = dict(payload or {})
+    existing = str(normalized.get("item_id") or "").strip()
+    if existing:
+        normalized["item_id"] = existing
+        return normalized
+    item_name = str(normalized.get("title") or normalized.get("name") or fallback_name).strip()
+    normalized["item_id"] = generate_named_object_id(item_name or fallback_name, "item")
+    return normalized
+
+
+def item_id_from_payload(payload: dict | None, *, fallback_path: Optional[Path] = None) -> str:
+    if isinstance(payload, dict):
+        existing = str(payload.get("item_id") or "").strip()
+        if existing:
+            return existing
+    if fallback_path is None:
+        return ""
+    try:
+        return str(fallback_path.resolve())
+    except Exception:
+        return str(fallback_path)
+
+
+def _item_document_fingerprint(document: dict) -> str:
+    try:
+        payload = json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+    except Exception:
+        payload = str(document)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def build_item_document(payload: dict, icon_source: Optional[str]) -> dict:
+    normalized_payload = ensure_item_payload_id(payload)
     document: dict[str, object] = {
         "format": ITEM_FILE_FORMAT,
-        "payload": dict(payload),
+        "payload": normalized_payload,
     }
     icon_path = resolve_item_icon_source(icon_source)
     if icon_path is None:
@@ -76,60 +121,121 @@ def build_item_document(payload: dict, icon_source: Optional[str]) -> dict:
         return document
     if not raw:
         return document
-    document["icon"] = {
-        "name": icon_path.name,
-        "encoding": "base64",
-        "data": base64.b64encode(raw).decode("ascii"),
+    suffix = Path(icon_path.name).suffix.lower()
+    asset_name = f"{ITEM_ICON_ASSET_NAME}{suffix or '.bin'}"
+    document["icon_asset_name"] = asset_name
+    document["assets"] = {
+        asset_name: {
+            "encoding": "base64",
+            "data": base64.b64encode(raw).decode("ascii"),
+        }
     }
     return document
 
 
-def _materialize_embedded_icon(path: Path, icon_payload: dict) -> Optional[str]:
-    encoded = str(icon_payload.get("data") or "").strip()
+def _decode_document_asset(document: dict, asset_name: str) -> Optional[bytes]:
+    assets = document.get("assets")
+    if not isinstance(assets, dict):
+        return None
+    asset_payload = assets.get(asset_name)
+    if not isinstance(asset_payload, dict):
+        return None
+    encoded = str(asset_payload.get("data") or "").strip()
     if not encoded:
         return None
     try:
-        icon_raw = base64.b64decode(encoded, validate=True)
+        return base64.b64decode(encoded, validate=True)
     except Exception:
         return None
-    if not icon_raw:
-        return None
 
-    icon_name = str(icon_payload.get("name") or "icon.bin").strip() or "icon.bin"
-    suffix = Path(icon_name).suffix.lower()
+
+def write_item_document(path: Path, document: dict) -> None:
+    if not isinstance(document, dict):
+        raise TypeError("document must be a dictionary")
+    payload = document.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("document payload is missing")
+
+    normalized_payload = ensure_item_payload_id(payload)
+    info = {
+        "format": ITEM_FILE_FORMAT,
+        "payload": normalized_payload,
+    }
+    assets: dict[str, bytes] = {}
+    icon_asset_name = str(document.get("icon_asset_name") or "").strip()
+    if icon_asset_name:
+        raw = _decode_document_asset(document, icon_asset_name)
+        if raw:
+            info["icon_asset_name"] = icon_asset_name
+            assets[icon_asset_name] = raw
+    write_dmt_package(path, info=info, assets=assets)
+
+
+def load_item_document(path: Path) -> Optional[dict]:
+    info = read_dmt_package_info(path)
+    if isinstance(info, dict):
+        file_format = str(info.get("format") or "").strip().lower()
+        if file_format != ITEM_FILE_FORMAT:
+            return None
+        payload = info.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        document: dict[str, object] = {
+            "format": ITEM_FILE_FORMAT,
+            "payload": dict(payload),
+        }
+        icon_asset_name = str(info.get("icon_asset_name") or "").strip()
+        if icon_asset_name:
+            raw = read_dmt_package_asset(path, icon_asset_name)
+            if raw:
+                document["icon_asset_name"] = icon_asset_name
+                document["assets"] = {
+                    icon_asset_name: {
+                        "encoding": "base64",
+                        "data": base64.b64encode(raw).decode("ascii"),
+                    }
+                }
+        return document
+    return None
+
+
+def _materialize_icon_bytes(raw: bytes, asset_name: str) -> Optional[str]:
+    if not raw:
+        return None
+    suffix = Path(asset_name).suffix.lower()
     if not suffix or any(ch for ch in suffix if not (ch.isalnum() or ch == ".")):
         suffix = ".bin"
-    digest = hashlib.sha256(icon_raw).hexdigest()
+    digest = hashlib.sha256(raw).hexdigest()
     cache_dir = dnd_saves_dir() / "cache" / "item_icons"
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         icon_path = cache_dir / f"{digest}{suffix}"
         if not icon_path.exists():
-            icon_path.write_bytes(icon_raw)
+            icon_path.write_bytes(raw)
         return str(icon_path)
     except Exception:
         return None
 
 
 def load_item_payload(path: Path) -> Optional[dict]:
-    try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except Exception:
+    document = load_item_document(path)
+    if not isinstance(document, dict):
         return None
-    if not isinstance(data, dict):
-        return None
-
-    if str(data.get("format") or "").strip().lower() != ITEM_FILE_FORMAT:
-        return None
-
-    payload = data.get("payload")
+    payload = document.get("payload")
     if not isinstance(payload, dict):
         return None
     resolved_payload = dict(payload)
-    icon_payload = data.get("icon")
-    if isinstance(icon_payload, dict):
-        icon_path = _materialize_embedded_icon(path, icon_payload)
-        if icon_path:
-            resolved_payload["icon_path"] = icon_path
+    icon_asset_name = str(document.get("icon_asset_name") or "").strip()
+    if icon_asset_name:
+        raw = _decode_document_asset(document, icon_asset_name)
+        if raw:
+            icon_path = _materialize_icon_bytes(raw, icon_asset_name)
+            if icon_path:
+                resolved_payload["icon_path"] = icon_path
     return resolved_payload
+
+
+def item_document_matches(a: dict | None, b: dict | None) -> bool:
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    return _item_document_fingerprint(a) == _item_document_fingerprint(b)

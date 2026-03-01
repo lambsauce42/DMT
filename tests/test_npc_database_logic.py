@@ -118,9 +118,10 @@ class TestNPCDatabaseLogic(unittest.TestCase):
                 self.assertTrue(entry.id.startswith("Bob_"))
                 self.assertIn("_npc_", entry.id)
 
-                path = npc_database.npc_file_path(entry.id)
+                path = npc_database.npc_file_path(entry.name)
                 payload = read_dmt_package_info(path)
                 self.assertIsInstance(payload, dict)
+                self.assertEqual(path.name, "Bob.dmtnpc")
                 self.assertEqual(payload["object_id"], entry.id)
             finally:
                 npc_database._now_timestamp = original_now_timestamp

@@ -108,8 +108,7 @@ class SessionCreatorWidgetTests(unittest.TestCase):
         self.addCleanup(widget.close)
 
         tab_names = [widget.ref_tabs.tabText(i) for i in range(widget.ref_tabs.count())]
-        self.assertIn("Plan", tab_names)
-        self.assertIn("Files", tab_names)
+        self.assertEqual(tab_names, ["Plan", "Files", "Transcript", "Recap"])
         self.assertNotIn("Maps", tab_names)
         self.assertFalse(widget.load_plan_btn.icon().isNull())
         self.assertEqual(
@@ -170,6 +169,35 @@ class SessionCreatorWidgetTests(unittest.TestCase):
                 reopened._load_selected_session()
                 self.assertEqual(reopened.plan_editor.toPlainText(), "Inline-only plan text")
                 self.assertEqual(reopened.plan_path_label.text(), "No text file loaded")
+            finally:
+                session_creator.session_storage_path = original_path_func
+
+    def test_renaming_session_persists_pending_scratchpad_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage_path = Path(tmp_dir) / "sessions.dmtindex"
+            original_path_func = session_creator.session_storage_path
+            session_creator.session_storage_path = lambda: storage_path
+            try:
+                widget = SessionCreatorWidget()
+                self.addCleanup(widget.close)
+                widget._create_session()
+                self.assertIsNotNone(widget._current_session)
+                session_id = widget._current_session.id
+
+                widget.scratchpad.setPlainText("Scratchpad text should survive rename")
+                self.assertIn("*", widget.session_title_label.text())
+
+                item = widget.session_list.currentItem()
+                self.assertIsNotNone(item)
+                item.setText("Renamed Session")
+
+                payload = self._saved_sessions_in_dir(Path(tmp_dir))
+                stored = next(entry for entry in payload if entry["id"] == session_id)
+                self.assertEqual(stored.get("name"), "Renamed Session")
+                self.assertIn(
+                    "Scratchpad text should survive rename",
+                    str(stored.get("notes") or ""),
+                )
             finally:
                 session_creator.session_storage_path = original_path_func
 
