@@ -1101,7 +1101,9 @@ class ItemCreatorWidget(QWidget):
         try:
             os.makedirs(base_dir, exist_ok=True)
             spec = self._current_spec()
-            document = build_item_document(spec_to_dict(spec), spec.icon_path)
+            payload = spec_to_dict(spec)
+            payload.pop("item_id", None)
+            document = build_item_document(payload, spec.icon_path)
             write_item_document(Path(save_path), document)
             payload = document.get("payload")
             if isinstance(payload, dict):
@@ -1156,7 +1158,9 @@ class ItemCreatorWidget(QWidget):
         spec = self._current_spec()
         try:
             os.makedirs(self._base_save_dir, exist_ok=True)
-            document = build_item_document(spec_to_dict(spec), spec.icon_path)
+            payload = spec_to_dict(spec)
+            payload.pop("item_id", None)
+            document = build_item_document(payload, spec.icon_path)
             write_item_document(Path(item_path), document)
             payload = document.get("payload")
             if isinstance(payload, dict):

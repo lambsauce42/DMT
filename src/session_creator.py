@@ -1500,13 +1500,17 @@ class SessionCreatorWidget(QWidget):
         menu.exec(self.session_list.mapToGlobal(pos))
 
     def _on_session_name_changed(self, item: QListWidgetItem) -> None:
-        session_id = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            session_id = item.data(Qt.ItemDataRole.UserRole)
+            item_text = item.text()
+        except RuntimeError:
+            return
         session = next((s for s in self.manager.sessions if s.id == session_id), None)
         if not session:
             return
 
-        new_name = item.text().strip() or "Untitled Session"
-        if new_name != item.text():
+        new_name = item_text.strip() or "Untitled Session"
+        if new_name != item_text:
             self.session_list.blockSignals(True)
             item.setText(new_name)
             self.session_list.blockSignals(False)

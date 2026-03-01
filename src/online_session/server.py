@@ -101,6 +101,21 @@ class OnlineSessionServer(QObject):
             return
         self._send_socket_message(target_socket, message)
 
+    def disconnect_player(self, player_id: str, *, message: str = "") -> bool:
+        target_socket = self._find_socket_for_player(player_id)
+        if target_socket is None:
+            return False
+        if message:
+            self._send_socket_message(
+                target_socket,
+                {
+                    "type": "kicked",
+                    "message": str(message or "Removed from host."),
+                },
+            )
+        target_socket.disconnectFromHost()
+        return True
+
     def broadcast(self, message: dict) -> None:
         for sock, state in list(self._connections.items()):
             if state.player_id:

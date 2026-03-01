@@ -1482,6 +1482,7 @@ def entry_to_dict(entry: PlayerSheetEntry) -> dict:
         "silver": entry.silver,
         "copper": entry.copper,
         "item_documents": _entry_item_documents(entry),
+        "managed_linked": bool(getattr(entry, "managed_linked", False)),
         "save_revision": int(entry.save_revision),
         "last_saved_at": str(entry.last_saved_at or ""),
         "content_hash": str(entry.content_hash or ""),
@@ -1526,6 +1527,7 @@ def entry_from_dict(payload: dict) -> Optional[PlayerSheetEntry]:
         silver=_read_currency(payload.get("silver", 0)),
         copper=_read_currency(payload.get("copper", 0)),
         item_documents=item_documents,
+        managed_linked=bool(payload.get("managed_linked", False)),
         save_revision=_read_currency(payload.get("save_revision", 0)),
         last_saved_at=str(payload.get("last_saved_at", "") or "").strip(),
         content_hash=str(payload.get("content_hash", "") or "").strip(),
@@ -1549,6 +1551,7 @@ class PlayerSheetEntry:
     silver: int = 0
     copper: int = 0
     item_documents: dict[str, dict] = field(default_factory=dict)
+    managed_linked: bool = False
     save_revision: int = 0
     last_saved_at: str = ""
     content_hash: str = ""
@@ -1561,6 +1564,7 @@ class PlayerSheetEntry:
         self.inventory_notes = str(self.inventory_notes or "")
         self.equipment = _normalize_equipment(self.equipment)
         self.item_documents = _normalized_item_documents_map(self.item_documents)
+        self.managed_linked = bool(self.managed_linked)
         try:
             self.gold = max(0, int(self.gold))
         except (TypeError, ValueError):
@@ -1620,6 +1624,7 @@ def _entry_meta_payload(entry: PlayerSheetEntry, *, created_at: str | None = Non
         "group": str(entry.group or "").strip(),
         "tags": [str(tag).strip() for tag in entry.tags if str(tag).strip()],
         "created_at": str(created_at or "").strip(),
+        "managed_linked": bool(getattr(entry, "managed_linked", False)),
         "save_revision": int(entry.save_revision),
         "last_saved_at": str(entry.last_saved_at or ""),
         "content_hash": str(entry.content_hash or ""),
@@ -1638,6 +1643,8 @@ def _apply_entry_meta(entry: PlayerSheetEntry, meta: dict) -> None:
         entry.sheet_id = str(meta.get("sheet_id") or "").strip()
     if "character_id" in meta:
         entry.character_id = str(meta.get("character_id") or "").strip()
+    if "managed_linked" in meta:
+        entry.managed_linked = bool(meta.get("managed_linked"))
     if "save_revision" in meta:
         try:
             entry.save_revision = max(0, int(meta.get("save_revision") or 0))
@@ -1996,6 +2003,30 @@ def archive_bytes_for_character_id(character_id: str) -> Optional[bytes]:
     return _read_archive_bytes_for_entry(entry)
 
 
+def cleanup_managed_linked_entries(active_character_ids: set[str]) -> int:
+    active_ids = {
+        str(character_id or "").strip()
+        for character_id in active_character_ids
+        if str(character_id or "").strip()
+    }
+    entries = load_entries_from_storage()
+    kept_entries: list[PlayerSheetEntry] = []
+    removed = 0
+    for entry in entries:
+        character_id = character_id_for_entry(entry)
+        if not getattr(entry, "managed_linked", False):
+            kept_entries.append(entry)
+            continue
+        if character_id and character_id in active_ids:
+            kept_entries.append(entry)
+            continue
+        disintegrate_entry_files(entry)
+        removed += 1
+    if removed:
+        save_entries_to_storage(kept_entries)
+    return removed
+
+
 def ensure_network_linked_sheet_entry(
     sheet_id: str,
     sheet_name: str,
@@ -2034,8 +2065,11 @@ def ensure_network_linked_sheet_entry(
             name=display_name,
             pdf_path=str(pdf_path),
             sheet_id=target,
+            managed_linked=True,
         )
         entries.append(target_entry)
+    else:
+        target_entry.managed_linked = True
 
     normalized = _apply_inventory_payload_to_entry(target_entry, inventory_payload)
 
@@ -2087,8 +2121,11 @@ def ensure_network_linked_character_entry(
             archive_path=str(archive_path),
             sheet_id=storage_name,
             character_id=target,
+            managed_linked=True,
         )
         entries.append(target_entry)
+    else:
+        target_entry.managed_linked = True
 
     _apply_inventory_payload_to_entry(target_entry, inventory_payload)
     sync_entry_archive(target_entry)

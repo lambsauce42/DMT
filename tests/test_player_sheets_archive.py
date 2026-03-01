@@ -279,6 +279,38 @@ def test_sync_entry_archive_materializes_item_document_cache(
     assert cached_document["payload"]["item_id"] == "item_a"
 
 
+def test_cleanup_managed_linked_entries_removes_only_unlinked_managed_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    managed_pdf = tmp_path / "managed.pdf"
+    regular_pdf = tmp_path / "regular.pdf"
+    managed_pdf.write_bytes(b"%PDF-1.4 managed")
+    regular_pdf.write_bytes(b"%PDF-1.4 regular")
+
+    managed_entry = player_sheets.PlayerSheetEntry(
+        name="Managed Hero",
+        pdf_path=str(managed_pdf),
+        character_id="character-managed",
+        managed_linked=True,
+    )
+    regular_entry = player_sheets.PlayerSheetEntry(
+        name="Regular Hero",
+        pdf_path=str(regular_pdf),
+        character_id="character-regular",
+        managed_linked=False,
+    )
+    assert player_sheets.ensure_entry_archive(managed_entry)
+    assert player_sheets.ensure_entry_archive(regular_entry)
+    player_sheets.save_entries_to_storage([managed_entry, regular_entry])
+
+    removed = player_sheets.cleanup_managed_linked_entries({"character-regular"})
+
+    assert removed == 1
+    entries = player_sheets.load_entries_from_storage()
+    assert [entry.name for entry in entries] == ["Regular Hero"]
+
+
 def test_entries_with_same_name_get_distinct_stable_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
     pdf_one = tmp_path / "one.pdf"

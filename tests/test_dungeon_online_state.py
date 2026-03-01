@@ -1534,7 +1534,9 @@ def test_linked_character_fields_round_trip_in_scene_state(dungeon_widget):
     assert loaded_entity.linked_sheet_archive_b64 == "YXJjaGl2ZQ=="
 
 
-def test_host_sync_character_inventory_updates_owned_linked_entities(dungeon_widget):
+def test_host_sync_character_inventory_updates_owned_linked_entities(
+    monkeypatch, dungeon_widget, tmp_path
+):
     class _HostStub:
         def __init__(self):
             self.results = []
@@ -1598,6 +1600,16 @@ def test_host_sync_character_inventory_updates_owned_linked_entities(dungeon_wid
                 "inventory_notes": "claimed",
                 "equipment": {"head": "helm_a"},
                 "gold": 5,
+                "item_documents": {
+                    "item_x": build_item_document(
+                        {"item_id": "item_x", "title": "Item X"},
+                        None,
+                    ),
+                    "helm_a": build_item_document(
+                        {"item_id": "helm_a", "title": "Helm A"},
+                        None,
+                    ),
+                },
                 "hp": 999,
             },
         },
@@ -1717,6 +1729,182 @@ def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
     assert first_item["ac"] == 15
 
 
+def test_host_sync_character_inventory_can_remove_unapproved_unknown_items(
+    monkeypatch, dungeon_widget
+):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def kick_player(self, player_id, *, message):
+            raise AssertionError("kick_player should not be called for remove flow")
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_review_unknown_linked_items",
+        lambda **_kwargs: {
+            "action": "remove",
+            "selected_item_ids": ["item_unknown"],
+            "signature": "sig-remove",
+        },
+    )
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._broadcast_snapshot_if_host = lambda: None
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-sheet-1",
+                        "linked_inventory": {},
+                        "icon_path": "",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_sync_character_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "character_id": "character-sheet-1",
+            "inventory": {
+                "inventory": ["item_unknown"],
+                "equipment": {},
+                "item_documents": {
+                    "item_unknown": {
+                        "format": "dmtitem.v2",
+                        "payload": {"item_id": "item_unknown", "title": "Unknown Blade"},
+                    }
+                },
+            },
+        },
+        request_id="sync-remove-1",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is True
+    first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
+    assert first_item["linked_inventory"]["inventory"] == []
+    assert first_item["linked_inventory"]["item_documents"] == {}
+
+
+def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
+    monkeypatch, dungeon_widget
+):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.snapshots = []
+            self.kicks = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def kick_player(self, player_id, *, message):
+            self.kicks.append((player_id, message))
+            return True
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_review_unknown_linked_items",
+        lambda **_kwargs: {
+            "action": "kick",
+            "selected_item_ids": ["item_unknown"],
+            "signature": "sig-kick",
+        },
+    )
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._broadcast_snapshot_if_host = lambda: None
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-sheet-1",
+                        "linked_inventory": {},
+                        "icon_path": "",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_sync_character_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "character_id": "character-sheet-1",
+            "inventory": {
+                "inventory": ["item_unknown"],
+                "equipment": {},
+                "item_documents": {
+                    "item_unknown": {
+                        "format": "dmtitem.v2",
+                        "payload": {"item_id": "item_unknown", "title": "Unknown Blade"},
+                    }
+                },
+            },
+        },
+        request_id="sync-kick-1",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert dungeon_widget._host_controller.kicks == [
+        ("player-1", "DM rejected unknown linked items and removed the player.")
+    ]
+    first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
+    assert first_item["linked_inventory"] == {}
+
+
 def test_host_sync_character_inventory_rejects_unowned_character_target(
     dungeon_widget
 ):
@@ -1789,7 +1977,9 @@ def test_host_sync_character_inventory_rejects_unowned_character_target(
     assert "not linked to one of your owned entities" in str(result["message"]).lower()
 
 
-def test_host_link_character_sync_allows_claim_for_player_owned_entity(dungeon_widget):
+def test_host_link_character_sync_allows_claim_for_player_owned_entity(
+    monkeypatch, dungeon_widget, tmp_path
+):
     class _HostStub:
         def __init__(self):
             self.results = []
@@ -1803,6 +1993,12 @@ def test_host_link_character_sync_allows_claim_for_player_owned_entity(dungeon_w
 
         def stop(self):
             return None
+
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: tmp_path)
+    write_item_document(
+        tmp_path / "item_a.dmtitem",
+        build_item_document({"item_id": "item_a", "title": "Item A"}, None),
+    )
 
     dungeon_widget._host_controller = _HostStub()
     dungeon_widget._online_mode = ONLINE_MODE_DM_HOST

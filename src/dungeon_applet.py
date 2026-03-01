@@ -4291,6 +4291,7 @@ class DungeonAppletWidget(QWidget):
         self._pending_link_conflicts: dict[str, dict] = {}
         self._active_link_conflict_prompt_key: str = ""
         self._host_link_conflict_request_cache: dict[str, dict] = {}
+        self._host_unknown_item_review_cache: dict[str, dict] = {}
         self._debug_instance_id: str = uuid.uuid4().hex[:8]
         self._debug_log_enabled: bool = str(
             os.environ.get("DMT_ONLINE_DEBUG_LOG", "0")
@@ -7533,6 +7534,15 @@ class DungeonAppletWidget(QWidget):
     def _on_client_disconnected(self) -> None:
         was_ready = bool(self._player_connection_ready)
         was_waiting_for_snapshot = bool(self._awaiting_player_snapshot)
+        terminal_disconnect_message = ""
+        if self._client_controller is not None:
+            consume_terminal_message = getattr(
+                self._client_controller,
+                "consume_terminal_disconnect_message",
+                None,
+            )
+            if callable(consume_terminal_message):
+                terminal_disconnect_message = str(consume_terminal_message() or "").strip()
         self._player_connection_ready = False
         self._awaiting_player_snapshot = False
         self._pending_join_character_override_sync = False
@@ -7574,6 +7584,15 @@ class DungeonAppletWidget(QWidget):
                 "Join failed. Online player mode was cancelled and local mode was restored.",
                 True,
             )
+            self._set_online_mode(ONLINE_MODE_LOCAL_DM)
+            return
+        if terminal_disconnect_message:
+            self._pending_player_state_update = None
+            self._pending_player_state_update_request_id = ""
+            self._approved_host_inventory_sync_characters.clear()
+            self._suppressed_link_conflicts.clear()
+            self._append_server_log(f"[WARN] {terminal_disconnect_message}")
+            self._append_chat_message("System", terminal_disconnect_message, True)
             self._set_online_mode(ONLINE_MODE_LOCAL_DM)
             return
         self._append_server_log("[WARN] Disconnected from host. Waiting for reconnect...")
@@ -8269,8 +8288,33 @@ class DungeonAppletWidget(QWidget):
             player_id=player_id,
             sheet_id=sheet_id,
         )
+        resolution_status, resolved_inventory_payload, resolution_note = self._resolve_unknown_linked_items_for_host(
+            player_id=player_id,
+            character_id=character_id,
+            sheet_name=sheet_id,
+            inventory_payload=inventory_payload,
+            existing_inventory=existing_inventory,
+        )
+        if resolution_status == "kick":
+            kick_message = str(resolution_note or "Removed from host due to unapproved linked items.")
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=kick_message,
+                request_id=request_id,
+            )
+            self._host_controller.kick_player(player_id, message=kick_message)
+            return
+        if resolution_status != "ok":
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=str(resolution_note or "Linked character update blocked pending DM item review."),
+                request_id=request_id,
+            )
+            return
         authoritative_payload, canonicalization_notes = self._canonicalize_linked_inventory_payload(
-            inventory_payload,
+            resolved_inventory_payload,
             existing_inventory=existing_inventory,
         )
         updated = self._apply_inventory_sync_to_linked_entities(
@@ -8288,7 +8332,7 @@ class DungeonAppletWidget(QWidget):
             ok=True,
             message=(
                 f"Synced inventory to {updated} linked entit(y/ies)"
-                if not canonicalization_notes
+                if not canonicalization_notes and not resolution_note
                 else f"Synced inventory to {updated} linked entit(y/ies) with authoritative item canonicalization"
             ),
             request_id=request_id,
@@ -8375,8 +8419,33 @@ class DungeonAppletWidget(QWidget):
                     return
 
         existing_inventory = item_data.get("linked_inventory") if isinstance(item_data.get("linked_inventory"), dict) else {}
+        resolution_status, resolved_inventory_payload, resolution_note = self._resolve_unknown_linked_items_for_host(
+            player_id=player_id,
+            character_id=character_id or str(item_data.get("linked_character_id") or ""),
+            sheet_name=sheet_name,
+            inventory_payload=inventory,
+            existing_inventory=existing_inventory,
+        )
+        if resolution_status == "kick":
+            kick_message = str(resolution_note or "Removed from host due to unapproved linked items.")
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=kick_message,
+                request_id=request_id,
+            )
+            self._host_controller.kick_player(player_id, message=kick_message)
+            return
+        if resolution_status != "ok":
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=str(resolution_note or "Linked character update blocked pending DM item review."),
+                request_id=request_id,
+            )
+            return
         normalized_inventory, canonicalization_notes = self._canonicalize_linked_inventory_payload(
-            inventory,
+            resolved_inventory_payload,
             existing_inventory=existing_inventory,
         )
         # Intentional: player-side character edits are allowed to overwrite the host copy
@@ -8431,7 +8500,11 @@ class DungeonAppletWidget(QWidget):
         self._host_controller.send_command_result(
             player_id,
             ok=True,
-            message="Linked character synced" if not canonicalization_notes else "Linked character synced with authoritative item canonicalization",
+            message=(
+                "Linked character synced"
+                if not canonicalization_notes and not resolution_note
+                else "Linked character synced with authoritative item canonicalization"
+            ),
             request_id=request_id,
             data=result_data or {},
         )
@@ -9717,6 +9790,43 @@ class DungeonAppletWidget(QWidget):
             serialized = str(normalized)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
+    def _active_linked_character_ids_in_collection(self) -> set[str]:
+        active_character_ids: set[str] = set()
+        for dungeon in self._dungeons:
+            state = dungeon.get("state")
+            if not isinstance(state, dict):
+                continue
+            items = state.get("items")
+            if not isinstance(items, list):
+                continue
+            for item_data in items:
+                if not isinstance(item_data, dict):
+                    continue
+                if item_data.get("type") != "entity":
+                    continue
+                character_id = str(item_data.get("linked_character_id") or "").strip()
+                if character_id:
+                    active_character_ids.add(character_id)
+        return active_character_ids
+
+    def _cleanup_unlinked_managed_character_artifacts(self) -> None:
+        try:
+            from player_sheets import cleanup_managed_linked_entries
+        except Exception:
+            return
+        active_character_ids = self._active_linked_character_ids_in_collection()
+        try:
+            removed = int(cleanup_managed_linked_entries(active_character_ids))
+        except Exception as exc:
+            self._append_server_log(
+                f"[WARN] Failed to clean up unlinked managed character artifacts: {exc}"
+            )
+            return
+        if removed > 0:
+            self._append_server_log(
+                f"[INFO] Removed {removed} unlinked managed character artifact(s)."
+            )
+
     def _linked_item_document_by_id(self, item_id: str) -> dict | None:
         clean_item_id = str(item_id or "").strip()
         if not clean_item_id:
@@ -9754,6 +9864,328 @@ class DungeonAppletWidget(QWidget):
             )
         cloned["format"] = ITEM_FILE_FORMAT
         return cloned
+
+    def _linked_item_review_signature(self, entries: list[dict]) -> str:
+        try:
+            serialized = json.dumps(
+                entries,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        except Exception:
+            serialized = str(entries)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _unknown_linked_item_entries(
+        self,
+        inventory_payload: dict,
+        *,
+        existing_inventory: dict | None = None,
+    ) -> list[dict]:
+        normalized = normalize_inventory_payload(
+            inventory_payload if isinstance(inventory_payload, dict) else {}
+        )
+        incoming_documents = _inventory_payload_item_documents(normalized)
+        existing_documents = _inventory_payload_item_documents(existing_inventory or {})
+        item_ids: list[str] = []
+        seen: set[str] = set()
+        inventory_rows = normalized.get("inventory")
+        if isinstance(inventory_rows, list):
+            for entry in inventory_rows:
+                item_id = _inventory_entry_item_id(entry)
+                if item_id and item_id not in seen:
+                    item_ids.append(item_id)
+                    seen.add(item_id)
+        equipment_rows = normalized.get("equipment")
+        if isinstance(equipment_rows, dict):
+            for value in equipment_rows.values():
+                item_id = _inventory_entry_item_id(value)
+                if item_id and item_id not in seen:
+                    item_ids.append(item_id)
+                    seen.add(item_id)
+
+        unresolved: list[dict] = []
+        for item_id in item_ids:
+            if item_id in existing_documents:
+                continue
+            library_document = self._linked_item_document_by_id(item_id)
+            if library_document is not None:
+                continue
+            incoming_document = incoming_documents.get(item_id)
+            payload = incoming_document.get("payload") if isinstance(incoming_document, dict) else {}
+            title = (
+                str(payload.get("title") or payload.get("name") or item_id).strip()
+                if isinstance(payload, dict)
+                else item_id
+            )
+            unresolved.append(
+                {
+                    "item_id": item_id,
+                    "title": title or item_id,
+                    "path": "",
+                    "item_document": dict(incoming_document) if isinstance(incoming_document, dict) else None,
+                }
+            )
+        return unresolved
+
+    def _remove_item_ids_from_inventory_payload(
+        self,
+        inventory_payload: dict,
+        *,
+        removed_item_ids: set[str],
+    ) -> dict:
+        normalized = normalize_inventory_payload(
+            inventory_payload if isinstance(inventory_payload, dict) else {}
+        )
+        remove_ids = {
+            str(item_id or "").strip()
+            for item_id in removed_item_ids
+            if str(item_id or "").strip()
+        }
+        if not remove_ids:
+            return normalized
+        inventory_rows = normalized.get("inventory")
+        if isinstance(inventory_rows, list):
+            normalized["inventory"] = [
+                dict(entry)
+                for entry in inventory_rows
+                if isinstance(entry, dict)
+                and str(entry.get("item_id") or "").strip() not in remove_ids
+            ]
+        equipment_rows = normalized.get("equipment")
+        if isinstance(equipment_rows, dict):
+            updated_equipment: dict[str, dict | None] = {}
+            for slot_id, value in equipment_rows.items():
+                item_id = _inventory_entry_item_id(value)
+                if item_id and item_id in remove_ids:
+                    updated_equipment[str(slot_id)] = None
+                elif isinstance(value, dict):
+                    updated_equipment[str(slot_id)] = dict(value)
+                else:
+                    updated_equipment[str(slot_id)] = None
+            normalized["equipment"] = updated_equipment
+        item_documents = _inventory_payload_item_documents(normalized)
+        normalized["item_documents"] = {
+            item_id: document
+            for item_id, document in item_documents.items()
+            if item_id not in remove_ids
+        }
+        return normalize_inventory_payload(normalized)
+
+    def _import_linked_item_documents_to_dm_library(self, entries: list[dict]) -> tuple[int, list[str]]:
+        imported = 0
+        messages: list[str] = []
+        library_root = items_dir()
+        library_root.mkdir(parents=True, exist_ok=True)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            item_id = str(entry.get("item_id") or "").strip()
+            item_document = entry.get("item_document")
+            if not item_id or not isinstance(item_document, dict):
+                messages.append(f"Unable to import '{item_id or 'item'}' because its item document is missing.")
+                continue
+            existing_document = self._linked_item_document_by_id(item_id)
+            if existing_document is not None:
+                continue
+            try:
+                digest = hashlib.sha256(
+                    json.dumps(
+                        item_document,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()[:16]
+            except Exception:
+                digest = _sanitize_filename(item_id, "item")
+            target_name = f"{_sanitize_filename(item_id, 'item')}_{digest}{ITEM_FILE_EXTENSION}"
+            target_path = library_root / target_name
+            try:
+                write_item_document(target_path, item_document)
+                imported += 1
+                self._loot_pool_item_path_by_id[item_id] = target_path
+            except Exception as exc:
+                messages.append(f"Failed to import '{item_id}': {exc}")
+        return imported, messages
+
+    def _review_unknown_linked_items(
+        self,
+        *,
+        player_id: str,
+        character_id: str,
+        sheet_name: str,
+        entries: list[dict],
+    ) -> dict:
+        signature = self._linked_item_review_signature(entries)
+        cache_key = f"{str(player_id or '').strip()}::{str(character_id or '').strip()}::{signature}"
+        cached = self._host_unknown_item_review_cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+        if _in_test_env():
+            decision = {
+                "action": "import",
+                "selected_item_ids": [
+                    str(entry.get("item_id") or "").strip()
+                    for entry in entries
+                    if str(entry.get("item_id") or "").strip()
+                ],
+                "signature": signature,
+            }
+            self._host_unknown_item_review_cache[cache_key] = dict(decision)
+            return decision
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Unknown Character Items")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        heading = QLabel(
+            f"'{sheet_name or character_id or 'Character'}' contains item definitions the DM has not approved yet.",
+            dialog,
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        info = QLabel(
+            "Select one or more items to import into the DM library or remove from the incoming character update. "
+            "You can also kick the player to reject the entire update.",
+            dialog,
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        list_widget = QListWidget(dialog)
+        list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        list_widget.setMouseTracking(True)
+        list_widget.viewport().setMouseTracking(True)
+        layout.addWidget(list_widget, 1)
+
+        for entry in entries:
+            row = QListWidgetItem(str(entry.get("title") or entry.get("item_id") or "Item"))
+            row.setData(Qt.ItemDataRole.UserRole, str(entry.get("item_id") or ""))
+            row.setData(Qt.ItemDataRole.UserRole + 1, dict(entry))
+            icon_pixmap = self._loot_pool_icon_for_entry(entry)
+            if isinstance(icon_pixmap, QPixmap) and not icon_pixmap.isNull():
+                row.setIcon(QIcon(icon_pixmap))
+            list_widget.addItem(row)
+        if list_widget.count() > 0:
+            list_widget.setCurrentRow(0)
+
+        buttons = QDialogButtonBox(parent=dialog)
+        import_button = buttons.addButton("Add Selected To DM Library", QDialogButtonBox.ButtonRole.AcceptRole)
+        remove_button = buttons.addButton("Remove Selected", QDialogButtonBox.ButtonRole.DestructiveRole)
+        kick_button = buttons.addButton("Kick Player", QDialogButtonBox.ButtonRole.RejectRole)
+        layout.addWidget(buttons)
+
+        decision: dict[str, object] = {"action": "blocked", "selected_item_ids": [], "signature": signature}
+
+        def _selected_item_ids() -> list[str]:
+            selected: list[str] = []
+            for item in list_widget.selectedItems():
+                item_id = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+                if item_id:
+                    selected.append(item_id)
+            return selected
+
+        def _sync_buttons() -> None:
+            has_selection = bool(list_widget.selectedItems())
+            import_button.setEnabled(has_selection)
+            remove_button.setEnabled(has_selection)
+
+        def _show_preview(item: QListWidgetItem | None) -> None:
+            if item is None:
+                self._hide_loot_pool_preview()
+                return
+            self._show_loot_pool_preview_for_item(item, QCursor.pos())
+
+        list_widget.itemSelectionChanged.connect(_sync_buttons)
+        list_widget.currentItemChanged.connect(lambda current, _previous: _show_preview(current))
+        _sync_buttons()
+
+        def _choose(action: str) -> None:
+            decision["action"] = action
+            decision["selected_item_ids"] = _selected_item_ids()
+            dialog.accept()
+
+        import_button.clicked.connect(lambda: _choose("import"))
+        remove_button.clicked.connect(lambda: _choose("remove"))
+        kick_button.clicked.connect(lambda: _choose("kick"))
+        dialog.exec()
+        self._hide_loot_pool_preview()
+
+        resolved = {
+            "action": str(decision.get("action") or "blocked"),
+            "selected_item_ids": [
+                str(item_id or "").strip()
+                for item_id in decision.get("selected_item_ids", [])
+                if str(item_id or "").strip()
+            ],
+            "signature": signature,
+        }
+        if resolved["action"] in {"remove", "kick"}:
+            self._host_unknown_item_review_cache[cache_key] = dict(resolved)
+        return resolved
+
+    def _resolve_unknown_linked_items_for_host(
+        self,
+        *,
+        player_id: str,
+        character_id: str,
+        sheet_name: str,
+        inventory_payload: dict,
+        existing_inventory: dict | None = None,
+    ) -> tuple[str, dict, str]:
+        working_payload = normalize_inventory_payload(
+            inventory_payload if isinstance(inventory_payload, dict) else {}
+        )
+        status_note = ""
+        while True:
+            unresolved_entries = self._unknown_linked_item_entries(
+                working_payload,
+                existing_inventory=existing_inventory,
+            )
+            if not unresolved_entries:
+                return "ok", working_payload, status_note
+            decision = self._review_unknown_linked_items(
+                player_id=player_id,
+                character_id=character_id,
+                sheet_name=sheet_name,
+                entries=unresolved_entries,
+            )
+            action = str(decision.get("action") or "blocked").strip().lower()
+            selected_item_ids = {
+                str(item_id or "").strip()
+                for item_id in decision.get("selected_item_ids", [])
+                if str(item_id or "").strip()
+            }
+            if action == "kick":
+                return "kick", working_payload, "DM rejected unknown linked items and removed the player."
+            if action == "remove" and selected_item_ids:
+                working_payload = self._remove_item_ids_from_inventory_payload(
+                    working_payload,
+                    removed_item_ids=selected_item_ids,
+                )
+                status_note = "Removed unapproved linked items from the incoming character update."
+                continue
+            if action == "import" and selected_item_ids:
+                selected_entries = [
+                    entry
+                    for entry in unresolved_entries
+                    if str(entry.get("item_id") or "").strip() in selected_item_ids
+                ]
+                imported_count, import_messages = self._import_linked_item_documents_to_dm_library(selected_entries)
+                if import_messages:
+                    self._append_server_log(f"[WARN] {' '.join(import_messages)}")
+                if imported_count <= 0:
+                    return "blocked", working_payload, "Unknown linked items are still unresolved."
+                status_note = "Imported unknown linked items into the DM library."
+                continue
+            return "blocked", working_payload, "Unknown linked items are still unresolved."
 
     def _canonicalize_linked_inventory_payload(
         self,
@@ -9818,22 +10250,10 @@ class DungeonAppletWidget(QWidget):
                         f"Missing authoritative item document for linked item '{item_id}'."
                     )
             elif incoming_document is not None:
-                try:
-                    incoming_fp = hashlib.sha256(
-                        json.dumps(
-                            incoming_document,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                    ).hexdigest()
-                except Exception:
-                    incoming_fp = ""
-                matched = authoritative_by_fingerprint.get(incoming_fp) if incoming_fp else None
-                if matched is not None:
-                    chosen_item_id, chosen_document = matched
-                else:
-                    chosen_document = incoming_document
+                notes.append(
+                    f"Missing authoritative item document for linked item '{item_id}'."
+                )
+                continue
             else:
                 notes.append(
                     f"Missing authoritative item document for linked item '{item_id}'."
@@ -10607,6 +11027,7 @@ class DungeonAppletWidget(QWidget):
             should_push_overrides = bool(self._pending_join_character_override_sync)
             self._pending_join_character_override_sync = False
             _sync_owned_sheet_inventories_from_snapshot()
+            self._cleanup_unlinked_managed_character_artifacts()
             if should_push_overrides and not conflicts_detected:
                 try:
                     sent_count = int(self._push_local_character_overrides_to_host())

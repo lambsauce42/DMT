@@ -68,6 +68,9 @@ class HostSessionController(QObject):
         }
         self.server.send_to_player(player_id, payload)
 
+    def kick_player(self, player_id: str, *, message: str) -> bool:
+        return bool(self.server.disconnect_player(player_id, message=message))
+
     def broadcast_chat(self, *, actor_name: str, text: str, system: bool = False) -> None:
         packet = {
             "type": "chat",
@@ -180,6 +183,7 @@ class ClientSessionController(QObject):
         self._connect_persistent_player_id: str = ""
         self._manual_disconnect = False
         self._reconnect_attempt = 0
+        self._terminal_disconnect_message = ""
 
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setSingleShot(False)
@@ -213,6 +217,7 @@ class ClientSessionController(QObject):
         self._connect_name = str(name or "").strip()
         self._connect_persistent_player_id = str(persistent_player_id or "").strip()
         self._manual_disconnect = False
+        self._terminal_disconnect_message = ""
         self._reconnect_timer.stop()
         self.client.connect_to_host(
             host,
@@ -223,6 +228,7 @@ class ClientSessionController(QObject):
 
     def disconnect(self) -> None:
         self._manual_disconnect = True
+        self._terminal_disconnect_message = ""
         self._reconnect_timer.stop()
         self._heartbeat_timer.stop()
         self._heartbeat_timeout_timer.stop()
@@ -255,6 +261,7 @@ class ClientSessionController(QObject):
 
     def _on_connected(self) -> None:
         self._reconnect_attempt = 0
+        self._terminal_disconnect_message = ""
         self._heartbeat_timer.start()
         self._reset_heartbeat_timeout()
         self.connected.emit()
@@ -322,6 +329,13 @@ class ClientSessionController(QObject):
         if msg_type == "error":
             self.log_line.emit(f"[ERROR] {message.get('message', 'unknown error')}")
             return
+        if msg_type == "kicked":
+            reason = str(message.get("message", "")).strip() or "Removed from host."
+            self._manual_disconnect = True
+            self._terminal_disconnect_message = reason
+            self.log_line.emit(f"[ERROR] {reason}")
+            self.client.disconnect()
+            return
 
     def _send_heartbeat(self) -> None:
         if not self.client.is_connected():
@@ -367,3 +381,8 @@ class ClientSessionController(QObject):
             self._connect_name,
             persistent_player_id=self._connect_persistent_player_id,
         )
+
+    def consume_terminal_disconnect_message(self) -> str:
+        message = str(self._terminal_disconnect_message or "").strip()
+        self._terminal_disconnect_message = ""
+        return message

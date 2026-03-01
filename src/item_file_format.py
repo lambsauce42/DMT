@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -212,28 +213,55 @@ def load_item_document(path: Path) -> Optional[dict]:
     if isinstance(info, dict):
         file_format = str(info.get("format") or "").strip().lower()
         if file_format != ITEM_FILE_FORMAT:
-            return None
-        payload = info.get("payload")
-        if not isinstance(payload, dict):
-            return None
-        normalized_payload = ensure_item_payload_id(payload, preserve_existing=True)
-        document: dict[str, object] = {
-            "format": ITEM_FILE_FORMAT,
-            "payload": normalized_payload,
-        }
-        icon_asset_name = str(info.get("icon_asset_name") or "").strip()
-        if icon_asset_name:
-            raw = read_dmt_package_asset(path, icon_asset_name)
-            if raw:
-                document["icon_asset_name"] = icon_asset_name
-                document["assets"] = {
-                    icon_asset_name: {
-                        "encoding": "base64",
-                        "data": base64.b64encode(raw).decode("ascii"),
+            info = None
+        else:
+            payload = info.get("payload")
+            if not isinstance(payload, dict):
+                return None
+            normalized_payload = ensure_item_payload_id(payload, preserve_existing=True)
+            document: dict[str, object] = {
+                "format": ITEM_FILE_FORMAT,
+                "payload": normalized_payload,
+            }
+            icon_asset_name = str(info.get("icon_asset_name") or "").strip()
+            if icon_asset_name:
+                raw = read_dmt_package_asset(path, icon_asset_name)
+                if raw:
+                    document["icon_asset_name"] = icon_asset_name
+                    document["assets"] = {
+                        icon_asset_name: {
+                            "encoding": "base64",
+                            "data": base64.b64encode(raw).decode("ascii"),
+                        }
                     }
-                }
-        return document
-    return None
+            return document
+    try:
+        raw_info = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw_info, dict):
+        return None
+    file_format = str(raw_info.get("format") or "").strip().lower()
+    if file_format != ITEM_FILE_FORMAT:
+        return None
+    payload = raw_info.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    print(
+        f"[WARN] Loading legacy plain-JSON item file '{path}'. Re-save to normalize it.",
+        file=sys.stderr,
+    )
+    normalized_payload = ensure_item_payload_id(payload, preserve_existing=True)
+    document = {
+        "format": ITEM_FILE_FORMAT,
+        "payload": normalized_payload,
+    }
+    icon_asset_name = str(raw_info.get("icon_asset_name") or "").strip()
+    assets = raw_info.get("assets")
+    if icon_asset_name and isinstance(assets, dict):
+        document["icon_asset_name"] = icon_asset_name
+        document["assets"] = assets
+    return document
 
 
 def _materialize_icon_bytes(raw: bytes, asset_name: str) -> Optional[str]:
