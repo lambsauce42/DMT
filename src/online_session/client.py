@@ -91,7 +91,12 @@ class OnlineSessionClient(QObject):
         if self._socket.state() != QAbstractSocket.SocketState.ConnectedState:
             self.log_line.emit("[WARN] Cannot send while disconnected")
             return
-        self._socket.write(encode_message(message))
+        try:
+            encoded = encode_message(message)
+        except Exception as exc:
+            self.log_line.emit(f"[ERROR] Failed to encode outbound message: {exc}")
+            return
+        self._socket.write(encoded)
 
     def _on_connected(self) -> None:
         self.connected_to_server.emit()

@@ -81,6 +81,42 @@ def test_snapshot_is_ignored_outside_player_mode(dungeon_widget):
     assert dungeon_widget._dungeons[0]["id"] == local["id"]
 
 
+def test_player_actions_remain_blocked_until_first_snapshot_after_hello_ack(dungeon_widget):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_name = "Mira"
+
+    dungeon_widget._on_client_hello_ack("player-1")
+
+    assert dungeon_widget._player_connection_ready is False
+    assert dungeon_widget._awaiting_player_snapshot is True
+    assert dungeon_widget._player_network_actions_available() is False
+
+    snapshot = {
+        "collection_name": "Remote Collection",
+        "active_dungeon_id": "d-1",
+        "players_dungeon_id": "d-1",
+        "dungeons": [
+            {
+                "id": "d-1",
+                "name": "Players",
+                "state": {"items": [], "fog": {"path": []}},
+            }
+        ],
+        "players": {"player-1": "Mira"},
+        "loot_pool": [],
+        "initiative_state": {
+            "active": False,
+            "collapsed": False,
+            "player_entries": {},
+            "entity_entries": {},
+        },
+    }
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert dungeon_widget._player_connection_ready is True
+    assert dungeon_widget._awaiting_player_snapshot is False
+
+
 def test_first_player_snapshot_runs_pending_override_sync(dungeon_widget, monkeypatch):
     calls = []
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER

@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PySide6.QtNetwork import QAbstractSocket
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -39,3 +40,31 @@ def test_disconnect_resets_decoder_buffer_for_next_connection_frame():
     except Exception as exc:  # pragma: no cover - this is the bug evidence path
         pytest.fail(f"decoder leaked stale bytes across disconnect boundary: {exc}")
     assert frames == [hello_ack]
+
+
+def test_send_handles_oversized_message_encoding_failure_without_exception(monkeypatch):
+    class _SocketStub:
+        def __init__(self):
+            self.writes = []
+
+        def state(self):
+            return QAbstractSocket.SocketState.ConnectedState
+
+        def write(self, payload):
+            self.writes.append(payload)
+            return len(payload)
+
+    client = OnlineSessionClient()
+    logs = []
+    client.log_line.connect(logs.append)
+    client._socket = _SocketStub()
+
+    def _raise_too_large(_message):
+        raise ValueError("message too large")
+
+    monkeypatch.setattr("online_session.client.encode_message", _raise_too_large)
+
+    client.send({"type": "chat", "text": "x"})
+
+    assert client._socket.writes == []
+    assert any("Failed to encode outbound message" in line for line in logs)

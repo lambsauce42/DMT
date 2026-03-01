@@ -63,6 +63,20 @@ def test_build_document_with_embedded_icon_round_trip(tmp_path: Path) -> None:
     assert embedded_icon_path.suffix == ".png"
 
 
+def test_build_item_document_preserves_existing_item_id() -> None:
+    payload = {
+        "item_id": "remote-item-fixed",
+        "title": "Remote Item",
+        "rarity": "common",
+        "level": 1,
+    }
+    document = build_item_document(payload, None)
+
+    assert isinstance(document, dict)
+    assert isinstance(document.get("payload"), dict)
+    assert document["payload"]["item_id"] == "remote-item-fixed"
+
+
 def test_load_item_document_rejects_legacy_raw_json_payload(tmp_path: Path) -> None:
     legacy_document = {
         "format": "dmtitem.v1",

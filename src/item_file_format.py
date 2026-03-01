@@ -143,7 +143,7 @@ def _item_document_fingerprint(document: dict) -> str:
 
 
 def build_item_document(payload: dict, icon_source: Optional[str]) -> dict:
-    normalized_payload = ensure_item_payload_id(payload, preserve_existing=False)
+    normalized_payload = ensure_item_payload_id(payload, preserve_existing=True)
     document: dict[str, object] = {
         "format": ITEM_FILE_FORMAT,
         "payload": normalized_payload,

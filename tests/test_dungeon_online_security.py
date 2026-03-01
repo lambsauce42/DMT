@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QPointF
 from PySide6.QtWidgets import QApplication
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -17,7 +18,9 @@ from dungeon_applet import (
     ONLINE_MODE_LOCAL_DM,
     ONLINE_MODE_PLAYER,
 )
+from dungeon_items import EntityItem
 from save_paths import dnd_saves_dir
+from online_session.controllers import ClientSessionController
 
 
 @pytest.fixture
@@ -661,3 +664,22 @@ def test_player_disconnect_releases_loot_claim_reservations(dungeon_widget):
 
     assert dungeon_widget._loot_claim_reservations == {}
     assert dungeon_widget._loot_claim_entry_reservations == {}
+
+
+def test_player_disconnected_cannot_undo_local_scene_changes(dungeon_widget):
+    dungeon_widget.canvas._place_entity(QPointF(32, 32))
+    entity_count_before = len(
+        [item for item in dungeon_widget.canvas.scene().items() if isinstance(item, EntityItem)]
+    )
+    assert entity_count_before >= 1
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._client_controller = ClientSessionController(dungeon_widget)
+    dungeon_widget._player_connection_ready = False
+    dungeon_widget._apply_online_permissions()
+
+    dungeon_widget.canvas.undo()
+    entity_count_after = len(
+        [item for item in dungeon_widget.canvas.scene().items() if isinstance(item, EntityItem)]
+    )
+    assert entity_count_after == entity_count_before

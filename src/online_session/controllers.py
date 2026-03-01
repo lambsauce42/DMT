@@ -233,12 +233,12 @@ class ClientSessionController(QObject):
     def send_chat(self, text: str) -> None:
         self.client.send({"type": "chat", "text": text})
 
-    def send_command(self, action: str, payload: dict, request_id: Optional[str] = None) -> None:
+    def send_command(self, action: str, payload: dict, request_id: Optional[str] = None) -> bool:
         if request_id is None:
             request_id = uuid.uuid4().hex
         if not self.client.is_connected():
             self.log_line.emit(f"[WARN] Dropped '{action}' command while disconnected")
-            return
+            return False
         self.client.send(
             {
                 "type": "command",
@@ -247,6 +247,7 @@ class ClientSessionController(QObject):
                 "request_id": request_id,
             }
         )
+        return True
 
     def request_snapshot(self) -> None:
         if self.client.is_connected():
