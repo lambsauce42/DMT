@@ -1115,7 +1115,7 @@ def _ensure_entry_sheet_id(entry: PlayerSheetEntry) -> str:
     current = str(getattr(entry, "sheet_id", "") or "").strip()
     if current:
         return current
-    stable_id = generate_named_object_id(str(getattr(entry, "name", "") or "character"), "character")
+    stable_id = sanitize_filename(str(getattr(entry, "name", "") or "character_sheet"))
     entry.sheet_id = stable_id
     return stable_id
 
@@ -1124,10 +1124,6 @@ def _ensure_entry_character_id(entry: PlayerSheetEntry) -> str:
     current = str(getattr(entry, "character_id", "") or "").strip()
     if current:
         return current
-    sheet_id = str(getattr(entry, "sheet_id", "") or "").strip()
-    if sheet_id:
-        entry.character_id = sheet_id
-        return entry.character_id
     entry.character_id = generate_named_object_id(
         str(getattr(entry, "name", "") or "character"),
         "character",
@@ -1577,7 +1573,7 @@ def load_entries_from_storage() -> List[PlayerSheetEntry]:
                         _apply_entry_meta(entry, read_character_meta(archive_candidate))
                 existing_sheet_id = str(entry.sheet_id or "").strip()
                 if not existing_sheet_id or existing_sheet_id in seen_raw_sheet_ids:
-                    entry.sheet_id = generate_named_object_id(entry.name or "character", "character")
+                    entry.sheet_id = sanitize_filename(entry.name or "character_sheet")
                     entry.archive_path = str(character_sheet_archive_path(entry.sheet_id))
                     migrated_legacy_entries = True
                 seen_raw_sheet_ids.add(str(entry.sheet_id or "").strip())
@@ -1648,17 +1644,48 @@ def list_character_link_targets() -> List[PlayerSheetEntry]:
     return load_entries_from_storage()
 
 
+def entry_for_character_id(character_id: str) -> Optional[PlayerSheetEntry]:
+    target = str(character_id or "").strip()
+    if not target:
+        return None
+    for entry in load_entries_from_storage():
+        if character_id_for_entry(entry) == target:
+            return entry
+    return None
+
+
+def character_id_for_sheet_id(sheet_id: str) -> Optional[str]:
+    target = str(sheet_id or "").strip()
+    if not target:
+        return None
+    for entry in load_entries_from_storage():
+        if sheet_id_for_entry(entry) == target:
+            return character_id_for_entry(entry) or None
+    return None
+
+
 def inventory_payload_for_sheet_id(sheet_id: str) -> Optional[dict]:
     target = str(sheet_id or "").strip()
     if not target:
         return None
-    archive_path = character_sheet_archive_path(target)
+    for entry in load_entries_from_storage():
+        if sheet_id_for_entry(entry) != target:
+            continue
+        archive_path = _entry_archive_path(entry)
+        if archive_path.exists():
+            return read_character_inventory(archive_path)
+        return _entry_inventory_payload(entry)
+    return None
+
+
+def inventory_payload_for_character_id(character_id: str) -> Optional[dict]:
+    entry = entry_for_character_id(character_id)
+    if entry is None:
+        return None
+    archive_path = _entry_archive_path(entry)
     if archive_path.exists():
         return read_character_inventory(archive_path)
-    for entry in load_entries_from_storage():
-        if sheet_id_for_entry(entry) == target:
-            return _entry_inventory_payload(entry)
-    return None
+    return _entry_inventory_payload(entry)
 
 
 def ensure_network_linked_sheet_entry(
@@ -1712,6 +1739,58 @@ def ensure_network_linked_sheet_entry(
     return True, "Character synchronized.", payload
 
 
+def ensure_network_linked_character_entry(
+    character_id: str,
+    sheet_name: str,
+    inventory_payload: dict,
+    *,
+    emit_event: bool = True,
+) -> tuple[bool, str, Optional[dict]]:
+    target = str(character_id or "").strip()
+    if not target:
+        return False, "Missing character selection.", None
+
+    entries = load_entries_from_storage()
+    target_entry = next(
+        (entry for entry in entries if character_id_for_entry(entry) == target),
+        None,
+    )
+
+    if target_entry is None:
+        display_name = str(sheet_name or "").strip() or target
+        storage_name = sanitize_filename(display_name)
+        archive_path = character_sheet_archive_path(storage_name)
+        if archive_path.exists():
+            return False, "A local character with that name already exists.", None
+        pdf_path = character_sheet_pdf_path(storage_name)
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        if not pdf_path.exists():
+            template_path = default_sheet_pdf_path()
+            if template_path and Path(template_path).exists():
+                try:
+                    pdf_path.write_bytes(Path(template_path).read_bytes())
+                except Exception:
+                    logger.exception("Failed to copy default character sheet template for %s", target)
+            if not pdf_path.exists():
+                pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        target_entry = PlayerSheetEntry(
+            name=display_name,
+            pdf_path=str(pdf_path),
+            archive_path=str(archive_path),
+            sheet_id=storage_name,
+            character_id=target,
+        )
+        entries.append(target_entry)
+
+    _apply_inventory_payload_to_entry(target_entry, inventory_payload)
+    sync_entry_archive(target_entry)
+    save_entries_to_storage(entries)
+    payload = _entry_inventory_payload(target_entry)
+    if emit_event:
+        PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id_for_entry(target_entry), payload)
+    return True, "Character synchronized.", payload
+
+
 def set_inventory_payload_for_sheet_id(
     sheet_id: str,
     inventory_payload: dict,
@@ -1737,6 +1816,32 @@ def set_inventory_payload_for_sheet_id(
     payload = _entry_inventory_payload(target_entry)
     if emit_event:
         PLAYER_SHEET_EVENTS.inventorySaved.emit(target, payload)
+    return True, "Inventory updated.", payload
+
+
+def set_inventory_payload_for_character_id(
+    character_id: str,
+    inventory_payload: dict,
+    *,
+    emit_event: bool = True,
+) -> tuple[bool, str, Optional[dict]]:
+    target = str(character_id or "").strip()
+    if not target:
+        return False, "Missing character selection.", None
+    entries = load_entries_from_storage()
+    target_entry = next(
+        (entry for entry in entries if character_id_for_entry(entry) == target),
+        None,
+    )
+    if target_entry is None:
+        return False, "Character not found.", None
+
+    _apply_inventory_payload_to_entry(target_entry, inventory_payload)
+    sync_entry_archive(target_entry)
+    save_entries_to_storage(entries)
+    payload = _entry_inventory_payload(target_entry)
+    if emit_event:
+        PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id_for_entry(target_entry), payload)
     return True, "Inventory updated.", payload
 
 
@@ -1769,6 +1874,37 @@ def apply_claim_to_sheet(
     save_entries_to_storage(entries)
     payload = _entry_inventory_payload(target_entry)
     PLAYER_SHEET_EVENTS.inventorySaved.emit(target, payload)
+    return True, "Claim applied.", payload
+
+
+def apply_claim_to_character(
+    character_id: str,
+    *,
+    item_ids: list[str],
+    note_lines: list[str],
+) -> tuple[bool, str, Optional[dict]]:
+    target = str(character_id or "").strip()
+    if not target:
+        return False, "Missing character selection.", None
+    entries = load_entries_from_storage()
+    target_entry = next(
+        (entry for entry in entries if character_id_for_entry(entry) == target),
+        None,
+    )
+    if target_entry is None:
+        return False, "Character not found.", None
+
+    clean_items = [str(item).strip() for item in item_ids if str(item).strip()]
+    clean_notes = [str(line).strip() for line in note_lines if str(line).strip()]
+    if clean_items:
+        target_entry.inventory.extend(clean_items)
+    if clean_notes:
+        existing = [line.strip() for line in str(target_entry.inventory_notes or "").splitlines() if line.strip()]
+        target_entry.inventory_notes = "\n".join(existing + clean_notes)
+    sync_entry_archive(target_entry)
+    save_entries_to_storage(entries)
+    payload = _entry_inventory_payload(target_entry)
+    PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id_for_entry(target_entry), payload)
     return True, "Claim applied.", payload
 
 
@@ -2397,8 +2533,8 @@ class PlayerSheetDialog(QDialog):
             if self._original_entry is not None
             else ""
         )
-        sheet_id = original_sheet_id or generate_named_object_id(name, "character")
-        character_id = original_character_id or sheet_id
+        sheet_id = sanitize_filename(name)
+        character_id = original_character_id or generate_named_object_id(name, "character")
         archive_path = character_sheet_archive_path(sheet_id)
         editing_same_sheet = bool(self._original_entry) and sheet_id == original_sheet_id
         if archive_path.exists() and not editing_same_sheet:

@@ -133,6 +133,7 @@ def _resolve_icon_path(path: Optional[str]) -> Optional[str]:
 @dataclass
 class ItemCardSpec:
     title: str
+    item_id: str = ""
     rarity: str = "uncommon"
     classes: List[str] = field(default_factory=list)  # Empty list means "All Classes"
     stats: List[Tuple[str, str]] = field(default_factory=list)
@@ -1126,6 +1127,7 @@ def render_item_card(
 def spec_to_dict(spec: ItemCardSpec) -> Dict[str, object]:
     return {
         "title": spec.title,
+        "item_id": spec.item_id,
         "rarity": spec.rarity,
         "classes": spec.classes,
         "stats": [[val, name] for val, name in spec.stats],
@@ -1175,6 +1177,7 @@ def spec_from_dict(data: Dict[str, object]) -> ItemCardSpec:
         level = 1
     return ItemCardSpec(
         title=str(data.get("title", "Untitled Item")),
+        item_id=str(data.get("item_id", "") or "").strip(),
         rarity=str(data.get("rarity", "uncommon")),
         classes=classes,
         stats=stats,

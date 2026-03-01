@@ -8986,45 +8986,45 @@ class DungeonAppletWidget(QWidget):
 
     def _sync_local_sheet_inventory_from_host(
         self,
-        sheet_id: str,
+        character_id: str,
         inventory_payload: dict,
         *,
         sheet_name: str = "",
         refresh_entities: bool = True,
     ) -> tuple[bool, str]:
-        clean_sheet = str(sheet_id or "").strip()
-        if not clean_sheet:
-            return False, "Missing sheet id for inventory sync."
+        clean_character = str(character_id or "").strip()
+        if not clean_character:
+            return False, "Missing character id for inventory sync."
         payload = normalize_inventory_payload(
             inventory_payload if isinstance(inventory_payload, dict) else {}
         )
         fingerprint = self._inventory_payload_fingerprint(payload)
-        if self._online_inventory_sync_fingerprints.get(clean_sheet) == fingerprint:
+        if self._online_inventory_sync_fingerprints.get(clean_character) == fingerprint:
             return True, "Inventory already synchronized."
         try:
             from player_sheets import (
-                ensure_network_linked_sheet_entry,
-                set_inventory_payload_for_sheet_id,
+                ensure_network_linked_character_entry,
+                set_inventory_payload_for_character_id,
             )
         except Exception:
             return False, "Player sheets integration unavailable."
         self._suppress_external_inventory_forward = True
         try:
-            ok, message, saved_payload = set_inventory_payload_for_sheet_id(
-                clean_sheet,
+            ok, message, saved_payload = set_inventory_payload_for_character_id(
+                clean_character,
                 payload,
                 emit_event=True,
             )
             if not ok and str(message or "").strip().lower().startswith("character not found"):
-                ensure_ok, ensure_message, _ensure_payload = ensure_network_linked_sheet_entry(
-                    clean_sheet,
-                    str(sheet_name or clean_sheet),
+                ensure_ok, ensure_message, _ensure_payload = ensure_network_linked_character_entry(
+                    clean_character,
+                    str(sheet_name or clean_character),
                     payload,
                     emit_event=False,
                 )
                 if ensure_ok:
-                    ok, message, saved_payload = set_inventory_payload_for_sheet_id(
-                        clean_sheet,
+                    ok, message, saved_payload = set_inventory_payload_for_character_id(
+                        clean_character,
                         payload,
                         emit_event=True,
                     )
@@ -9035,34 +9035,34 @@ class DungeonAppletWidget(QWidget):
         if not ok:
             return False, str(message or "Unable to synchronize inventory.")
         saved = saved_payload if isinstance(saved_payload, dict) else dict(payload)
-        self._online_inventory_sync_fingerprints[clean_sheet] = self._inventory_payload_fingerprint(saved)
+        self._online_inventory_sync_fingerprints[clean_character] = self._inventory_payload_fingerprint(saved)
         if refresh_entities:
             self._apply_inventory_sync_to_linked_entities(
                 owner_player_id=str(self._local_player_id or ""),
-                sheet_id=clean_sheet,
+                character_id=clean_character,
                 inventory_payload=saved,
             )
         return True, "Inventory synchronized."
 
-    def _local_character_sheet_exists(self, sheet_id: str) -> bool:
-        clean_sheet = str(sheet_id or "").strip()
-        if not clean_sheet:
+    def _local_character_sheet_exists(self, character_id: str) -> bool:
+        clean_character = str(character_id or "").strip()
+        if not clean_character:
             return False
         try:
-            from player_sheets import list_character_link_targets, sheet_id_for_entry
+            from player_sheets import character_id_for_entry, list_character_link_targets
         except Exception:
             return False
         for entry in list_character_link_targets():
             try:
-                if sheet_id_for_entry(entry) == clean_sheet:
+                if character_id_for_entry(entry) == clean_character:
                     return True
             except Exception:
                 continue
         return False
 
-    def _resolve_local_sheet_sync_payload(self, sheet_id: str) -> dict | None:
-        clean_sheet = str(sheet_id or "").strip()
-        if not clean_sheet:
+    def _resolve_local_sheet_sync_payload(self, character_id: str) -> dict | None:
+        clean_character = str(character_id or "").strip()
+        if not clean_character:
             return None
         try:
             from player_sheets import (
@@ -9080,7 +9080,7 @@ class DungeonAppletWidget(QWidget):
         target_entry = None
         for entry in list_character_link_targets():
             try:
-                if sheet_id_for_entry(entry) == clean_sheet:
+                if character_id_for_entry(entry) == clean_character:
                     target_entry = entry
                     break
             except Exception:
@@ -9093,16 +9093,17 @@ class DungeonAppletWidget(QWidget):
         except Exception:
             pass
 
-        sheet_name = str(getattr(target_entry, "name", "") or clean_sheet).strip() or clean_sheet
-        linked_inventory = normalize_inventory_payload(inventory_payload_for_sheet_id(clean_sheet) or {})
+        sheet_id = str(sheet_id_for_entry(target_entry) or "").strip()
+        sheet_name = str(getattr(target_entry, "name", "") or clean_character).strip() or clean_character
+        linked_inventory = normalize_inventory_payload(inventory_payload_for_sheet_id(sheet_id) or {})
         pdf_path_text = str(getattr(target_entry, "pdf_path", "") or "").strip()
-        pdf_candidate = Path(pdf_path_text) if pdf_path_text else character_sheet_pdf_path(clean_sheet)
+        pdf_candidate = Path(pdf_path_text) if pdf_path_text else character_sheet_pdf_path(sheet_id)
         archive_path_text = str(getattr(target_entry, "archive_path", "") or "").strip()
         archive_candidate = (
-            Path(archive_path_text) if archive_path_text else character_sheet_archive_path(clean_sheet)
+            Path(archive_path_text) if archive_path_text else character_sheet_archive_path(sheet_id)
         )
         if pdf_candidate.suffix.lower() == ".dmtchar" or not pdf_candidate.exists():
-            extracted_path = character_sheet_pdf_path(clean_sheet)
+            extracted_path = character_sheet_pdf_path(sheet_id)
             if archive_candidate.exists() and extract_character_pdf(archive_candidate, extracted_path):
                 pdf_candidate = extracted_path
             elif extracted_path.exists():
@@ -9117,16 +9118,16 @@ class DungeonAppletWidget(QWidget):
             stats["name"] = sheet_name
 
         return {
-            "sheet_id": clean_sheet,
+            "sheet_id": sheet_id,
             "sheet_name": sheet_name,
             "character_id": str(character_id_for_entry(target_entry) or "").strip()
-            or self._character_id_for_sheet(clean_sheet, sheet_name=sheet_name),
+            or self._character_id_for_sheet(sheet_id, sheet_name=sheet_name),
             "inventory": linked_inventory,
             "stats": stats,
         }
 
-    def _linked_character_conflict_key(self, dungeon_id: str, entity_id: str, sheet_id: str) -> str:
-        return f"{str(dungeon_id or '').strip()}::{str(entity_id or '').strip()}::{str(sheet_id or '').strip()}"
+    def _linked_character_conflict_key(self, dungeon_id: str, entity_id: str, character_id: str) -> str:
+        return f"{str(dungeon_id or '').strip()}::{str(entity_id or '').strip()}::{str(character_id or '').strip()}"
 
     def _prompt_linked_character_conflict(self, conflict: dict, *, force: bool = False) -> None:
         if self._online_mode != ONLINE_MODE_PLAYER:
@@ -9135,15 +9136,16 @@ class DungeonAppletWidget(QWidget):
             return
         dungeon_id = str(conflict.get("dungeon_id") or "").strip()
         entity_id = str(conflict.get("entity_id") or "").strip()
+        character_id = str(conflict.get("character_id") or "").strip()
         sheet_id = str(conflict.get("sheet_id") or "").strip()
-        sheet_name = str(conflict.get("sheet_name") or sheet_id).strip() or sheet_id
+        sheet_name = str(conflict.get("sheet_name") or sheet_id or character_id).strip() or character_id
         host_inventory = normalize_inventory_payload(conflict.get("inventory") or {})
-        if not entity_id or not sheet_id:
+        if not entity_id or not character_id:
             return
         conflict_key = str(conflict.get("conflict_key") or "").strip() or self._linked_character_conflict_key(
             dungeon_id,
             entity_id,
-            sheet_id,
+            character_id,
         )
         conflict = dict(conflict)
         conflict["conflict_key"] = conflict_key
@@ -9169,7 +9171,7 @@ class DungeonAppletWidget(QWidget):
             dialog.setWindowTitle("Linked Character Conflict")
             dialog.setText(
                 f"The DM linked '{sheet_name}' to one of your assigned entities, "
-                "but you already have a local character with this sheet id."
+                "but you already have a local character with this character id."
             )
             dialog.setInformativeText(
                 "Choose whether to replace your local character with the DM version, "
@@ -9184,7 +9186,7 @@ class DungeonAppletWidget(QWidget):
 
             if clicked == replace_btn:
                 ok, message = self._sync_local_sheet_inventory_from_host(
-                    sheet_id,
+                    character_id,
                     host_inventory,
                     sheet_name=sheet_name,
                     refresh_entities=True,
@@ -9198,7 +9200,7 @@ class DungeonAppletWidget(QWidget):
                 continue
 
             if clicked == overwrite_btn:
-                local_payload = self._resolve_local_sheet_sync_payload(sheet_id)
+                local_payload = self._resolve_local_sheet_sync_payload(character_id)
                 if not isinstance(local_payload, dict):
                     QMessageBox.warning(
                         self,
@@ -9214,6 +9216,7 @@ class DungeonAppletWidget(QWidget):
                         "mode": "overwrite_dm",
                         "conflict_key": conflict_key,
                         "entity_id": entity_id,
+                        "character_id": character_id,
                         "sheet_id": sheet_id,
                         "sheet_name": sheet_name,
                         "dungeon_id": dungeon_id,
@@ -10751,11 +10754,11 @@ class DungeonAppletWidget(QWidget):
         self,
         *,
         owner_player_id: str,
-        sheet_id: str,
+        character_id: str,
         inventory_payload: dict,
     ) -> int:
-        clean_sheet = str(sheet_id or "").strip()
-        if not clean_sheet:
+        clean_character = str(character_id or "").strip()
+        if not clean_character:
             return 0
         normalized = normalize_inventory_payload(inventory_payload if isinstance(inventory_payload, dict) else {})
         owner_filter = str(owner_player_id or "").strip()
@@ -10773,7 +10776,7 @@ class DungeonAppletWidget(QWidget):
                     continue
                 if item_data.get("type") != "entity":
                     continue
-                if str(item_data.get("linked_sheet_id") or "") != clean_sheet:
+                if str(item_data.get("linked_character_id") or "") != clean_character:
                     continue
                 if owner_filter and str(item_data.get("owner_player_id") or "") != owner_filter:
                     continue
@@ -10788,7 +10791,7 @@ class DungeonAppletWidget(QWidget):
         for item in self.canvas.scene().items():
             if not isinstance(item, EntityItem):
                 continue
-            if str(item.data(ROLE_LINKED_SHEET_ID) or "") != clean_sheet:
+            if str(item.data(ROLE_LINKED_CHARACTER_ID) or "") != clean_character:
                 continue
             if owner_filter and str(item.data(ROLE_OWNER_PLAYER_ID) or "") != owner_filter:
                 continue
@@ -10807,19 +10810,26 @@ class DungeonAppletWidget(QWidget):
             inventory_payload if isinstance(inventory_payload, dict) else {}
         )
         try:
-            from player_sheets import inventory_payload_for_sheet_id
+            from player_sheets import character_id_for_sheet_id, inventory_payload_for_sheet_id
         except Exception:
+            character_id_for_sheet_id = None  # type: ignore[assignment]
             inventory_payload_for_sheet_id = None  # type: ignore[assignment]
         if inventory_payload_for_sheet_id is not None:
             persisted_payload = inventory_payload_for_sheet_id(clean_sheet)
             if isinstance(persisted_payload, dict):
                 payload = normalize_inventory_payload(persisted_payload)
+        character_id = ""
+        if character_id_for_sheet_id is not None:
+            character_id = str(character_id_for_sheet_id(clean_sheet) or "").strip()
         if (
             self._online_mode == ONLINE_MODE_PLAYER
         ):
+            if not character_id:
+                return
             self._dispatch_player_command(
                 "sync_character_inventory",
                 {
+                    "character_id": character_id,
                     "sheet_id": clean_sheet,
                     "inventory": payload,
                     "dungeon_id": str(self._active_dungeon_id or ""),
@@ -10832,7 +10842,7 @@ class DungeonAppletWidget(QWidget):
             owner = ""
         self._apply_inventory_sync_to_linked_entities(
             owner_player_id=owner,
-            sheet_id=clean_sheet,
+            character_id=character_id,
             inventory_payload=payload,
         )
         if self._online_mode == ONLINE_MODE_DM_HOST:

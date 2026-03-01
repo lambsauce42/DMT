@@ -223,6 +223,7 @@ class ItemCreatorWidget(QWidget):
         self._label_scale = 0.85
         self._icon_bg_curve = 1.12
         self._dirty = False
+        self._item_id = ""
         self._last_save_path: Optional[str] = None
         self._level_value = 1
         self._preview_fast_timer = QTimer(self)
@@ -985,6 +986,7 @@ class ItemCreatorWidget(QWidget):
         
         return ItemCardSpec(
             title=self.title_edit.text().strip() or "Untitled Item",
+            item_id=str(self._item_id or "").strip(),
             rarity=self.rarity_combo.currentText(),
             classes=class_value,
             stats=self._collect_stats(),
@@ -1015,6 +1017,7 @@ class ItemCreatorWidget(QWidget):
         self._show_rarity_check.blockSignals(True)
         self._icon_padding_check.blockSignals(True)
 
+        self._item_id = str(getattr(spec, "item_id", "") or "").strip()
         self.title_edit.setText(spec.title or "Untitled Item")
         if spec.rarity in [self.rarity_combo.itemText(i) for i in range(self.rarity_combo.count())]:
             self.rarity_combo.setCurrentText(spec.rarity)
@@ -1100,6 +1103,9 @@ class ItemCreatorWidget(QWidget):
             spec = self._current_spec()
             document = build_item_document(spec_to_dict(spec), spec.icon_path)
             write_item_document(Path(save_path), document)
+            payload = document.get("payload")
+            if isinstance(payload, dict):
+                self._item_id = str(payload.get("item_id") or "").strip()
             self._set_dirty(False)
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
@@ -1152,6 +1158,9 @@ class ItemCreatorWidget(QWidget):
             os.makedirs(self._base_save_dir, exist_ok=True)
             document = build_item_document(spec_to_dict(spec), spec.icon_path)
             write_item_document(Path(item_path), document)
+            payload = document.get("payload")
+            if isinstance(payload, dict):
+                self._item_id = str(payload.get("item_id") or "").strip()
             self._last_save_path = item_path
             self._set_dirty(False)
         except Exception as exc:

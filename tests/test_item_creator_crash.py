@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, QTimer
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from item_creator import ItemCreatorWidget
+from item_file_format import build_item_document, load_item_payload, write_item_document
 
 @pytest.fixture
 def item_widget(qtbot, monkeypatch, tmp_path):
@@ -121,3 +122,45 @@ def test_click_all_item_buttons(item_widget, qtbot):
     for btn in all_buttons:
         if btn.isVisible() and btn.isEnabled():
             qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+
+
+def test_editing_loaded_item_preserves_item_id(item_widget, monkeypatch, tmp_path):
+    item_path = tmp_path / "loaded_item.dmtitem"
+    document = build_item_document({"title": "Healing Potion", "rarity": "common"}, None)
+    write_item_document(item_path, document)
+    initial_payload = load_item_payload(item_path)
+    assert isinstance(initial_payload, dict)
+    initial_item_id = str(initial_payload.get("item_id") or "")
+    assert initial_item_id
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(item_path), "DMT Item"))
+
+    item_widget._load_item()
+    item_widget.title_edit.setText("Healing Potion Updated")
+    item_widget._save_item()
+
+    saved_payload = load_item_payload(item_path)
+    assert isinstance(saved_payload, dict)
+    assert saved_payload["item_id"] == initial_item_id
+
+
+def test_saving_existing_new_item_keeps_generated_item_id(item_widget, monkeypatch, tmp_path):
+    item_path = tmp_path / "generated_item.dmtitem"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(item_path), "DMT Item"))
+    item_widget._base_save_dir = str(tmp_path)
+
+    item_widget.title_edit.setText("Fresh Potion")
+    item_widget._save_item_as()
+
+    saved_path = tmp_path / "generated_item.dmtitem"
+    first_payload = load_item_payload(saved_path)
+    assert isinstance(first_payload, dict)
+    first_item_id = str(first_payload.get("item_id") or "")
+    assert first_item_id
+
+    item_widget.effects_edit.setPlainText("Restores HP")
+    item_widget._save_item()
+
+    second_payload = load_item_payload(saved_path)
+    assert isinstance(second_payload, dict)
+    assert second_payload["item_id"] == first_item_id
