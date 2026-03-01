@@ -246,13 +246,6 @@ class OnlineSessionServer(QObject):
                 state.socket.disconnectFromHost()
                 return
 
-        if identity is None:
-            by_name_id = self._name_to_identity.get(normalized)
-            by_name_identity = self._identities.get(by_name_id or "")
-            if by_name_identity is not None and not by_name_identity.connected:
-                identity = by_name_identity
-                resumed = True
-
         active_player_id = self._names_lower.get(normalized)
         if active_player_id and (identity is None or active_player_id != identity.player_id):
             self._send_socket_message(state.socket, {"type": "error", "message": "name already in use"})

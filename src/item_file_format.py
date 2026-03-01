@@ -26,6 +26,13 @@ _ITEM_ICON_DIRS = (
 )
 
 
+def normalize_item_name(raw: object) -> str:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    return " ".join(text.split())
+
+
 def list_item_file_paths(root: Path) -> list[Path]:
     if not root.exists():
         return []
@@ -69,14 +76,26 @@ def resolve_item_icon_source(
     return None
 
 
-def ensure_item_payload_id(payload: dict, *, fallback_name: str = "item") -> dict:
+def ensure_item_payload_id(
+    payload: dict,
+    *,
+    fallback_name: str = "item",
+    preserve_existing: bool = True,
+) -> dict:
     normalized = dict(payload or {})
-    existing = str(normalized.get("item_id") or "").strip()
-    if existing:
-        normalized["item_id"] = existing
-        return normalized
     item_name = str(normalized.get("title") or normalized.get("name") or fallback_name).strip()
-    normalized["item_id"] = generate_named_object_id(item_name or fallback_name, "item")
+    normalized_name = normalize_item_name(
+        normalized.get("normalized_item_name") or item_name or fallback_name
+    )
+    existing = str(normalized.get("item_id") or "").strip()
+    if preserve_existing and existing:
+        normalized["item_id"] = existing
+    else:
+        normalized["item_id"] = generate_named_object_id(
+            normalized_name or item_name or fallback_name,
+            "item",
+        )
+    normalized["normalized_item_name"] = normalized_name
     return normalized
 
 
@@ -93,6 +112,23 @@ def item_id_from_payload(payload: dict | None, *, fallback_path: Optional[Path] 
         return str(fallback_path)
 
 
+def normalized_item_name_from_payload(
+    payload: dict | None,
+    *,
+    fallback_path: Optional[Path] = None,
+) -> str:
+    if isinstance(payload, dict):
+        existing = normalize_item_name(payload.get("normalized_item_name"))
+        if existing:
+            return existing
+        derived = normalize_item_name(payload.get("title") or payload.get("name"))
+        if derived:
+            return derived
+    if fallback_path is None:
+        return ""
+    return normalize_item_name(fallback_path.stem)
+
+
 def _item_document_fingerprint(document: dict) -> str:
     try:
         payload = json.dumps(
@@ -107,7 +143,7 @@ def _item_document_fingerprint(document: dict) -> str:
 
 
 def build_item_document(payload: dict, icon_source: Optional[str]) -> dict:
-    normalized_payload = ensure_item_payload_id(payload)
+    normalized_payload = ensure_item_payload_id(payload, preserve_existing=False)
     document: dict[str, object] = {
         "format": ITEM_FILE_FORMAT,
         "payload": normalized_payload,
@@ -156,7 +192,7 @@ def write_item_document(path: Path, document: dict) -> None:
     if not isinstance(payload, dict):
         raise ValueError("document payload is missing")
 
-    normalized_payload = ensure_item_payload_id(payload)
+    normalized_payload = ensure_item_payload_id(payload, preserve_existing=True)
     info = {
         "format": ITEM_FILE_FORMAT,
         "payload": normalized_payload,
@@ -180,9 +216,10 @@ def load_item_document(path: Path) -> Optional[dict]:
         payload = info.get("payload")
         if not isinstance(payload, dict):
             return None
+        normalized_payload = ensure_item_payload_id(payload, preserve_existing=True)
         document: dict[str, object] = {
             "format": ITEM_FILE_FORMAT,
-            "payload": dict(payload),
+            "payload": normalized_payload,
         }
         icon_asset_name = str(info.get("icon_asset_name") or "").strip()
         if icon_asset_name:
@@ -224,7 +261,7 @@ def load_item_payload(path: Path) -> Optional[dict]:
     payload = document.get("payload")
     if not isinstance(payload, dict):
         return None
-    resolved_payload = dict(payload)
+    resolved_payload = ensure_item_payload_id(payload, preserve_existing=True)
     icon_asset_name = str(document.get("icon_asset_name") or "").strip()
     if icon_asset_name:
         raw = _decode_document_asset(document, icon_asset_name)

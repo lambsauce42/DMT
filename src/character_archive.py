@@ -9,10 +9,13 @@ Archive layout:
 """
 
 import json
+import hashlib
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from item_file_format import normalize_item_name
 
 
 ARCHIVE_EXTENSION = ".dmtchar"
@@ -27,39 +30,105 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _coerce_quantity(raw: object, *, default: int = 1) -> int:
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return max(1, int(default))
+
+
+def _coerce_currency(raw: object) -> int:
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_item_entry(
+    raw: object,
+    *,
+    default_quantity: int = 1,
+) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        item_id = str(raw.get("item_id") or "").strip()
+        normalized_name = normalize_item_name(
+            raw.get("normalized_item_name") or raw.get("title") or raw.get("name") or item_id
+        )
+        quantity = _coerce_quantity(raw.get("quantity", default_quantity), default=default_quantity)
+    else:
+        item_id = str(raw or "").strip()
+        normalized_name = normalize_item_name(item_id)
+        quantity = _coerce_quantity(default_quantity, default=default_quantity)
+    if not item_id:
+        return None
+    return {
+        "item_id": item_id,
+        "normalized_item_name": normalized_name or normalize_item_name(item_id),
+        "quantity": quantity,
+    }
+
+
 def normalize_inventory_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     src = payload if isinstance(payload, dict) else {}
     inventory_raw = src.get("inventory")
-    inventory = []
+    inventory: list[dict[str, Any]] = []
     if isinstance(inventory_raw, list):
-        inventory = [str(item).strip() for item in inventory_raw if str(item).strip()]
+        merged_inventory: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for item in inventory_raw:
+            normalized_item = _normalize_item_entry(item, default_quantity=1)
+            if normalized_item is None:
+                continue
+            key = str(normalized_item.get("normalized_item_name") or "").strip() or str(
+                normalized_item.get("item_id") or ""
+            ).strip()
+            if not key:
+                continue
+            existing = merged_inventory.get(key)
+            if existing is None:
+                merged_inventory[key] = dict(normalized_item)
+                order.append(key)
+                continue
+            existing["quantity"] = int(existing.get("quantity", 1)) + int(
+                normalized_item.get("quantity", 1)
+            )
+            incoming_item_id = str(normalized_item.get("item_id") or "").strip()
+            if incoming_item_id:
+                existing["item_id"] = incoming_item_id
+        inventory = [merged_inventory[key] for key in order]
 
     notes = str(src.get("inventory_notes", ""))
 
     equipment_raw = src.get("equipment")
-    equipment: dict[str, str | None] = {}
+    equipment: dict[str, dict[str, Any] | None] = {}
     if isinstance(equipment_raw, dict):
         for key, value in equipment_raw.items():
-            if value is None:
-                equipment[str(key)] = None
+            slot_id = str(key or "").strip()
+            if not slot_id:
                 continue
-            cleaned = str(value).strip()
-            equipment[str(key)] = cleaned or None
-
-    def _coerce_currency(name: str) -> int:
-        try:
-            return max(0, int(src.get(name, 0)))
-        except (TypeError, ValueError):
-            return 0
+            equipment[slot_id] = _normalize_item_entry(value, default_quantity=1)
 
     return {
         "inventory": inventory,
         "inventory_notes": notes,
         "equipment": equipment,
-        "gold": _coerce_currency("gold"),
-        "silver": _coerce_currency("silver"),
-        "copper": _coerce_currency("copper"),
+        "gold": _coerce_currency(src.get("gold", 0)),
+        "silver": _coerce_currency(src.get("silver", 0)),
+        "copper": _coerce_currency(src.get("copper", 0)),
     }
+
+
+def inventory_payload_content_hash(payload: dict[str, Any] | None) -> str:
+    normalized = normalize_inventory_payload(payload)
+    serialized = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def write_character_archive(

@@ -94,6 +94,32 @@ def test_client_reconnect_preserves_player_identity_with_session_token(qtbot):
         server.stop()
 
 
+def test_disconnected_name_match_without_token_or_persistent_id_gets_new_identity(qtbot):
+    port = _free_tcp_port()
+    server = OnlineSessionServer()
+    ok, err = server.start(port)
+    assert ok, err
+
+    first = OnlineSessionClient()
+    second = OnlineSessionClient()
+    try:
+        first.connect_to_host("127.0.0.1", port, "Mira")
+        qtbot.waitUntil(lambda: first.player_id is not None, timeout=4000)
+        first_id = str(first.player_id)
+        assert first_id
+        first.disconnect()
+        _spin_for(120)
+
+        second.connect_to_host("127.0.0.1", port, "Mira")
+        qtbot.waitUntil(lambda: second.player_id is not None, timeout=4000)
+
+        assert str(second.player_id) != first_id
+    finally:
+        first.disconnect()
+        second.disconnect()
+        server.stop()
+
+
 def test_client_can_supply_persistent_player_id_for_handshake(qtbot):
     port = _free_tcp_port()
     server = OnlineSessionServer()

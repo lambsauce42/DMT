@@ -67,7 +67,11 @@ from session_creator import SessionCreatorWidget
 from save_paths import dungeon_collections_dir, clear_all_online_runtime_caches
 from tab_workspace import TabWorkspaceController, WorkspaceTabsHost
 from ui.encounter_panel import EncounterPanel
-from user_settings import load_app_settings, save_app_settings
+from user_settings import (
+    get_or_create_local_player_id,
+    load_app_settings,
+    save_app_settings,
+)
 
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
 
@@ -1555,7 +1559,7 @@ class HomeWidget(QWidget):
 
         top_bar = QWidget(self)
         top_bar.setObjectName("TopBar")
-        top_bar.setFixedHeight(60)
+        top_bar.setFixedHeight(74)
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(10, 8, 10, 8)
         top_layout.setSpacing(10)
@@ -1596,29 +1600,54 @@ class HomeWidget(QWidget):
         )
         top_layout.addWidget(self._breadcrumbs_label, 1)
 
+        self._local_player_id = get_or_create_local_player_id()
+
         settings_cluster = QWidget(top_bar)
-        settings_layout = QHBoxLayout(settings_cluster)
+        settings_layout = QVBoxLayout(settings_cluster)
         settings_layout.setContentsMargins(0, 0, 0, 0)
-        settings_layout.setSpacing(4)
-        self._settings_button = QToolButton(settings_cluster)
+        settings_layout.setSpacing(2)
+
+        settings_row = QWidget(settings_cluster)
+        settings_row_layout = QHBoxLayout(settings_row)
+        settings_row_layout.setContentsMargins(0, 0, 0, 0)
+        settings_row_layout.setSpacing(4)
+
+        self._settings_button = QToolButton(settings_row)
         self._settings_button.setObjectName("TopBarButton")
         self._settings_button.setText("Settings")
         self._settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._settings_button.clicked.connect(self._show_settings)
 
-        self._about_button = QToolButton(settings_cluster)
+        self._about_button = QToolButton(settings_row)
         self._about_button.setObjectName("TopBarButton")
         self._about_button.setText("About")
         self._about_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._about_button.clicked.connect(self._show_about)
 
         # Add a subtle separator between buttons
-        sep = QLabel("|", settings_cluster)
+        sep = QLabel("|", settings_row)
         sep.setStyleSheet("color: #30363d; font-weight: bold; margin: 0 4px;")
 
-        settings_layout.addWidget(self._settings_button)
-        settings_layout.addWidget(sep)
-        settings_layout.addWidget(self._about_button)
+        settings_row_layout.addWidget(self._settings_button)
+        settings_row_layout.addWidget(sep)
+        settings_row_layout.addWidget(self._about_button)
+        settings_layout.addWidget(
+            settings_row,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
+        )
+
+        self._player_id_label = QLabel(settings_cluster)
+        self._player_id_label.setObjectName("TopBarPlayerId")
+        self._player_id_label.setText(f"Player ID: {self._local_player_id}")
+        self._player_id_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._player_id_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._player_id_label.setStyleSheet("font-size: 10px; color: #7f8ea3;")
+        settings_layout.addWidget(
+            self._player_id_label,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+        )
         top_layout.addWidget(settings_cluster, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         main_layout.addWidget(top_bar)

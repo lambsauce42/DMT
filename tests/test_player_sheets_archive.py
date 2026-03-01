@@ -227,9 +227,16 @@ def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> No
         assert raw_meta["character_id"] == "character_hero_unique"
 
     payload = read_character_inventory(archive_path)
-    assert payload["inventory"] == ["sword", "shield"]
+    assert payload["inventory"] == [
+        {"item_id": "sword", "normalized_item_name": "sword", "quantity": 1},
+        {"item_id": "shield", "normalized_item_name": "shield", "quantity": 1},
+    ]
     assert payload["inventory_notes"] == "  found in cave "
-    assert payload["equipment"]["head"] == "helm"
+    assert payload["equipment"]["head"] == {
+        "item_id": "helm",
+        "normalized_item_name": "helm",
+        "quantity": 1,
+    }
     assert payload["equipment"]["neck"] is None
     assert payload["gold"] == 12
     assert payload["silver"] == 0
@@ -259,8 +266,9 @@ def test_entries_with_same_name_get_distinct_stable_ids(tmp_path: Path, monkeypa
     assert first_sheet_id
     assert second_sheet_id
     assert first_sheet_id != second_sheet_id
-    assert first.character_id == first_sheet_id
-    assert second.character_id == second_sheet_id
+    assert first.character_id
+    assert second.character_id
+    assert first.character_id != second.character_id
     assert Path(first.archive_path).exists()
     assert Path(second.archive_path).exists()
 
@@ -304,7 +312,9 @@ def test_legacy_character_sheet_entry_migrates_to_archive(
     assert archive_path.exists()
 
     inventory = read_character_inventory(archive_path)
-    assert inventory["inventory"] == ["rope"]
+    assert inventory["inventory"] == [
+        {"item_id": "rope", "normalized_item_name": "rope", "quantity": 1},
+    ]
     assert inventory["inventory_notes"] == "old note"
     assert inventory["gold"] == 11
     assert inventory["silver"] == 2
@@ -353,16 +363,26 @@ def test_set_inventory_payload_for_sheet_id_persists_and_emits(
 
     assert ok, message
     assert isinstance(payload, dict)
-    assert payload["inventory"] == ["item_a", "item_b"]
+    assert payload["inventory"] == [
+        {"item_id": "item_a", "normalized_item_name": "item_a", "quantity": 1},
+        {"item_id": "item_b", "normalized_item_name": "item_b", "quantity": 1},
+    ]
     assert payload["inventory_notes"] == "loot stash"
-    assert payload["equipment"]["head"] == "helm_1"
+    assert payload["equipment"]["head"] == {
+        "item_id": "helm_1",
+        "normalized_item_name": "helm_1",
+        "quantity": 1,
+    }
     assert payload["gold"] == 12
     assert payload["silver"] == 3
     assert payload["copper"] == 1
     assert events and events[-1][0] == sheet_id
 
     archive_payload = read_character_inventory(Path(entry.archive_path))
-    assert archive_payload["inventory"] == ["item_a", "item_b"]
+    assert archive_payload["inventory"] == [
+        {"item_id": "item_a", "normalized_item_name": "item_a", "quantity": 1},
+        {"item_id": "item_b", "normalized_item_name": "item_b", "quantity": 1},
+    ]
     assert archive_payload["inventory_notes"] == "loot stash"
     assert archive_payload["gold"] == 12
 
@@ -389,8 +409,14 @@ def test_ensure_network_linked_sheet_entry_creates_local_sheet_when_missing(
 
     assert ok, message
     assert isinstance(payload, dict)
-    assert payload["inventory"] == ["item_a"]
-    assert payload["equipment"]["head"] == "helm_a"
+    assert payload["inventory"] == [
+        {"item_id": "item_a", "normalized_item_name": "item_a", "quantity": 1},
+    ]
+    assert payload["equipment"]["head"] == {
+        "item_id": "helm_a",
+        "normalized_item_name": "helm_a",
+        "quantity": 1,
+    }
 
     entries = player_sheets.load_entries_from_storage()
     assert len(entries) == 1

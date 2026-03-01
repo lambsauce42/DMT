@@ -10,7 +10,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from app import HomeWidget, MainLauncherWindow, APPLET_DEFINITIONS
-from user_settings import is_session_autosave_enabled
+from user_settings import is_session_autosave_enabled, load_app_settings
 
 
 @pytest.fixture(scope="module")
@@ -210,3 +210,15 @@ def test_home_settings_saves_session_autosave_toggle(monkeypatch, qapp):
     widget._show_settings()
 
     assert is_session_autosave_enabled() is True
+
+
+def test_home_widget_creates_and_reuses_launcher_player_id(qapp):
+    first = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
+    first_id = str(first._local_player_id)
+
+    assert first_id
+    assert first._player_id_label.text() == f"Player ID: {first_id}"
+    assert str(load_app_settings().get("local_player_id") or "") == first_id
+
+    second = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
+    assert str(second._local_player_id) == first_id

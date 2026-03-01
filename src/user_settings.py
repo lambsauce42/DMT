@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from save_paths import dnd_saves_dir
 
 APP_SETTINGS_FILE_NAME = "app_settings.json"
+LEGACY_DUNGEON_PROFILE_FILE_NAME = "dungeon_profile.json"
+LOCAL_PLAYER_ID_KEY = "local_player_id"
 DEFAULT_APP_SETTINGS: dict[str, object] = {
     "session_autosave_enabled": False,
+    LOCAL_PLAYER_ID_KEY: "",
 }
 
 
@@ -39,6 +44,36 @@ def save_app_settings(values: dict[str, object]) -> dict[str, object]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     return settings
+
+
+def _generate_local_player_id() -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"player_{stamp}_{uuid.uuid4().hex}{uuid.uuid4().hex}"
+
+
+def _legacy_dungeon_profile_player_id() -> str:
+    path = dnd_saves_dir() / "settings" / LEGACY_DUNGEON_PROFILE_FILE_NAME
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"Failed to read legacy dungeon profile from {path}: {exc}")
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("player_id") or "").strip()
+
+
+def get_or_create_local_player_id() -> str:
+    settings = load_app_settings()
+    existing = str(settings.get(LOCAL_PLAYER_ID_KEY) or "").strip()
+    if existing:
+        return existing
+    seeded = _legacy_dungeon_profile_player_id()
+    player_id = seeded or _generate_local_player_id()
+    save_app_settings({LOCAL_PLAYER_ID_KEY: player_id})
+    return player_id
 
 
 def is_session_autosave_enabled() -> bool:

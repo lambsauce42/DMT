@@ -117,3 +117,64 @@ def test_first_player_snapshot_runs_pending_override_sync(dungeon_widget, monkey
 
     assert calls == ["called"]
     assert dungeon_widget._pending_join_character_override_sync is False
+
+
+def test_push_local_character_overrides_uses_linked_character_id_lookup(dungeon_widget, monkeypatch):
+    sent = []
+
+    class _ClientStub:
+        def send_command(self, action, payload, request_id=None):
+            sent.append((action, dict(payload), request_id))
+
+        def disconnect(self):
+            return None
+
+    lookup_calls = []
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._active_dungeon_id = "d-1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d-1",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-local",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-1",
+                    }
+                ],
+                "fog": {"path": []},
+            },
+        }
+    ]
+
+    def _resolve(identifier):
+        lookup_calls.append(identifier)
+        if identifier != "character-1":
+            return None
+        return {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": "character-1",
+            "save_revision": 2,
+            "last_saved_at": "",
+            "content_hash": "hash-1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+        }
+
+    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", _resolve)
+
+    sent_count = dungeon_widget._push_local_character_overrides_to_host()
+
+    assert lookup_calls == ["character-1"]
+    assert sent_count == 1
+    assert sent
+    assert sent[-1][0] == "link_character_entity"
+    assert sent[-1][1]["character_id"] == "character-1"

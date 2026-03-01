@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +16,8 @@ from item_file_format import (
     item_id_from_payload,
     list_item_file_paths,
     load_item_payload,
+    normalized_item_name_from_payload,
+    normalize_item_name,
 )
 from character_archive import (
     ARCHIVE_EXTENSION,
@@ -114,6 +118,85 @@ from loot_applet import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _entry_sync_content_payload(entry: "PlayerSheetEntry") -> dict:
+    return {
+        "character_id": str(entry.character_id or "").strip(),
+        "inventory": _entry_inventory_payload(entry),
+    }
+
+
+def _entry_content_hash(entry: "PlayerSheetEntry") -> str:
+    payload = _entry_sync_content_payload(entry)
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _refresh_entry_sync_metadata(
+    entry: "PlayerSheetEntry",
+    *,
+    increment_revision: bool,
+) -> None:
+    if increment_revision:
+        try:
+            entry.save_revision = max(0, int(entry.save_revision)) + 1
+        except (TypeError, ValueError):
+            entry.save_revision = 1
+        entry.last_saved_at = _utc_now()
+    else:
+        try:
+            entry.save_revision = max(0, int(entry.save_revision))
+        except (TypeError, ValueError):
+            entry.save_revision = 0
+        entry.last_saved_at = str(entry.last_saved_at or "").strip() or _utc_now()
+    entry.content_hash = _entry_content_hash(entry)
+
+
+def _canonical_item_entry_for_item_id(item_id: str, *, quantity: int = 1) -> dict:
+    clean_item_id = str(item_id or "").strip()
+    normalized_name = ""
+    if clean_item_id:
+        resolved = loot_item_path_for_id(clean_item_id)
+        if resolved is not None:
+            payload = load_item_payload(resolved)
+            normalized_name = normalized_item_name_from_payload(payload, fallback_path=resolved)
+    normalized_name = normalized_name or normalize_item_name(clean_item_id)
+    return {
+        "item_id": clean_item_id,
+        "normalized_item_name": normalized_name,
+        "quantity": max(1, int(quantity)),
+    }
+
+
+def _flatten_canonical_inventory_entries(entries: object) -> list[str]:
+    flattened: list[str] = []
+    if not isinstance(entries, list):
+        return flattened
+    for raw in entries:
+        if isinstance(raw, dict):
+            item_id = str(raw.get("item_id") or "").strip()
+            if not item_id:
+                continue
+            try:
+                quantity = max(1, int(raw.get("quantity", 1)))
+            except (TypeError, ValueError):
+                quantity = 1
+            flattened.extend([item_id] * quantity)
+            continue
+        item_id = str(raw or "").strip()
+        if item_id:
+            flattened.append(item_id)
+    return flattened
 
 
 def _linked_npc_names_by_sheet_id() -> dict[str, list[str]]:
@@ -390,14 +473,22 @@ def _normalize_equipment(payload: object) -> dict[str, Optional[str]]:
         return equipment
     for slot_id in EQUIPMENT_SLOT_IDS:
         value = payload.get(slot_id)
-        if isinstance(value, str):
+        if isinstance(value, dict):
+            cleaned = str(value.get("item_id") or "").strip()
+            if cleaned:
+                equipment[slot_id] = cleaned
+        elif isinstance(value, str):
             cleaned = value.strip()
             if cleaned:
                 equipment[slot_id] = cleaned
     # Backward compatibility: older saves used misc_3 before the bracer slot existed.
     if equipment.get("bracer") is None:
         legacy_bracer = payload.get("misc_3")
-        if isinstance(legacy_bracer, str):
+        if isinstance(legacy_bracer, dict):
+            cleaned = str(legacy_bracer.get("item_id") or "").strip()
+            if cleaned:
+                equipment["bracer"] = cleaned
+        elif isinstance(legacy_bracer, str):
             cleaned = legacy_bracer.strip()
             if cleaned:
                 equipment["bracer"] = cleaned
@@ -1115,9 +1206,18 @@ def _ensure_entry_sheet_id(entry: PlayerSheetEntry) -> str:
     current = str(getattr(entry, "sheet_id", "") or "").strip()
     if current:
         return current
-    stable_id = sanitize_filename(str(getattr(entry, "name", "") or "character_sheet"))
-    entry.sheet_id = stable_id
-    return stable_id
+    base_id = sanitize_filename(str(getattr(entry, "name", "") or "character_sheet"))
+    candidate = base_id
+    archive_path = character_sheet_archive_path(candidate)
+    pdf_path = character_sheet_pdf_path(candidate)
+    existing_archive_path = str(getattr(entry, "archive_path", "") or "").strip()
+    existing_pdf_path = str(getattr(entry, "pdf_path", "") or "").strip()
+    same_archive_target = existing_archive_path and str(archive_path) == existing_archive_path
+    same_pdf_target = existing_pdf_path and str(pdf_path) == existing_pdf_path
+    if (archive_path.exists() and not same_archive_target) or (pdf_path.exists() and not same_pdf_target):
+        candidate = generate_named_object_id(base_id, "sheet")
+    entry.sheet_id = candidate
+    return candidate
 
 
 def _ensure_entry_character_id(entry: PlayerSheetEntry) -> str:
@@ -1243,6 +1343,9 @@ def entry_to_dict(entry: PlayerSheetEntry) -> dict:
         "gold": entry.gold,
         "silver": entry.silver,
         "copper": entry.copper,
+        "save_revision": int(entry.save_revision),
+        "last_saved_at": str(entry.last_saved_at or ""),
+        "content_hash": str(entry.content_hash or ""),
     }
 
 
@@ -1282,6 +1385,9 @@ def entry_from_dict(payload: dict) -> Optional[PlayerSheetEntry]:
         gold=_read_currency(payload.get("gold", 0)),
         silver=_read_currency(payload.get("silver", 0)),
         copper=_read_currency(payload.get("copper", 0)),
+        save_revision=_read_currency(payload.get("save_revision", 0)),
+        last_saved_at=str(payload.get("last_saved_at", "") or "").strip(),
+        content_hash=str(payload.get("content_hash", "") or "").strip(),
     )
 
 
@@ -1301,6 +1407,9 @@ class PlayerSheetEntry:
     gold: int = 0
     silver: int = 0
     copper: int = 0
+    save_revision: int = 0
+    last_saved_at: str = ""
+    content_hash: str = ""
     sheet_id: str = ""
 
     def __post_init__(self) -> None:
@@ -1321,6 +1430,12 @@ class PlayerSheetEntry:
             self.copper = max(0, int(self.copper))
         except (TypeError, ValueError):
             self.copper = 0
+        try:
+            self.save_revision = max(0, int(self.save_revision))
+        except (TypeError, ValueError):
+            self.save_revision = 0
+        self.last_saved_at = str(self.last_saved_at or "").strip()
+        self.content_hash = str(self.content_hash or "").strip()
 
 
 def _entry_archive_path(entry: PlayerSheetEntry) -> Path:
@@ -1330,11 +1445,20 @@ def _entry_archive_path(entry: PlayerSheetEntry) -> Path:
 
 
 def _entry_inventory_payload(entry: PlayerSheetEntry) -> dict:
+    canonical_inventory = [_canonical_item_entry_for_item_id(item_id) for item_id in entry.inventory if str(item_id or "").strip()]
+    canonical_equipment: dict[str, dict | None] = {}
+    for slot_id, item_id in entry.equipment.items():
+        clean_item_id = str(item_id or "").strip()
+        canonical_equipment[slot_id] = (
+            _canonical_item_entry_for_item_id(clean_item_id)
+            if clean_item_id
+            else None
+        )
     return normalize_inventory_payload(
         {
-            "inventory": list(entry.inventory),
+            "inventory": canonical_inventory,
             "inventory_notes": entry.inventory_notes,
-            "equipment": dict(entry.equipment),
+            "equipment": canonical_equipment,
             "gold": entry.gold,
             "silver": entry.silver,
             "copper": entry.copper,
@@ -1352,6 +1476,9 @@ def _entry_meta_payload(entry: PlayerSheetEntry, *, created_at: str | None = Non
         "group": str(entry.group or "").strip(),
         "tags": [str(tag).strip() for tag in entry.tags if str(tag).strip()],
         "created_at": str(created_at or "").strip(),
+        "save_revision": int(entry.save_revision),
+        "last_saved_at": str(entry.last_saved_at or ""),
+        "content_hash": str(entry.content_hash or ""),
     }
     return payload
 
@@ -1367,6 +1494,15 @@ def _apply_entry_meta(entry: PlayerSheetEntry, meta: dict) -> None:
         entry.sheet_id = str(meta.get("sheet_id") or "").strip()
     if "character_id" in meta:
         entry.character_id = str(meta.get("character_id") or "").strip()
+    if "save_revision" in meta:
+        try:
+            entry.save_revision = max(0, int(meta.get("save_revision") or 0))
+        except (TypeError, ValueError):
+            entry.save_revision = 0
+    if "last_saved_at" in meta:
+        entry.last_saved_at = str(meta.get("last_saved_at") or "").strip()
+    if "content_hash" in meta:
+        entry.content_hash = str(meta.get("content_hash") or "").strip()
 
     if "world" in meta:
         world = str(meta.get("world") or "").strip()
@@ -1391,11 +1527,7 @@ def _apply_inventory_payload_to_entry(
     normalized = normalize_inventory_payload(
         inventory_payload if isinstance(inventory_payload, dict) else {}
     )
-    entry.inventory = list(
-        normalized.get("inventory", [])
-        if isinstance(normalized.get("inventory"), list)
-        else []
-    )
+    entry.inventory = _flatten_canonical_inventory_entries(normalized.get("inventory"))
     entry.inventory_notes = str(normalized.get("inventory_notes", ""))
     entry.equipment = _normalize_equipment(normalized.get("equipment", {}))
     try:
@@ -1480,11 +1612,14 @@ def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
         if not str(entry.sheet_id or "").strip():
             _ensure_entry_sheet_id(entry)
             return sync_entry_archive(entry)
+        if not str(entry.content_hash or "").strip():
+            return sync_entry_archive(entry, preserve_revision=True)
         return True
 
     source_pdf = Path(entry.pdf_path)
     if not source_pdf.exists():
         return False
+    _refresh_entry_sync_metadata(entry, increment_revision=True)
     try:
         write_character_archive(
             archive_path,
@@ -1502,7 +1637,12 @@ def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
     return True
 
 
-def sync_entry_archive(entry: PlayerSheetEntry, pdf_source: str | None = None) -> bool:
+def sync_entry_archive(
+    entry: PlayerSheetEntry,
+    pdf_source: str | None = None,
+    *,
+    preserve_revision: bool = False,
+) -> bool:
     _ensure_entry_sheet_id(entry)
     _ensure_entry_character_id(entry)
     source = Path(pdf_source) if pdf_source else Path(entry.pdf_path)
@@ -1516,6 +1656,15 @@ def sync_entry_archive(entry: PlayerSheetEntry, pdf_source: str | None = None) -
         return False
     old_meta = read_character_meta(archive_path)
     created_at = old_meta.get("created_at") or old_meta.get("updated_at")
+    if preserve_revision:
+        if not str(entry.last_saved_at or "").strip():
+            entry.last_saved_at = str(old_meta.get("last_saved_at") or "").strip()
+        if not entry.save_revision:
+            try:
+                entry.save_revision = max(0, int(old_meta.get("save_revision") or 0))
+            except (TypeError, ValueError):
+                entry.save_revision = 0
+    _refresh_entry_sync_metadata(entry, increment_revision=not preserve_revision)
     try:
         write_character_archive(
             archive_path,
@@ -1843,6 +1992,110 @@ def set_inventory_payload_for_character_id(
     if emit_event:
         PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id_for_entry(target_entry), payload)
     return True, "Inventory updated.", payload
+
+
+def apply_remote_inventory_payload_for_character_id(
+    character_id: str,
+    sheet_name: str,
+    inventory_payload: dict,
+    *,
+    save_revision: int = 0,
+    last_saved_at: str = "",
+    content_hash: str = "",
+    emit_event: bool = True,
+) -> tuple[bool, str, Optional[dict]]:
+    target = str(character_id or "").strip()
+    if not target:
+        return False, "Missing character selection.", None
+    entries = load_entries_from_storage()
+    target_entry = next(
+        (entry for entry in entries if character_id_for_entry(entry) == target),
+        None,
+    )
+    if target_entry is None:
+        ok, message, _payload = ensure_network_linked_character_entry(
+            target,
+            sheet_name,
+            inventory_payload,
+            emit_event=False,
+        )
+        if not ok:
+            return False, message, None
+        entries = load_entries_from_storage()
+        target_entry = next(
+            (entry for entry in entries if character_id_for_entry(entry) == target),
+            None,
+        )
+        if target_entry is None:
+            return False, "Character not found.", None
+
+    _apply_inventory_payload_to_entry(target_entry, inventory_payload)
+    target_entry.save_revision = max(0, int(save_revision or 0))
+    target_entry.last_saved_at = str(last_saved_at or "").strip()
+    target_entry.content_hash = str(content_hash or "").strip()
+
+    sync_entry_archive(target_entry, preserve_revision=True)
+    save_entries_to_storage(entries)
+    payload = _entry_inventory_payload(target_entry)
+    if emit_event:
+        PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id_for_entry(target_entry), payload)
+    return True, "Inventory synchronized.", payload
+
+
+def replace_item_references(
+    old_item_ids: Sequence[str],
+    new_item_id: str,
+) -> int:
+    old_ids = {str(item_id or "").strip() for item_id in old_item_ids if str(item_id or "").strip()}
+    replacement = str(new_item_id or "").strip()
+    if not old_ids or not replacement:
+        return 0
+
+    entries = load_entries_from_storage()
+    changed_entries: list[PlayerSheetEntry] = []
+    for entry in entries:
+        changed = False
+        if entry.inventory:
+            updated_inventory = [
+                replacement if str(item_id or "").strip() in old_ids else item_id
+                for item_id in entry.inventory
+            ]
+            if updated_inventory != entry.inventory:
+                entry.inventory = updated_inventory
+                changed = True
+        for slot_id, item_id in list(entry.equipment.items()):
+            if str(item_id or "").strip() not in old_ids:
+                continue
+            entry.equipment[slot_id] = replacement
+            changed = True
+        if changed:
+            sync_entry_archive(entry)
+            changed_entries.append(entry)
+    if changed_entries:
+        save_entries_to_storage(entries)
+        for entry in changed_entries:
+            PLAYER_SHEET_EVENTS.inventorySaved.emit(
+                sheet_id_for_entry(entry),
+                _entry_inventory_payload(entry),
+            )
+    return len(changed_entries)
+
+
+def bump_character_revision_for_character_id(character_id: str) -> tuple[bool, Optional[PlayerSheetEntry]]:
+    target = str(character_id or "").strip()
+    if not target:
+        return False, None
+    entries = load_entries_from_storage()
+    target_entry = next(
+        (entry for entry in entries if character_id_for_entry(entry) == target),
+        None,
+    )
+    if target_entry is None:
+        return False, None
+    if not sync_entry_archive(target_entry):
+        return False, None
+    save_entries_to_storage(entries)
+    return True, target_entry
 
 
 def apply_claim_to_sheet(

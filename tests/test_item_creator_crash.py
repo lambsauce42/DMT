@@ -124,7 +124,7 @@ def test_click_all_item_buttons(item_widget, qtbot):
             qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
 
 
-def test_editing_loaded_item_preserves_item_id(item_widget, monkeypatch, tmp_path):
+def test_editing_loaded_item_creates_new_item_version(item_widget, monkeypatch, tmp_path):
     item_path = tmp_path / "loaded_item.dmtitem"
     document = build_item_document({"title": "Healing Potion", "rarity": "common"}, None)
     write_item_document(item_path, document)
@@ -141,10 +141,11 @@ def test_editing_loaded_item_preserves_item_id(item_widget, monkeypatch, tmp_pat
 
     saved_payload = load_item_payload(item_path)
     assert isinstance(saved_payload, dict)
-    assert saved_payload["item_id"] == initial_item_id
+    assert saved_payload["item_id"] != initial_item_id
+    assert saved_payload["normalized_item_name"] == "healing potion updated"
 
 
-def test_saving_existing_new_item_keeps_generated_item_id(item_widget, monkeypatch, tmp_path):
+def test_saving_existing_item_writes_new_item_version(item_widget, monkeypatch, tmp_path):
     item_path = tmp_path / "generated_item.dmtitem"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(item_path), "DMT Item"))
     item_widget._base_save_dir = str(tmp_path)
@@ -163,4 +164,5 @@ def test_saving_existing_new_item_keeps_generated_item_id(item_widget, monkeypat
 
     second_payload = load_item_payload(saved_path)
     assert isinstance(second_payload, dict)
-    assert second_payload["item_id"] == first_item_id
+    assert second_payload["item_id"] != first_item_id
+    assert second_payload["normalized_item_name"] == "fresh potion"
