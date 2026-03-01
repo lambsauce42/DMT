@@ -1507,8 +1507,13 @@ def test_linked_character_fields_round_trip_in_scene_state(dungeon_widget):
         "gold": 9,
         "silver": 1,
         "copper": 0,
+        "item_documents": {
+            "item_1": {"format": "dmtitem.v2", "payload": {"item_id": "item_1", "title": "Blade"}},
+            "helm_1": {"format": "dmtitem.v2", "payload": {"item_id": "helm_1", "title": "Helm"}},
+        },
         "hp": 99,
     }
+    entity.linked_sheet_archive_b64 = "YXJjaGl2ZQ=="
     scene.addItem(entity)
 
     state = dungeon_widget._serialize_scene()
@@ -1524,7 +1529,9 @@ def test_linked_character_fields_round_trip_in_scene_state(dungeon_widget):
         {"item_id": "item_1", "normalized_item_name": "item_1", "quantity": 1}
     ]
     assert loaded_entity.linked_inventory["gold"] == 9
+    assert loaded_entity.linked_inventory["item_documents"]["item_1"]["payload"]["title"] == "Blade"
     assert "hp" not in loaded_entity.linked_inventory
+    assert loaded_entity.linked_sheet_archive_b64 == "YXJjaGl2ZQ=="
 
 
 def test_host_sync_character_inventory_updates_owned_linked_entities(dungeon_widget):
@@ -1610,8 +1617,8 @@ def test_host_sync_character_inventory_updates_owned_linked_entities(dungeon_wid
     assert dungeon_widget._dungeons[0]["dirty"] is True
 
 
-def test_host_sync_character_inventory_persists_authoritative_sheet_state(
-    monkeypatch, dungeon_widget
+def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
+    monkeypatch, dungeon_widget, tmp_path
 ):
     class _HostStub:
         def __init__(self):
@@ -1627,43 +1634,15 @@ def test_host_sync_character_inventory_persists_authoritative_sheet_state(
         def stop(self):
             return None
 
-    captured = {}
-
-    def _apply_remote_inventory(character_id, sheet_name, inventory_payload, **kwargs):
-        captured["character_id"] = character_id
-        captured["sheet_name"] = sheet_name
-        captured["inventory_payload"] = dict(inventory_payload)
-        captured["kwargs"] = dict(kwargs)
-        return (
-            True,
-            "Inventory synchronized.",
-            {
-                "inventory": [
-                    {
-                        "item_id": "item_saved",
-                        "normalized_item_name": "item_saved",
-                        "quantity": 1,
-                    }
-                ],
-                "inventory_notes": "saved",
-                "equipment": {
-                    "head": {
-                        "item_id": "helm_saved",
-                        "normalized_item_name": "helm_saved",
-                        "quantity": 1,
-                    }
-                },
-                "gold": 7,
-                "silver": 2,
-                "copper": 1,
-            },
-        )
-
-    fake_module = types.SimpleNamespace(
-        apply_remote_inventory_payload_for_character_id=_apply_remote_inventory,
-        character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: tmp_path)
+    existing_item_path = tmp_path / "existing_item.dmtitem"
+    write_item_document(
+        existing_item_path,
+        build_item_document(
+            {"item_id": "item_x", "title": "DM Sword", "rarity": "common"},
+            None,
+        ),
     )
-    monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
 
     dungeon_widget._host_controller = _HostStub()
     dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
@@ -1699,36 +1678,47 @@ def test_host_sync_character_inventory_persists_authoritative_sheet_state(
         "player-1",
         {
             "sheet_id": "sheet-1",
+            "character_id": "character-sheet-1",
             "inventory": {
                 "inventory": ["item_x"],
                 "inventory_notes": "claimed",
                 "equipment": {"head": "helm_a"},
                 "gold": 5,
-                "hp": 999,
+                "item_documents": {
+                    "item_x": {
+                        "format": "dmtitem.v2",
+                        "payload": {"item_id": "item_x", "title": "Player Sword", "rarity": "rare"},
+                    },
+                    "helm_a": {
+                        "format": "dmtitem.v2",
+                        "payload": {"item_id": "helm_a", "title": "Travel Helm", "rarity": "common"},
+                    },
+                },
             },
+            "stats": {"name": "Hero", "hp_max": 12, "hp_current": 10, "ac": 15},
+            "archive_b64": "YXJjaGl2ZQ==",
         },
         request_id="sync-2",
     )
 
     result = dungeon_widget._host_controller.results[-1][1]
     assert result["ok"] is True
-    assert captured["character_id"] == "character-sheet-1"
-    assert captured["sheet_name"] == "sheet-1"
-    assert captured["inventory_payload"]["inventory"] == [
-        {"item_id": "item_x", "normalized_item_name": "item_x", "quantity": 1}
-    ]
-    assert "hp" not in captured["inventory_payload"]
-    assert captured["kwargs"]["emit_event"] is False
-
     first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
     assert first_item["linked_inventory"]["inventory"] == [
-        {"item_id": "item_saved", "normalized_item_name": "item_saved", "quantity": 1}
+        {"item_id": "item_x", "normalized_item_name": "item_x", "quantity": 1}
     ]
-    assert first_item["linked_inventory"]["gold"] == 7
+    assert first_item["linked_inventory"]["gold"] == 5
+    assert first_item["linked_inventory"]["item_documents"]["item_x"]["payload"]["title"] == "DM Sword"
+    assert first_item["linked_inventory"]["item_documents"]["helm_a"]["payload"]["title"] == "Travel Helm"
+    assert first_item["linked_sheet_archive_b64"] == "YXJjaGl2ZQ=="
+    assert first_item["label"] == "Hero"
+    assert first_item["hp"] == 10
+    assert first_item["max_hp"] == 12
+    assert first_item["ac"] == 15
 
 
 def test_host_sync_character_inventory_rejects_unowned_character_target(
-    monkeypatch, dungeon_widget
+    dungeon_widget
 ):
     class _HostStub:
         def __init__(self):
@@ -1743,18 +1733,6 @@ def test_host_sync_character_inventory_rejects_unowned_character_target(
 
         def stop(self):
             return None
-
-    apply_calls = []
-
-    def _apply_remote_inventory(*args, **kwargs):
-        apply_calls.append((args, kwargs))
-        return True, "ok", {}
-
-    fake_module = types.SimpleNamespace(
-        apply_remote_inventory_payload_for_character_id=_apply_remote_inventory,
-        character_id_for_sheet_id=lambda _sheet_id: "",
-    )
-    monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
 
     dungeon_widget._host_controller = _HostStub()
     dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
@@ -1809,7 +1787,6 @@ def test_host_sync_character_inventory_rejects_unowned_character_target(
     result = dungeon_widget._host_controller.results[-1][1]
     assert result["ok"] is False
     assert "not linked to one of your owned entities" in str(result["message"]).lower()
-    assert apply_calls == []
 
 
 def test_host_link_character_sync_allows_claim_for_player_owned_entity(dungeon_widget):
@@ -2366,7 +2343,7 @@ def test_client_loot_add_result_syncs_local_inventory_payload(monkeypatch, dunge
         return True, "Inventory synchronized.", dict(inventory_payload)
 
     fake_module = types.SimpleNamespace(
-        apply_remote_inventory_payload_for_character_id=_apply_remote_inventory,
+        apply_remote_character_package_for_character_id=_apply_remote_inventory,
         character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
@@ -2419,7 +2396,7 @@ def test_client_loot_add_result_ignores_uncorrelated_response(monkeypatch, dunge
         return True, "Inventory synchronized.", {}
 
     fake_module = types.SimpleNamespace(
-        apply_remote_inventory_payload_for_character_id=_apply_remote_inventory,
+        apply_remote_character_package_for_character_id=_apply_remote_inventory,
         character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
@@ -2450,7 +2427,7 @@ def test_sync_local_sheet_inventory_creates_missing_character_entry(monkeypatch,
         return True, "Inventory synchronized.", dict(inventory_payload)
 
     fake_module = types.SimpleNamespace(
-        apply_remote_inventory_payload_for_character_id=_apply_remote_inventory,
+        apply_remote_character_package_for_character_id=_apply_remote_inventory,
         character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
@@ -3922,6 +3899,7 @@ def test_snapshot_conflict_replaces_local_sheet_without_auto_host_overwrite(monk
         inventory_payload,
         *,
         sheet_name="",
+        archive_b64="",
         save_revision=0,
         last_saved_at="",
         content_hash="",
@@ -3931,12 +3909,13 @@ def test_snapshot_conflict_replaces_local_sheet_without_auto_host_overwrite(monk
             (
                 character_id,
                 dict(inventory_payload),
-                sheet_name,
-                int(save_revision),
-                str(last_saved_at),
-                str(content_hash),
-                bool(refresh_entities),
-            )
+                    sheet_name,
+                    str(archive_b64),
+                    int(save_revision),
+                    str(last_saved_at),
+                    str(content_hash),
+                    bool(refresh_entities),
+                )
         )
         return True, "Inventory synchronized."
 
@@ -3992,8 +3971,10 @@ def test_snapshot_conflict_replaces_local_sheet_without_auto_host_overwrite(monk
                 "gold": 0,
                 "silver": 0,
                 "copper": 0,
+                "item_documents": {},
             },
             "Local Hero",
+            "",
             0,
             "",
             "",
@@ -4730,7 +4711,7 @@ def test_player_state_update_is_queued_when_send_fails_and_flushed_after_snapsho
     assert dungeon_widget._pending_player_state_update is None
 
 
-def test_player_state_update_retries_after_disconnect_before_ack(dungeon_widget, monkeypatch):
+def test_player_state_update_is_dropped_on_disconnect_before_reconnect(dungeon_widget, monkeypatch):
     class _ClientStub:
         def __init__(self):
             self.calls = []
@@ -4762,7 +4743,7 @@ def test_player_state_update_retries_after_disconnect_before_ack(dungeon_widget,
 
     dungeon_widget._on_client_disconnected()
 
-    assert dungeon_widget._pending_player_state_update is not None
+    assert dungeon_widget._pending_player_state_update is None
     assert dungeon_widget._pending_player_state_update_request_id == ""
 
     snapshot = {
@@ -4782,8 +4763,8 @@ def test_player_state_update_retries_after_disconnect_before_ack(dungeon_widget,
     dungeon_widget._on_client_snapshot_received(snapshot)
 
     state_update_calls = [call for call in client.calls if call[0] == "state_update"]
-    assert len(state_update_calls) >= 2
-    assert state_update_calls[-1][2] != first_state_update[2]
+    assert len(state_update_calls) == 1
+    assert state_update_calls[-1][2] == first_state_update[2]
 
 
 def test_leaving_player_mode_clears_sent_override_fingerprints(dungeon_widget):

@@ -13,11 +13,16 @@ import logging
 
 from save_paths import default_dnd_save_dir, items_dir
 from item_file_format import (
+    ITEM_FILE_EXTENSION,
+    ITEM_FILE_FORMAT,
+    build_item_document,
     item_id_from_payload,
     list_item_file_paths,
+    load_item_document,
     load_item_payload,
     normalized_item_name_from_payload,
     normalize_item_name,
+    write_item_document,
 )
 from character_archive import (
     ARCHIVE_EXTENSION,
@@ -125,9 +130,21 @@ def _utc_now() -> str:
 
 
 def _entry_sync_content_payload(entry: "PlayerSheetEntry") -> dict:
+    archive_hash = ""
+    pdf_candidate = Path(str(getattr(entry, "pdf_path", "") or "")).expanduser()
+    if pdf_candidate.exists():
+        try:
+            archive_hash = hashlib.sha256(pdf_candidate.read_bytes()).hexdigest()
+        except Exception:
+            archive_hash = ""
+    if not archive_hash:
+        archive_bytes = _read_archive_bytes_for_entry(entry)
+        if archive_bytes:
+            archive_hash = hashlib.sha256(archive_bytes).hexdigest()
     return {
         "character_id": str(entry.character_id or "").strip(),
         "inventory": _entry_inventory_payload(entry),
+        "archive_hash": archive_hash,
     }
 
 
@@ -176,6 +193,106 @@ def _canonical_item_entry_for_item_id(item_id: str, *, quantity: int = 1) -> dic
         "normalized_item_name": normalized_name,
         "quantity": max(1, int(quantity)),
     }
+
+
+def _normalized_item_documents_map(raw_documents: object) -> dict[str, dict]:
+    normalized_documents: dict[str, dict] = {}
+    if isinstance(raw_documents, dict):
+        iterable = raw_documents.values()
+    elif isinstance(raw_documents, list):
+        iterable = raw_documents
+    else:
+        iterable = []
+    for raw_document in iterable:
+        if not isinstance(raw_document, dict):
+            continue
+        if str(raw_document.get("format") or "").strip().lower() != ITEM_FILE_FORMAT:
+            continue
+        payload = raw_document.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        item_id = item_id_from_payload(payload)
+        if not item_id:
+            continue
+        normalized_document = build_item_document(payload, None)
+        icon_asset_name = str(raw_document.get("icon_asset_name") or "").strip()
+        assets = raw_document.get("assets")
+        if (
+            icon_asset_name
+            and isinstance(assets, dict)
+            and isinstance(assets.get(icon_asset_name), dict)
+        ):
+            normalized_document["icon_asset_name"] = icon_asset_name
+            normalized_document["assets"] = {
+                icon_asset_name: dict(assets.get(icon_asset_name) or {})
+            }
+        normalized_documents[item_id] = normalized_document
+    return normalized_documents
+
+
+def _entry_item_documents(entry: "PlayerSheetEntry") -> dict[str, dict]:
+    return _normalized_item_documents_map(getattr(entry, "item_documents", {}))
+
+
+def _sync_entry_item_document_cache(entry: "PlayerSheetEntry") -> None:
+    sheet_id = sheet_id_for_entry(entry)
+    target_dir = linked_character_item_cache_dir(sheet_id)
+    item_documents = _entry_item_documents(entry)
+    if not item_documents:
+        try:
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
+        except Exception:
+            logger.exception("Failed to prune linked item cache for %s", sheet_id)
+        return
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        logger.exception("Failed to create linked item cache for %s", sheet_id)
+        return
+    expected_paths: set[Path] = set()
+    for item_id, document in sorted(item_documents.items()):
+        try:
+            digest = hashlib.sha256(
+                json.dumps(
+                    document,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+        except Exception:
+            digest = sanitize_filename(item_id)
+        filename = f"{sanitize_filename(item_id)}_{digest}{ITEM_FILE_EXTENSION}"
+        target_path = target_dir / filename
+        expected_paths.add(target_path)
+        try:
+            if target_path.exists():
+                existing_document = load_item_document(target_path)
+                if existing_document == document:
+                    continue
+            write_item_document(target_path, document)
+        except Exception:
+            logger.exception("Failed to sync linked item document cache for %s", item_id)
+    try:
+        for stale_path in target_dir.glob(f"*{ITEM_FILE_EXTENSION}"):
+            if stale_path in expected_paths:
+                continue
+            stale_path.unlink()
+        if not any(target_dir.iterdir()):
+            target_dir.rmdir()
+    except Exception:
+        logger.exception("Failed to prune stale linked item documents for %s", sheet_id)
+
+
+def _read_archive_bytes_for_entry(entry: "PlayerSheetEntry") -> bytes | None:
+    archive_path = _entry_archive_path(entry)
+    if archive_path.exists():
+        try:
+            return archive_path.read_bytes()
+        except Exception:
+            return None
+    return None
 
 
 def _flatten_canonical_inventory_entries(entries: object) -> list[str]:
@@ -454,6 +571,15 @@ def character_sheets_trash_dir() -> Path:
 
 def character_sheet_cache_dir() -> Path:
     return Path(default_sheet_save_dir()) / "cache" / "characters"
+
+
+def linked_character_item_cache_root() -> Path:
+    return player_sheets_cache_dir() / "linked_items"
+
+
+def linked_character_item_cache_dir(sheet_id: str) -> Path:
+    safe_sheet_id = sanitize_filename(str(sheet_id or "").strip() or "character")
+    return linked_character_item_cache_root() / safe_sheet_id
 
 
 class PlayerSheetEvents(QObject):
@@ -749,7 +875,7 @@ def _parse_item_level(data: dict) -> Optional[int]:
 
 
 def _loot_item_dirs() -> List[Path]:
-    return [items_dir()]
+    return [items_dir(), linked_character_item_cache_root()]
 
 
 def _loot_item_from_path(path: Path) -> Optional[LootItem]:
@@ -1290,6 +1416,12 @@ def delete_entry_files(entry: PlayerSheetEntry) -> None:
                 archive_target.unlink()
         except OSError:
             return
+    try:
+        cache_dir = linked_character_item_cache_dir(sheet_id_for_entry(entry))
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    except OSError:
+        return
 
 
 def disintegrate_entry_files(entry: PlayerSheetEntry) -> None:
@@ -1310,6 +1442,12 @@ def disintegrate_entry_files(entry: PlayerSheetEntry) -> None:
         except OSError:
             logger.exception("Failed to delete player sheet PDF: %s", target)
             continue
+    item_cache_dir = linked_character_item_cache_dir(sheet_id)
+    try:
+        if item_cache_dir.exists():
+            shutil.rmtree(item_cache_dir, ignore_errors=True)
+    except OSError:
+        logger.exception("Failed to delete linked item cache: %s", item_cache_dir)
 
 
 def sanitize_filename(name: str) -> str:
@@ -1343,6 +1481,7 @@ def entry_to_dict(entry: PlayerSheetEntry) -> dict:
         "gold": entry.gold,
         "silver": entry.silver,
         "copper": entry.copper,
+        "item_documents": _entry_item_documents(entry),
         "save_revision": int(entry.save_revision),
         "last_saved_at": str(entry.last_saved_at or ""),
         "content_hash": str(entry.content_hash or ""),
@@ -1364,6 +1503,7 @@ def entry_from_dict(payload: dict) -> Optional[PlayerSheetEntry]:
     if not isinstance(inventory, list):
         inventory = []
     equipment = payload.get("equipment") or {}
+    item_documents = _normalized_item_documents_map(payload.get("item_documents") or {})
     def _read_currency(value) -> int:
         try:
             return max(0, int(value))
@@ -1385,6 +1525,7 @@ def entry_from_dict(payload: dict) -> Optional[PlayerSheetEntry]:
         gold=_read_currency(payload.get("gold", 0)),
         silver=_read_currency(payload.get("silver", 0)),
         copper=_read_currency(payload.get("copper", 0)),
+        item_documents=item_documents,
         save_revision=_read_currency(payload.get("save_revision", 0)),
         last_saved_at=str(payload.get("last_saved_at", "") or "").strip(),
         content_hash=str(payload.get("content_hash", "") or "").strip(),
@@ -1407,6 +1548,7 @@ class PlayerSheetEntry:
     gold: int = 0
     silver: int = 0
     copper: int = 0
+    item_documents: dict[str, dict] = field(default_factory=dict)
     save_revision: int = 0
     last_saved_at: str = ""
     content_hash: str = ""
@@ -1418,6 +1560,7 @@ class PlayerSheetEntry:
         self.tags = normalize_tags(self.tags)
         self.inventory_notes = str(self.inventory_notes or "")
         self.equipment = _normalize_equipment(self.equipment)
+        self.item_documents = _normalized_item_documents_map(self.item_documents)
         try:
             self.gold = max(0, int(self.gold))
         except (TypeError, ValueError):
@@ -1462,6 +1605,7 @@ def _entry_inventory_payload(entry: PlayerSheetEntry) -> dict:
             "gold": entry.gold,
             "silver": entry.silver,
             "copper": entry.copper,
+            "item_documents": _entry_item_documents(entry),
         }
     )
 
@@ -1542,6 +1686,7 @@ def _apply_inventory_payload_to_entry(
         entry.copper = max(0, int(normalized.get("copper", 0)))
     except (TypeError, ValueError):
         entry.copper = 0
+    entry.item_documents = _normalized_item_documents_map(normalized.get("item_documents") or {})
     return normalized
 
 
@@ -1558,6 +1703,7 @@ def _load_entry_from_archive(entry: PlayerSheetEntry) -> bool:
         if extract_character_pdf(archive_path, target_pdf):
             entry.pdf_path = str(target_pdf)
     _apply_inventory_payload_to_entry(entry, read_character_inventory(archive_path))
+    _sync_entry_item_document_cache(entry)
     return True
 
 
@@ -1613,7 +1759,11 @@ def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
             _ensure_entry_sheet_id(entry)
             return sync_entry_archive(entry)
         if not str(entry.content_hash or "").strip():
-            return sync_entry_archive(entry, preserve_revision=True)
+            ok = sync_entry_archive(entry, preserve_revision=True)
+            if ok:
+                _sync_entry_item_document_cache(entry)
+            return ok
+        _sync_entry_item_document_cache(entry)
         return True
 
     source_pdf = Path(entry.pdf_path)
@@ -1634,6 +1784,7 @@ def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
         logger.exception("Failed to create character archive for %s", entry.name)
         return False
     entry.archive_path = str(archive_path)
+    _sync_entry_item_document_cache(entry)
     return True
 
 
@@ -1676,6 +1827,7 @@ def sync_entry_archive(
         logger.exception("Failed to sync character archive for %s", entry.name)
         return False
     entry.archive_path = str(archive_path)
+    _sync_entry_item_document_cache(entry)
     return True
 
 
@@ -1835,6 +1987,13 @@ def inventory_payload_for_character_id(character_id: str) -> Optional[dict]:
     if archive_path.exists():
         return read_character_inventory(archive_path)
     return _entry_inventory_payload(entry)
+
+
+def archive_bytes_for_character_id(character_id: str) -> Optional[bytes]:
+    entry = entry_for_character_id(character_id)
+    if entry is None:
+        return None
+    return _read_archive_bytes_for_entry(entry)
 
 
 def ensure_network_linked_sheet_entry(
@@ -2040,6 +2199,69 @@ def apply_remote_inventory_payload_for_character_id(
     if emit_event:
         PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id_for_entry(target_entry), payload)
     return True, "Inventory synchronized.", payload
+
+
+def apply_remote_character_package_for_character_id(
+    character_id: str,
+    sheet_name: str,
+    inventory_payload: dict,
+    *,
+    archive_bytes: bytes | None = None,
+    save_revision: int = 0,
+    last_saved_at: str = "",
+    content_hash: str = "",
+    emit_event: bool = True,
+) -> tuple[bool, str, Optional[dict]]:
+    target = str(character_id or "").strip()
+    if not target:
+        return False, "Missing character selection.", None
+    entries = load_entries_from_storage()
+    target_entry = next(
+        (entry for entry in entries if character_id_for_entry(entry) == target),
+        None,
+    )
+    if target_entry is None:
+        ok, message, _payload = ensure_network_linked_character_entry(
+            target,
+            sheet_name,
+            inventory_payload,
+            emit_event=False,
+        )
+        if not ok:
+            return False, message, None
+        entries = load_entries_from_storage()
+        target_entry = next(
+            (entry for entry in entries if character_id_for_entry(entry) == target),
+            None,
+        )
+        if target_entry is None:
+            return False, "Character not found.", None
+
+    if archive_bytes:
+        archive_path = _entry_archive_path(target_entry)
+        pdf_path = character_sheet_pdf_path(sheet_id_for_entry(target_entry))
+        try:
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.write_bytes(archive_bytes)
+            target_entry.archive_path = str(archive_path)
+            extract_character_pdf(archive_path, pdf_path)
+            target_entry.pdf_path = str(pdf_path)
+            _load_entry_from_archive(target_entry)
+        except Exception:
+            logger.exception("Failed to apply remote character archive for %s", target)
+            return False, "Unable to synchronize linked character archive.", None
+
+    _apply_inventory_payload_to_entry(target_entry, inventory_payload)
+    target_entry.save_revision = max(0, int(save_revision or 0))
+    target_entry.last_saved_at = str(last_saved_at or "").strip()
+    target_entry.content_hash = str(content_hash or "").strip()
+
+    sync_entry_archive(target_entry, preserve_revision=True)
+    save_entries_to_storage(entries)
+    payload = _entry_inventory_payload(target_entry)
+    if emit_event:
+        PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id_for_entry(target_entry), payload)
+    return True, "Character synchronized.", payload
 
 
 def replace_item_references(

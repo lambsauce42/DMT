@@ -200,6 +200,33 @@ def _inventory_entry_quantity(raw: object) -> int:
     return 1
 
 
+def _inventory_payload_item_documents(payload: dict | None) -> dict[str, dict]:
+    if not isinstance(payload, dict):
+        return {}
+    raw_documents = payload.get("item_documents")
+    if isinstance(raw_documents, dict):
+        iterable = raw_documents.values()
+    elif isinstance(raw_documents, list):
+        iterable = raw_documents
+    else:
+        iterable = []
+    documents: dict[str, dict] = {}
+    for raw_document in iterable:
+        if not isinstance(raw_document, dict):
+            continue
+        if str(raw_document.get("format") or "").strip().lower() != ITEM_FILE_FORMAT:
+            continue
+        payload_data = raw_document.get("payload")
+        if not isinstance(payload_data, dict):
+            continue
+        item_id = item_id_from_payload(payload_data)
+        if not item_id:
+            continue
+        document_copy = json.loads(json.dumps(raw_document))
+        documents[item_id] = document_copy
+    return documents
+
+
 def _in_test_env() -> bool:
     if os.environ.get("DMT_TEST_MODE") == "1":
         return True
@@ -7512,7 +7539,11 @@ class DungeonAppletWidget(QWidget):
         self._pending_link_conflicts.clear()
         self._active_link_conflict_prompt_key = ""
         if isinstance(self._pending_player_state_update, dict):
+            self._pending_player_state_update = None
             self._pending_player_state_update_request_id = ""
+            self._append_server_log(
+                "[WARN] Dropped pending player state update on disconnect to avoid replaying stale local state after reconnect."
+            )
         self._pending_add_loot_from_inventory_requests.clear()
         for finalize_payload in self._pending_loot_claim_finalizations.values():
             if isinstance(finalize_payload, dict):
@@ -8184,7 +8215,9 @@ class DungeonAppletWidget(QWidget):
             save_revision = 0
         last_saved_at = str(payload.get("last_saved_at") or "").strip()
         content_hash = str(payload.get("content_hash") or "").strip()
+        archive_b64 = str(payload.get("archive_b64") or "").strip()
         inventory_payload = payload.get("inventory")
+        stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
         if not sheet_id or not isinstance(inventory_payload, dict):
             self._host_controller.send_command_result(
                 player_id,
@@ -8193,22 +8226,6 @@ class DungeonAppletWidget(QWidget):
                 request_id=request_id,
             )
             return
-        normalized_inventory = normalize_inventory_payload(inventory_payload)
-        try:
-            from player_sheets import (
-                apply_remote_inventory_payload_for_character_id,
-                character_id_for_sheet_id,
-            )
-        except Exception:
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message="Player sheets integration unavailable",
-                request_id=request_id,
-            )
-            return
-        if not character_id and character_id_for_sheet_id is not None:
-            character_id = str(character_id_for_sheet_id(sheet_id) or "").strip()
         if not character_id:
             for dungeon in self._dungeons:
                 state = dungeon.get("state")
@@ -8248,31 +8265,13 @@ class DungeonAppletWidget(QWidget):
             )
             return
 
-        self._suppress_external_inventory_forward = True
-        try:
-            ok, message, saved_payload = apply_remote_inventory_payload_for_character_id(
-                character_id,
-                sheet_id,
-                normalized_inventory,
-                save_revision=save_revision,
-                last_saved_at=last_saved_at,
-                content_hash=content_hash,
-                emit_event=False,
-            )
-        finally:
-            self._suppress_external_inventory_forward = False
-
-        if not ok:
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message=str(message or "Unable to synchronize inventory."),
-                request_id=request_id,
-            )
-            return
-
-        authoritative_payload = (
-            saved_payload if isinstance(saved_payload, dict) else normalized_inventory
+        existing_inventory = self._linked_inventory_payload_for_player_sheet(
+            player_id=player_id,
+            sheet_id=sheet_id,
+        )
+        authoritative_payload, canonicalization_notes = self._canonicalize_linked_inventory_payload(
+            inventory_payload,
+            existing_inventory=existing_inventory,
         )
         updated = self._apply_inventory_sync_to_linked_entities(
             owner_player_id=player_id,
@@ -8281,11 +8280,17 @@ class DungeonAppletWidget(QWidget):
             save_revision=save_revision,
             last_saved_at=last_saved_at,
             content_hash=content_hash,
+            stats=stats_payload,
+            archive_b64=archive_b64,
         )
         self._host_controller.send_command_result(
             player_id,
             ok=True,
-            message=f"Synced inventory to {updated} linked entit(y/ies)",
+            message=(
+                f"Synced inventory to {updated} linked entit(y/ies)"
+                if not canonicalization_notes
+                else f"Synced inventory to {updated} linked entit(y/ies) with authoritative item canonicalization"
+            ),
             request_id=request_id,
         )
         if updated > 0:
@@ -8311,6 +8316,7 @@ class DungeonAppletWidget(QWidget):
             save_revision = 0
         last_saved_at = str(payload.get("last_saved_at") or "").strip()
         content_hash = str(payload.get("content_hash") or "").strip()
+        archive_b64 = str(payload.get("archive_b64") or "").strip()
         dungeon_id = str(payload.get("dungeon_id") or self._players_dungeon_id or "").strip()
         stats = payload.get("stats")
         inventory = payload.get("inventory")
@@ -8368,7 +8374,11 @@ class DungeonAppletWidget(QWidget):
                     )
                     return
 
-        normalized_inventory = normalize_inventory_payload(inventory)
+        existing_inventory = item_data.get("linked_inventory") if isinstance(item_data.get("linked_inventory"), dict) else {}
+        normalized_inventory, canonicalization_notes = self._canonicalize_linked_inventory_payload(
+            inventory,
+            existing_inventory=existing_inventory,
+        )
         # Intentional: player-side character edits are allowed to overwrite the host copy
         # for that player's linked entity so DM/runtime state stays in sync with the
         # player's latest character sheet on (re)join and subsequent link syncs.
@@ -8383,6 +8393,7 @@ class DungeonAppletWidget(QWidget):
         item_data["linked_last_saved_at"] = last_saved_at
         item_data["linked_content_hash"] = content_hash
         item_data["linked_inventory"] = dict(normalized_inventory)
+        item_data["linked_sheet_archive_b64"] = archive_b64
         if label:
             item_data["label"] = label
         if max_hp is not None:
@@ -8411,6 +8422,7 @@ class DungeonAppletWidget(QWidget):
                 content_hash=str(item_data.get("linked_content_hash") or ""),
                 linked_inventory=normalized_inventory,
                 stats=stats,
+                archive_b64=str(item_data.get("linked_sheet_archive_b64") or ""),
             )
             target_entity.update()
             if getattr(self.inspector, "_entity", None) is target_entity:
@@ -8419,7 +8431,7 @@ class DungeonAppletWidget(QWidget):
         self._host_controller.send_command_result(
             player_id,
             ok=True,
-            message="Linked character synced",
+            message="Linked character synced" if not canonicalization_notes else "Linked character synced with authoritative item canonicalization",
             request_id=request_id,
             data=result_data or {},
         )
@@ -8864,7 +8876,7 @@ class DungeonAppletWidget(QWidget):
             return False, normalized, missing
         normalized["inventory"] = remaining_inventory
         normalized["equipment"] = equipment
-        return True, normalized, []
+        return True, normalize_inventory_payload(normalized), []
 
     def _handle_host_add_loot_from_inventory(
         self,
@@ -9705,12 +9717,178 @@ class DungeonAppletWidget(QWidget):
             serialized = str(normalized)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
+    def _linked_item_document_by_id(self, item_id: str) -> dict | None:
+        clean_item_id = str(item_id or "").strip()
+        if not clean_item_id:
+            return None
+        candidate = Path(clean_item_id).expanduser()
+        if candidate.exists():
+            document = load_item_document(candidate)
+            if isinstance(document, dict):
+                return document
+        root = items_dir()
+        if not root.exists():
+            return None
+        for item_path in list_item_file_paths(root):
+            payload = load_item_payload(item_path)
+            if not isinstance(payload, dict):
+                continue
+            candidate_id = item_id_from_payload(payload, fallback_path=item_path)
+            if candidate_id != clean_item_id:
+                continue
+            document = load_item_document(item_path)
+            if isinstance(document, dict):
+                return document
+        return None
+
+    def _clone_item_document_with_item_id(self, document: dict, item_id: str) -> dict:
+        cloned = json.loads(json.dumps(document))
+        payload = cloned.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+            cloned["payload"] = payload
+        payload["item_id"] = str(item_id or "").strip()
+        if not str(payload.get("normalized_item_name") or "").strip():
+            payload["normalized_item_name"] = normalize_item_name(
+                payload.get("title") or payload.get("name") or item_id
+            )
+        cloned["format"] = ITEM_FILE_FORMAT
+        return cloned
+
+    def _canonicalize_linked_inventory_payload(
+        self,
+        inventory_payload: dict,
+        *,
+        existing_inventory: dict | None = None,
+    ) -> tuple[dict, list[str]]:
+        normalized = normalize_inventory_payload(
+            inventory_payload if isinstance(inventory_payload, dict) else {}
+        )
+        referenced_item_ids: list[str] = []
+        seen_item_ids: set[str] = set()
+        for entry in normalized.get("inventory", []) if isinstance(normalized.get("inventory"), list) else []:
+            item_id = _inventory_entry_item_id(entry)
+            if item_id and item_id not in seen_item_ids:
+                referenced_item_ids.append(item_id)
+                seen_item_ids.add(item_id)
+        equipment_payload = normalized.get("equipment")
+        if isinstance(equipment_payload, dict):
+            for value in equipment_payload.values():
+                item_id = _inventory_entry_item_id(value)
+                if item_id and item_id not in seen_item_ids:
+                    referenced_item_ids.append(item_id)
+                    seen_item_ids.add(item_id)
+
+        incoming_documents = _inventory_payload_item_documents(normalized)
+        existing_documents = _inventory_payload_item_documents(existing_inventory or {})
+        authoritative_by_id: dict[str, dict] = {}
+        authoritative_by_fingerprint: dict[str, tuple[str, dict]] = {}
+        for source_item_id, source_document in existing_documents.items():
+            authoritative_by_id.setdefault(source_item_id, source_document)
+            try:
+                fingerprint = hashlib.sha256(
+                    json.dumps(
+                        source_document,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+            except Exception:
+                fingerprint = ""
+            if fingerprint and fingerprint not in authoritative_by_fingerprint:
+                authoritative_by_fingerprint[fingerprint] = (source_item_id, source_document)
+        remap: dict[str, str] = {}
+        canonical_documents: dict[str, dict] = {}
+        notes: list[str] = []
+
+        for item_id in referenced_item_ids:
+            existing_document = existing_documents.get(item_id)
+            library_document = self._linked_item_document_by_id(item_id)
+            incoming_document = incoming_documents.get(item_id)
+            chosen_item_id = item_id
+            chosen_document = existing_document or library_document
+            if chosen_document is not None:
+                if incoming_document is not None and not item_document_matches(chosen_document, incoming_document):
+                    notes.append(
+                        f"Kept the DM-authoritative item definition for '{item_id}' instead of the conflicting player version."
+                    )
+                elif incoming_document is None and library_document is None and existing_document is None:
+                    notes.append(
+                        f"Missing authoritative item document for linked item '{item_id}'."
+                    )
+            elif incoming_document is not None:
+                try:
+                    incoming_fp = hashlib.sha256(
+                        json.dumps(
+                            incoming_document,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                except Exception:
+                    incoming_fp = ""
+                matched = authoritative_by_fingerprint.get(incoming_fp) if incoming_fp else None
+                if matched is not None:
+                    chosen_item_id, chosen_document = matched
+                else:
+                    chosen_document = incoming_document
+            else:
+                notes.append(
+                    f"Missing authoritative item document for linked item '{item_id}'."
+                )
+                continue
+
+            if not isinstance(chosen_document, dict):
+                continue
+            remap[item_id] = chosen_item_id
+            canonical_documents[chosen_item_id] = chosen_document
+            authoritative_by_id[chosen_item_id] = chosen_document
+            try:
+                fingerprint = hashlib.sha256(
+                    json.dumps(
+                        chosen_document,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+            except Exception:
+                fingerprint = ""
+            if fingerprint:
+                authoritative_by_fingerprint[fingerprint] = (chosen_item_id, chosen_document)
+
+        if remap:
+            inventory_rows = normalized.get("inventory")
+            if isinstance(inventory_rows, list):
+                for entry in inventory_rows:
+                    if not isinstance(entry, dict):
+                        continue
+                    item_id = str(entry.get("item_id") or "").strip()
+                    if item_id in remap:
+                        entry["item_id"] = remap[item_id]
+            equipment_rows = normalized.get("equipment")
+            if isinstance(equipment_rows, dict):
+                for slot_id, value in list(equipment_rows.items()):
+                    if not isinstance(value, dict):
+                        continue
+                    item_id = str(value.get("item_id") or "").strip()
+                    if item_id in remap:
+                        updated_value = dict(value)
+                        updated_value["item_id"] = remap[item_id]
+                        equipment_rows[slot_id] = updated_value
+
+        normalized["item_documents"] = canonical_documents
+        return normalize_inventory_payload(normalized), notes
+
     def _sync_local_sheet_inventory_from_host(
         self,
         character_id: str,
         inventory_payload: dict,
         *,
         sheet_name: str = "",
+        archive_b64: str = "",
         save_revision: int = 0,
         last_saved_at: str = "",
         content_hash: str = "",
@@ -9759,16 +9937,24 @@ class DungeonAppletWidget(QWidget):
             return True, "Inventory already synchronized."
         try:
             from player_sheets import (
-                apply_remote_inventory_payload_for_character_id,
+                apply_remote_character_package_for_character_id,
             )
         except Exception:
             return False, "Player sheets integration unavailable."
+        archive_bytes: bytes | None = None
+        clean_archive_b64 = str(archive_b64 or "").strip()
+        if clean_archive_b64:
+            try:
+                archive_bytes = base64.b64decode(clean_archive_b64.encode("ascii"), validate=True)
+            except Exception:
+                return False, "Linked character archive payload is invalid."
         self._suppress_external_inventory_forward = True
         try:
-            ok, message, saved_payload = apply_remote_inventory_payload_for_character_id(
+            ok, message, saved_payload = apply_remote_character_package_for_character_id(
                 clean_character,
                 str(sheet_name or clean_character),
                 payload,
+                archive_bytes=archive_bytes,
                 save_revision=resolved_save_revision,
                 last_saved_at=resolved_last_saved_at,
                 content_hash=resolved_content_hash,
@@ -9813,6 +9999,7 @@ class DungeonAppletWidget(QWidget):
             return None
         try:
             from player_sheets import (
+                archive_bytes_for_character_id,
                 character_id_for_entry,
                 list_character_link_targets,
                 sheet_id_for_entry,
@@ -9863,6 +10050,12 @@ class DungeonAppletWidget(QWidget):
             stats = {}
         if not str(stats.get("name") or "").strip():
             stats["name"] = sheet_name
+        archive_bytes = archive_bytes_for_character_id(clean_character)
+        archive_b64 = (
+            base64.b64encode(archive_bytes).decode("ascii")
+            if archive_bytes
+            else ""
+        )
 
         return {
             "sheet_id": sheet_id,
@@ -9874,6 +10067,7 @@ class DungeonAppletWidget(QWidget):
             "content_hash": str(getattr(target_entry, "content_hash", "") or "").strip(),
             "inventory": linked_inventory,
             "stats": stats,
+            "archive_b64": archive_b64,
         }
 
     def _linked_character_conflict_key(self, dungeon_id: str, entity_id: str, character_id: str) -> str:
@@ -9997,6 +10191,7 @@ class DungeonAppletWidget(QWidget):
         sheet_id = str(conflict.get("sheet_id") or "").strip()
         sheet_name = str(conflict.get("sheet_name") or sheet_id or character_id).strip() or character_id
         host_inventory = normalize_inventory_payload(conflict.get("inventory") or {})
+        host_archive_b64 = str(conflict.get("archive_b64") or "").strip()
         try:
             host_save_revision = max(0, int(conflict.get("save_revision") or 0))
         except (TypeError, ValueError):
@@ -10022,6 +10217,7 @@ class DungeonAppletWidget(QWidget):
                 character_id,
                 host_inventory,
                 sheet_name=sheet_name,
+                archive_b64=host_archive_b64,
                 save_revision=host_save_revision,
                 last_saved_at=host_last_saved_at,
                 content_hash=host_content_hash,
@@ -10075,6 +10271,7 @@ class DungeonAppletWidget(QWidget):
                     character_id,
                     host_inventory,
                     sheet_name=sheet_name,
+                    archive_b64=host_archive_b64,
                     save_revision=host_save_revision,
                     last_saved_at=host_last_saved_at,
                     content_hash=host_content_hash,
@@ -10122,6 +10319,7 @@ class DungeonAppletWidget(QWidget):
                         "content_hash": str(local_payload.get("content_hash") or ""),
                         "inventory": normalize_inventory_payload(local_payload.get("inventory") or {}),
                         "stats": dict(local_payload.get("stats") or {}),
+                        "archive_b64": str(local_payload.get("archive_b64") or ""),
                     },
                     unavailable_title="Linked Character Conflict",
                     unavailable_message="You are currently disconnected. Please wait for reconnect.",
@@ -10194,6 +10392,7 @@ class DungeonAppletWidget(QWidget):
                     "content_hash": str(payload.get("content_hash") or ""),
                     "inventory": normalize_inventory_payload(payload.get("inventory")),
                     "stats": dict(payload.get("stats") or {}),
+                    "archive_b64": str(payload.get("archive_b64") or ""),
                     "dungeon_id": dungeon_id or str(self._active_dungeon_id or ""),
                 }
                 fingerprint_source = {
@@ -10204,6 +10403,7 @@ class DungeonAppletWidget(QWidget):
                     "content_hash": host_payload["content_hash"],
                     "inventory": host_payload["inventory"],
                     "stats": host_payload["stats"],
+                    "archive_b64": host_payload["archive_b64"],
                 }
                 try:
                     fingerprint = json.dumps(
@@ -10284,6 +10484,7 @@ class DungeonAppletWidget(QWidget):
                         host_save_revision = 0
                     host_last_saved_at = str(item_data.get("linked_last_saved_at") or "").strip()
                     host_content_hash = str(item_data.get("linked_content_hash") or "").strip()
+                    host_archive_b64 = str(item_data.get("linked_sheet_archive_b64") or "").strip()
                     local_payload = self._resolve_local_sheet_sync_payload(character_id)
                     conflict_payload: dict | None = None
                     if isinstance(local_payload, dict):
@@ -10337,6 +10538,7 @@ class DungeonAppletWidget(QWidget):
                             "last_saved_at": host_last_saved_at,
                             "content_hash": host_content_hash,
                             "inventory": host_inventory,
+                            "archive_b64": host_archive_b64,
                             "allow_force_push": True,
                             "requires_local_create": False,
                         }
@@ -10349,6 +10551,7 @@ class DungeonAppletWidget(QWidget):
                                 "last_saved_at": host_last_saved_at,
                                 "content_hash": host_content_hash,
                                 "inventory": host_inventory,
+                                "archive_b64": host_archive_b64,
                             },
                         )
                         self._pending_link_conflicts.pop(conflict_key, None)
@@ -10367,6 +10570,7 @@ class DungeonAppletWidget(QWidget):
                             "last_saved_at": host_last_saved_at,
                             "content_hash": host_content_hash,
                             "inventory": host_inventory,
+                            "archive_b64": host_archive_b64,
                             "allow_force_push": False,
                             "requires_local_create": True,
                         }
@@ -10388,6 +10592,7 @@ class DungeonAppletWidget(QWidget):
                     character_id,
                     inventory_payload,
                     sheet_name=sheet_name,
+                    archive_b64=str(sync_payload.get("archive_b64") or ""),
                     save_revision=int(sync_payload.get("save_revision") or 0),
                     last_saved_at=str(sync_payload.get("last_saved_at") or ""),
                     content_hash=str(sync_payload.get("content_hash") or ""),
@@ -11655,6 +11860,7 @@ class DungeonAppletWidget(QWidget):
         content_hash: str = "",
         linked_inventory: dict,
         stats: dict,
+        archive_b64: str = "",
     ) -> None:
         normalized_inventory = normalize_inventory_payload(
             linked_inventory if isinstance(linked_inventory, dict) else {}
@@ -11669,6 +11875,7 @@ class DungeonAppletWidget(QWidget):
         entity.linked_last_saved_at = str(last_saved_at or "")
         entity.linked_content_hash = str(content_hash or "")
         entity.linked_inventory = dict(normalized_inventory)
+        entity.linked_sheet_archive_b64 = str(archive_b64 or "")
 
         label, hp_max, hp, ac, abilities = self._normalized_linked_stats(stats, fallback_name=sheet_name)
         if label:
@@ -11770,6 +11977,8 @@ class DungeonAppletWidget(QWidget):
         save_revision = int(getattr(entry, "save_revision", 0) or 0)
         last_saved_at = str(getattr(entry, "last_saved_at", "") or "").strip()
         content_hash = str(getattr(entry, "content_hash", "") or "").strip()
+        local_sync_payload = self._resolve_local_sheet_sync_payload(character_id) or {}
+        archive_b64 = str(local_sync_payload.get("archive_b64") or "").strip()
         self._apply_character_link_to_entity(
             entity,
             sheet_id=sheet_id,
@@ -11780,6 +11989,7 @@ class DungeonAppletWidget(QWidget):
             content_hash=content_hash,
             linked_inventory=linked_inventory,
             stats=stats,
+            archive_b64=archive_b64,
         )
 
         if all(
@@ -11831,6 +12041,7 @@ class DungeonAppletWidget(QWidget):
                             linked_inventory if isinstance(linked_inventory, dict) else {}
                         ),
                         "stats": dict(stats),
+                        "archive_b64": archive_b64,
                         "dungeon_id": str(self._active_dungeon_id or ""),
                     },
                     silent=True,
@@ -11848,6 +12059,8 @@ class DungeonAppletWidget(QWidget):
         save_revision: int | None = None,
         last_saved_at: str | None = None,
         content_hash: str | None = None,
+        stats: dict | None = None,
+        archive_b64: str | None = None,
     ) -> int:
         clean_character = str(character_id or "").strip()
         clean_sheet = str(sheet_id or "").strip()
@@ -11855,6 +12068,7 @@ class DungeonAppletWidget(QWidget):
             return 0
         normalized = normalize_inventory_payload(inventory_payload if isinstance(inventory_payload, dict) else {})
         owner_filter = str(owner_player_id or "").strip()
+        stats_payload = dict(stats or {})
         updated = 0
         for dungeon in self._dungeons:
             state = dungeon.get("state")
@@ -11883,6 +12097,22 @@ class DungeonAppletWidget(QWidget):
                     item_data["linked_last_saved_at"] = str(last_saved_at)
                 if content_hash is not None:
                     item_data["linked_content_hash"] = str(content_hash)
+                if archive_b64 is not None:
+                    item_data["linked_sheet_archive_b64"] = str(archive_b64)
+                label, max_hp, hp, ac, abilities = self._normalized_linked_stats(
+                    stats_payload,
+                    fallback_name=str(item_data.get("linked_sheet_name") or item_data.get("label") or ""),
+                )
+                if label:
+                    item_data["label"] = label
+                if max_hp is not None:
+                    item_data["max_hp"] = int(max_hp)
+                if hp is not None:
+                    item_data["hp"] = int(hp)
+                if ac is not None:
+                    item_data["ac"] = int(ac)
+                for stat_key, stat_value in abilities.items():
+                    item_data[stat_key] = int(stat_value)
                 dungeon_updated = True
                 updated += 1
             if dungeon_updated:
@@ -11907,6 +12137,21 @@ class DungeonAppletWidget(QWidget):
                 item.linked_last_saved_at = str(last_saved_at)
             if content_hash is not None:
                 item.linked_content_hash = str(content_hash)
+            if archive_b64 is not None:
+                item.linked_sheet_archive_b64 = str(archive_b64)
+            label, max_hp, hp, ac, abilities = self._normalized_linked_stats(
+                stats_payload,
+                fallback_name=str(item.data(ROLE_LINKED_SHEET_NAME) or item.data(ROLE_LABEL) or ""),
+            )
+            if label:
+                item.setData(ROLE_LABEL, label)
+            if max_hp is not None and max_hp > 0:
+                item._max_hp = max_hp
+                item.hp = hp if hp is not None else max_hp
+            if ac is not None and ac > 0:
+                item.ac = ac
+            for stat_key, stat_value in abilities.items():
+                setattr(item, stat_key, stat_value)
             item.update()
 
         return updated
@@ -11947,6 +12192,8 @@ class DungeonAppletWidget(QWidget):
                     "last_saved_at": str(sync_payload.get("last_saved_at") or ""),
                     "content_hash": str(sync_payload.get("content_hash") or ""),
                     "inventory": payload,
+                    "stats": dict(sync_payload.get("stats") or {}),
+                    "archive_b64": str(sync_payload.get("archive_b64") or ""),
                     "dungeon_id": str(self._active_dungeon_id or ""),
                 },
                 silent=True,
@@ -11978,6 +12225,8 @@ class DungeonAppletWidget(QWidget):
             save_revision=save_revision,
             last_saved_at=last_saved_at,
             content_hash=content_hash,
+            stats=dict(sync_payload.get("stats") or {}) if isinstance(sync_payload, dict) else {},
+            archive_b64=str(sync_payload.get("archive_b64") or "") if isinstance(sync_payload, dict) else "",
         )
         if self._online_mode == ONLINE_MODE_DM_HOST:
             self._broadcast_snapshot_if_host()
@@ -12153,6 +12402,7 @@ class DungeonAppletWidget(QWidget):
                         "linked_save_revision": int(getattr(item, "linked_save_revision", 0) or 0),
                         "linked_last_saved_at": str(getattr(item, "linked_last_saved_at", "") or ""),
                         "linked_content_hash": str(getattr(item, "linked_content_hash", "") or ""),
+                        "linked_sheet_archive_b64": str(getattr(item, "linked_sheet_archive_b64", "") or ""),
                         "linked_inventory": normalize_inventory_payload(linked_inventory if isinstance(linked_inventory, dict) else {}),
                         "layer": item.data(ROLE_LAYER) or LAYER_FG,
                         "z": float(item.zValue()),
@@ -12261,6 +12511,7 @@ class DungeonAppletWidget(QWidget):
                 entity.linked_save_revision = int(item_data.get("linked_save_revision", 0) or 0)
                 entity.linked_last_saved_at = str(item_data.get("linked_last_saved_at", "") or "")
                 entity.linked_content_hash = str(item_data.get("linked_content_hash", "") or "")
+                entity.linked_sheet_archive_b64 = str(item_data.get("linked_sheet_archive_b64", "") or "")
                 linked_inventory = item_data.get("linked_inventory")
                 entity.linked_inventory = normalize_inventory_payload(linked_inventory if isinstance(linked_inventory, dict) else {})
                 label = item_data.get("label")

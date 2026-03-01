@@ -4,7 +4,7 @@ from __future__ import annotations
 
 Archive layout:
 - sheet.pdf
-- inventory.json (backpack/equipment/notes/currency only)
+- inventory.json (linked inventory state plus referenced item documents)
 - info.json
 """
 
@@ -15,7 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from item_file_format import normalize_item_name
+from item_file_format import (
+    ITEM_FILE_FORMAT,
+    ensure_item_payload_id,
+    item_id_from_payload,
+    normalize_item_name,
+)
 
 
 ARCHIVE_EXTENSION = ".dmtchar"
@@ -70,6 +75,32 @@ def _normalize_item_entry(
     }
 
 
+def _normalize_item_document(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    if str(raw.get("format") or "").strip().lower() != ITEM_FILE_FORMAT:
+        return None
+    payload = raw.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    normalized_payload = ensure_item_payload_id(payload, preserve_existing=True)
+    normalized_document: dict[str, Any] = {
+        "format": ITEM_FILE_FORMAT,
+        "payload": normalized_payload,
+    }
+    icon_asset_name = str(raw.get("icon_asset_name") or "").strip()
+    assets = raw.get("assets")
+    if (
+        icon_asset_name
+        and isinstance(assets, dict)
+        and isinstance(assets.get(icon_asset_name), dict)
+    ):
+        asset_payload = dict(assets.get(icon_asset_name) or {})
+        normalized_document["icon_asset_name"] = icon_asset_name
+        normalized_document["assets"] = {icon_asset_name: asset_payload}
+    return normalized_document
+
+
 def normalize_inventory_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     src = payload if isinstance(payload, dict) else {}
     inventory_raw = src.get("inventory")
@@ -110,6 +141,34 @@ def normalize_inventory_payload(payload: dict[str, Any] | None) -> dict[str, Any
                 continue
             equipment[slot_id] = _normalize_item_entry(value, default_quantity=1)
 
+    referenced_item_ids: set[str] = set()
+    for entry in inventory:
+        item_id = str(entry.get("item_id") or "").strip()
+        if item_id:
+            referenced_item_ids.add(item_id)
+    for value in equipment.values():
+        if not isinstance(value, dict):
+            continue
+        item_id = str(value.get("item_id") or "").strip()
+        if item_id:
+            referenced_item_ids.add(item_id)
+
+    item_documents: dict[str, dict[str, Any]] = {}
+    raw_item_documents = src.get("item_documents")
+    raw_documents_iterable: list[object] = []
+    if isinstance(raw_item_documents, dict):
+        raw_documents_iterable = list(raw_item_documents.values())
+    elif isinstance(raw_item_documents, list):
+        raw_documents_iterable = list(raw_item_documents)
+    for raw_document in raw_documents_iterable:
+        normalized_document = _normalize_item_document(raw_document)
+        if normalized_document is None:
+            continue
+        payload_item_id = item_id_from_payload(normalized_document.get("payload"))
+        if not payload_item_id or payload_item_id not in referenced_item_ids:
+            continue
+        item_documents[payload_item_id] = normalized_document
+
     return {
         "inventory": inventory,
         "inventory_notes": notes,
@@ -117,6 +176,7 @@ def normalize_inventory_payload(payload: dict[str, Any] | None) -> dict[str, Any
         "gold": _coerce_currency(src.get("gold", 0)),
         "silver": _coerce_currency(src.get("silver", 0)),
         "copper": _coerce_currency(src.get("copper", 0)),
+        "item_documents": item_documents,
     }
 
 

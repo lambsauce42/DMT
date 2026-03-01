@@ -23,6 +23,7 @@ from character_archive import (
     read_character_inventory,
     write_character_archive,
 )
+from item_file_format import build_item_document, load_item_document
 import player_sheets
 
 
@@ -204,6 +205,9 @@ def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> No
             "gold": "12",
             "silver": -5,
             "copper": "x",
+            "item_documents": {
+                "sword": build_item_document({"item_id": "sword", "title": "Sword"}, None),
+            },
             "hp": 42,  # Should not be persisted in inventory schema.
         },
         meta={"name": "Hero", "character_id": "character_hero_unique"},
@@ -221,6 +225,7 @@ def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> No
             "gold",
             "silver",
             "copper",
+            "item_documents",
         }
         raw_meta = json.loads(zf.read(META_ENTRY_NAME).decode("utf-8"))
         assert raw_meta["name"] == "Hero"
@@ -241,11 +246,37 @@ def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> No
     assert payload["gold"] == 12
     assert payload["silver"] == 0
     assert payload["copper"] == 0
+    assert payload["item_documents"]["sword"]["payload"]["title"] == "Sword"
     assert "hp" not in payload
 
     extracted_pdf = tmp_path / "restored.pdf"
     assert extract_character_pdf(archive_path, extracted_pdf)
     assert extracted_pdf.read_bytes() == source_pdf.read_bytes()
+
+
+def test_sync_entry_archive_materializes_item_document_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    source_pdf = tmp_path / "hero.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4 hero")
+    entry = player_sheets.PlayerSheetEntry(
+        name="Hero",
+        pdf_path=str(source_pdf),
+        inventory=["item_a"],
+        item_documents={
+            "item_a": build_item_document({"item_id": "item_a", "title": "Hero Blade"}, None)
+        },
+    )
+
+    assert player_sheets.sync_entry_archive(entry)
+
+    cache_dir = player_sheets.linked_character_item_cache_dir(player_sheets.sheet_id_for_entry(entry))
+    cached_files = list(cache_dir.glob("*.dmtitem"))
+    assert len(cached_files) == 1
+    cached_document = load_item_document(cached_files[0])
+    assert isinstance(cached_document, dict)
+    assert cached_document["payload"]["item_id"] == "item_a"
 
 
 def test_entries_with_same_name_get_distinct_stable_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
