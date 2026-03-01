@@ -117,6 +117,24 @@ def test_player_actions_remain_blocked_until_first_snapshot_after_hello_ack(dung
     assert dungeon_widget._awaiting_player_snapshot is False
 
 
+def test_disconnect_after_hello_ack_keeps_player_mode_and_reconnects(dungeon_widget):
+    controller = ClientSessionController(dungeon_widget)
+    controller.disconnected.connect(dungeon_widget._on_client_disconnected)
+    controller._connect_host = "127.0.0.1"
+    controller._connect_port = 8765
+    controller._connect_name = "Mira"
+    dungeon_widget._client_controller = controller
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_name = "Mira"
+
+    dungeon_widget._on_client_hello_ack("player-1")
+    controller._on_disconnected()
+
+    assert dungeon_widget._online_mode == ONLINE_MODE_PLAYER
+    assert controller._manual_disconnect is False
+    assert controller._reconnect_timer.isActive()
+
+
 def test_first_player_snapshot_runs_pending_override_sync(dungeon_widget, monkeypatch):
     calls = []
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
@@ -214,3 +232,66 @@ def test_push_local_character_overrides_uses_linked_character_id_lookup(dungeon_
     assert sent
     assert sent[-1][0] == "link_character_entity"
     assert sent[-1][1]["character_id"] == "character-1"
+
+
+def test_push_local_character_overrides_retries_after_failed_send(dungeon_widget, monkeypatch):
+    sent = []
+
+    class _ClientStub:
+        def __init__(self):
+            self.fail_first = True
+
+        def send_command(self, action, payload, request_id=None):
+            sent.append((action, dict(payload), request_id))
+            if self.fail_first:
+                self.fail_first = False
+                return False
+            return True
+
+        def disconnect(self):
+            return None
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._active_dungeon_id = "d-1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d-1",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-local",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-1",
+                    }
+                ],
+                "fog": {"path": []},
+            },
+        }
+    ]
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda _identifier: {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": "character-1",
+            "save_revision": 2,
+            "last_saved_at": "",
+            "content_hash": "hash-1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+        },
+    )
+
+    first_sent_count = dungeon_widget._push_local_character_overrides_to_host()
+    second_sent_count = dungeon_widget._push_local_character_overrides_to_host()
+
+    assert first_sent_count == 0
+    assert second_sent_count == 1
+    assert len(sent) == 2
