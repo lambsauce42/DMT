@@ -4776,6 +4776,8 @@ class DungeonAppletWidget(QWidget):
         if previous_session_id and previous_session_id != "local":
             self._clear_online_runtime_cache(previous_session_id)
         self._update_connected_players({})
+        self._collection_path = None
+        self._collection_autosave_timer.stop()
         self._online_session_id = f"join_{host_ip}_{int(port)}".replace(":", "_")
         self._host_ip = host_ip
         self._host_port = int(port)
@@ -8235,7 +8237,9 @@ class DungeonAppletWidget(QWidget):
             save_revision = 0
         last_saved_at = str(payload.get("last_saved_at") or "").strip()
         content_hash = str(payload.get("content_hash") or "").strip()
-        archive_b64 = str(payload.get("archive_b64") or "").strip()
+        archive_ok, archive_b64 = self._validate_archive_payload(
+            str(payload.get("archive_b64") or "")
+        )
         inventory_payload = payload.get("inventory")
         stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
         if not sheet_id or not isinstance(inventory_payload, dict):
@@ -8243,6 +8247,14 @@ class DungeonAppletWidget(QWidget):
                 player_id,
                 ok=False,
                 message="Invalid inventory sync payload",
+                request_id=request_id,
+            )
+            return
+        if not archive_ok:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Linked character archive payload is invalid.",
                 request_id=request_id,
             )
             return
@@ -8284,6 +8296,47 @@ class DungeonAppletWidget(QWidget):
                 request_id=request_id,
             )
             return
+
+        linked_entries = self._linked_entity_state_entries_for_character(
+            player_id=player_id,
+            character_id=character_id,
+            sheet_id=sheet_id,
+        )
+        if linked_entries:
+            conflict_dungeon, host_item_data = linked_entries[0]
+            if self._host_should_reject_stale_inventory_sync(
+                host_item_data=host_item_data,
+                incoming_inventory=inventory_payload,
+                incoming_save_revision=save_revision,
+                incoming_content_hash=content_hash,
+            ):
+                conflict_dungeon_id = (
+                    str(conflict_dungeon.get("id") or "").strip()
+                    if isinstance(conflict_dungeon, dict)
+                    else ""
+                )
+                response_data = self._host_authoritative_link_conflict_data(
+                    entity_id=str(host_item_data.get("entity_id") or "").strip(),
+                    sheet_id=sheet_id,
+                    sheet_name=(
+                        str(host_item_data.get("linked_sheet_name") or sheet_id).strip()
+                        or sheet_id
+                    ),
+                    dungeon_id=conflict_dungeon_id,
+                    item_data=host_item_data,
+                    requested_character_id=character_id,
+                )
+                self._host_controller.send_command_result(
+                    player_id,
+                    ok=False,
+                    message=(
+                        "Host has newer authoritative linked character data. "
+                        "Resolve the conflict before syncing inventory."
+                    ),
+                    request_id=request_id,
+                    data=response_data,
+                )
+                return
 
         existing_inventory = self._linked_inventory_payload_for_player_sheet(
             player_id=player_id,
@@ -8405,7 +8458,9 @@ class DungeonAppletWidget(QWidget):
             save_revision = 0
         last_saved_at = str(payload.get("last_saved_at") or "").strip()
         content_hash = str(payload.get("content_hash") or "").strip()
-        archive_b64 = str(payload.get("archive_b64") or "").strip()
+        archive_ok, archive_b64 = self._validate_archive_payload(
+            str(payload.get("archive_b64") or "")
+        )
         dungeon_id = str(payload.get("dungeon_id") or self._players_dungeon_id or "").strip()
         stats = payload.get("stats")
         inventory = payload.get("inventory")
@@ -8414,6 +8469,14 @@ class DungeonAppletWidget(QWidget):
                 player_id,
                 ok=False,
                 message="Invalid link payload",
+                request_id=request_id,
+            )
+            return
+        if not archive_ok:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="Linked character archive payload is invalid.",
                 request_id=request_id,
             )
             return
@@ -8853,6 +8916,120 @@ class DungeonAppletWidget(QWidget):
                     return normalize_inventory_payload(linked_inventory)
                 return normalize_inventory_payload({})
         return None
+
+    def _linked_entity_state_entries_for_character(
+        self,
+        *,
+        player_id: str,
+        character_id: str,
+        sheet_id: str = "",
+    ) -> list[tuple[dict, dict]]:
+        clean_player = str(player_id or "").strip()
+        clean_character = str(character_id or "").strip()
+        clean_sheet = str(sheet_id or "").strip()
+        if not clean_player or not clean_character:
+            return []
+        matches: list[tuple[dict, dict]] = []
+        for dungeon in self._dungeons:
+            state = dungeon.get("state")
+            if not isinstance(state, dict):
+                continue
+            items = state.get("items")
+            if not isinstance(items, list):
+                continue
+            for item_data in items:
+                if not isinstance(item_data, dict):
+                    continue
+                if item_data.get("type") != "entity":
+                    continue
+                if str(item_data.get("owner_player_id") or "").strip() != clean_player:
+                    continue
+                if str(item_data.get("linked_character_id") or "").strip() != clean_character:
+                    continue
+                if clean_sheet and str(item_data.get("linked_sheet_id") or "").strip() != clean_sheet:
+                    continue
+                matches.append((dungeon, item_data))
+        return matches
+
+    def _host_should_reject_stale_inventory_sync(
+        self,
+        *,
+        host_item_data: dict,
+        incoming_inventory: dict,
+        incoming_save_revision: int,
+        incoming_content_hash: str,
+    ) -> bool:
+        if not isinstance(host_item_data, dict):
+            return False
+        host_inventory = normalize_inventory_payload(host_item_data.get("linked_inventory") or {})
+        host_content_hash = str(host_item_data.get("linked_content_hash") or "").strip()
+        try:
+            host_save_revision = max(0, int(host_item_data.get("linked_save_revision") or 0))
+        except (TypeError, ValueError):
+            host_save_revision = 0
+        if incoming_save_revision > host_save_revision:
+            return False
+        if incoming_save_revision < host_save_revision:
+            return True
+        if incoming_content_hash and host_content_hash:
+            return incoming_content_hash != host_content_hash
+        if incoming_save_revision > 0 or host_save_revision > 0 or host_content_hash:
+            return (
+                self._inventory_payload_fingerprint(incoming_inventory)
+                != self._inventory_payload_fingerprint(host_inventory)
+            )
+        return False
+
+    def _validate_archive_payload(self, archive_b64: str) -> tuple[bool, str]:
+        clean_archive_b64 = str(archive_b64 or "").strip()
+        if not clean_archive_b64:
+            return True, ""
+        try:
+            base64.b64decode(clean_archive_b64.encode("ascii"), validate=True)
+        except Exception:
+            return False, ""
+        return True, clean_archive_b64
+
+    def _apply_authoritative_item_documents_to_inventory_payload(
+        self,
+        inventory_payload: dict,
+        *,
+        item_ids: set[str],
+        existing_inventory: dict | None = None,
+    ) -> dict:
+        normalized = normalize_inventory_payload(
+            inventory_payload if isinstance(inventory_payload, dict) else {}
+        )
+        selected_ids = {
+            str(item_id or "").strip()
+            for item_id in item_ids
+            if str(item_id or "").strip()
+        }
+        if not selected_ids:
+            return normalized
+        updated_documents = _inventory_payload_item_documents(normalized)
+        existing_documents = _inventory_payload_item_documents(existing_inventory or {})
+        for item_id in sorted(selected_ids):
+            authoritative_document = (
+                existing_documents.get(item_id)
+                or self._linked_item_document_by_id(item_id)
+            )
+            if authoritative_document is None:
+                continue
+            updated_documents[item_id] = authoritative_document
+        normalized["item_documents"] = updated_documents
+        return normalize_inventory_payload(normalized)
+
+    def _has_pending_link_conflict_for_character(self, character_id: str) -> bool:
+        clean_character = str(character_id or "").strip()
+        if not clean_character:
+            return False
+        for conflict in self._pending_link_conflicts.values():
+            if not isinstance(conflict, dict):
+                continue
+            if str(conflict.get("character_id") or "").strip() == clean_character:
+                return True
+        return False
 
     def _linked_inventory_sync_metadata(
         self,
@@ -9976,12 +10153,35 @@ class DungeonAppletWidget(QWidget):
 
         unresolved: list[dict] = []
         for item_id in item_ids:
-            if item_id in existing_documents:
+            existing_document = existing_documents.get(item_id)
+            if existing_document is not None:
                 continue
             library_document = self._linked_item_document_by_id(item_id)
+            incoming_document = incoming_documents.get(item_id)
+            if (
+                library_document is not None
+                and incoming_document is not None
+                and not item_document_matches(library_document, incoming_document)
+            ):
+                payload = incoming_document.get("payload") if isinstance(incoming_document, dict) else {}
+                title = (
+                    str(payload.get("title") or payload.get("name") or item_id).strip()
+                    if isinstance(payload, dict)
+                    else item_id
+                )
+                unresolved.append(
+                    {
+                        "item_id": item_id,
+                        "title": title or item_id,
+                        "path": "",
+                        "item_document": dict(incoming_document),
+                        "authority_document": dict(library_document),
+                        "conflicts_with_authority": True,
+                    }
+                )
+                continue
             if library_document is not None:
                 continue
-            incoming_document = incoming_documents.get(item_id)
             payload = incoming_document.get("payload") if isinstance(incoming_document, dict) else {}
             title = (
                 str(payload.get("title") or payload.get("name") or item_id).strip()
@@ -9994,6 +10194,8 @@ class DungeonAppletWidget(QWidget):
                     "title": title or item_id,
                     "path": "",
                     "item_document": dict(incoming_document) if isinstance(incoming_document, dict) else None,
+                    "authority_document": None,
+                    "conflicts_with_authority": False,
                 }
             )
         return unresolved
@@ -10114,14 +10316,14 @@ class DungeonAppletWidget(QWidget):
         layout.setSpacing(8)
 
         heading = QLabel(
-            f"'{sheet_name or character_id or 'Character'}' contains item definitions the DM has not approved yet.",
+            f"'{sheet_name or character_id or 'Character'}' contains item definitions that need DM review.",
             dialog,
         )
         heading.setWordWrap(True)
         layout.addWidget(heading)
 
         info = QLabel(
-            "Select one or more items to import into the DM library or remove from the incoming character update. "
+            "Select one or more items to accept into authority or remove from the incoming character update. "
             "You can also kick the player to reject the entire update.",
             dialog,
         )
@@ -10146,7 +10348,7 @@ class DungeonAppletWidget(QWidget):
             list_widget.setCurrentRow(0)
 
         buttons = QDialogButtonBox(parent=dialog)
-        import_button = buttons.addButton("Add Selected To DM Library", QDialogButtonBox.ButtonRole.AcceptRole)
+        import_button = buttons.addButton("Accept Selected", QDialogButtonBox.ButtonRole.AcceptRole)
         remove_button = buttons.addButton("Remove Selected", QDialogButtonBox.ButtonRole.DestructiveRole)
         kick_button = buttons.addButton("Kick Player", QDialogButtonBox.ButtonRole.RejectRole)
         layout.addWidget(buttons)
@@ -10247,14 +10449,30 @@ class DungeonAppletWidget(QWidget):
                     for entry in unresolved_entries
                     if str(entry.get("item_id") or "").strip() in selected_item_ids
                 ]
+                accepted_conflicts = [
+                    entry
+                    for entry in selected_entries
+                    if bool(entry.get("conflicts_with_authority"))
+                ]
+                if accepted_conflicts:
+                    working_payload = self._apply_authoritative_item_documents_to_inventory_payload(
+                        working_payload,
+                        item_ids=selected_item_ids,
+                        existing_inventory=existing_inventory,
+                    )
                 imported_count, import_messages = self._import_linked_item_documents_to_dm_library(selected_entries)
                 if import_messages:
                     self._append_server_log(f"[WARN] {' '.join(import_messages)}")
-                if imported_count <= 0:
-                    return "blocked", working_payload, "Unknown linked items are still unresolved."
-                status_note = "Imported unknown linked items into the DM library."
+                if imported_count <= 0 and not accepted_conflicts:
+                    return "blocked", working_payload, "Linked item review is still unresolved."
+                if accepted_conflicts and imported_count > 0:
+                    status_note = "Accepted reviewed linked items and imported new definitions into the DM library."
+                elif accepted_conflicts:
+                    status_note = "Accepted DM-authoritative definitions for conflicting linked items."
+                else:
+                    status_note = "Imported unknown linked items into the DM library."
                 continue
-            return "blocked", working_payload, "Unknown linked items are still unresolved."
+            return "blocked", working_payload, "Linked item review is still unresolved."
 
     def _canonicalize_linked_inventory_payload(
         self,
@@ -12225,6 +12443,9 @@ class DungeonAppletWidget(QWidget):
         if not self._autosave_enabled:
             self._collection_autosave_timer.stop()
             return
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            self._collection_autosave_timer.stop()
+            return
         if not self._collection_dirty:
             self._collection_autosave_timer.stop()
             return
@@ -12676,6 +12897,11 @@ class DungeonAppletWidget(QWidget):
             self._online_mode == ONLINE_MODE_PLAYER
         ):
             if not character_id:
+                return
+            if self._has_pending_link_conflict_for_character(character_id):
+                self._append_server_log(
+                    "[WARN] Inventory sync blocked until the linked character conflict is resolved."
+                )
                 return
             sync_payload = self._resolve_local_sheet_sync_payload(character_id) or {}
             self._dispatch_player_command(
@@ -13254,7 +13480,7 @@ class DungeonAppletWidget(QWidget):
         dirty = self._collection_meta_dirty or any(d.get("dirty") for d in self._dungeons)
         self._collection_dirty = dirty
         self._update_collection_header()
-        if dirty:
+        if dirty and self._online_mode != ONLINE_MODE_PLAYER:
             self._schedule_collection_autosave()
         else:
             self._collection_autosave_timer.stop()

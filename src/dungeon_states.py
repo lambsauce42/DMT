@@ -1191,9 +1191,14 @@ class EraserState(CanvasState):
         hit_rect = QRectF(scene_pos.x() - hit_radius, scene_pos.y() - hit_radius, 
                          hit_radius * 2, hit_radius * 2)
         items = self.canvas.scene().items(hit_rect)
+        current_owner = str(getattr(self.canvas, "_stroke_owner_player_id", "") or "").strip()
         for item in items:
             # ONLY erase brush strokes
             if item.data(ROLE_KIND) == "stroke":
+                if current_owner:
+                    stroke_owner = str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip()
+                    if stroke_owner != current_owner:
+                        continue
                 # Verify item is still in scene (might have been deleted in previous step of same stroke)
                 if item.scene() == self.canvas.scene():
                     cmd = DeleteItemCommand(self.canvas.scene(), item, "Erase Item")

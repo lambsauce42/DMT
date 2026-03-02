@@ -64,6 +64,12 @@ The DM approves authority, the collection stores authority, and players continuo
 3. If the host saves the collection and restarts, reassignment and handoff must use the saved collection-backed character package.
 4. Player B should receive the latest host-approved version of player A's character, including approved item definitions.
 
+## Session continuity
+
+1. Continuing a trusted session on another day should stay simple.
+2. A host restart should preserve collection-backed character authority, active player assignments, and normal session flow without forcing large-scale manual reassignment.
+3. Safety checks should block only the conflicting part of recovery, not create unnecessary re-setup work for unchanged session state.
+
 ## Handoff
 
 1. When player A leaves, the character remains as collection-backed authoritative state on the host.
