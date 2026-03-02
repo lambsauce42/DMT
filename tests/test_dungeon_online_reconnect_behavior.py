@@ -135,7 +135,7 @@ def test_disconnect_after_hello_ack_keeps_player_mode_and_reconnects(dungeon_wid
     assert controller._reconnect_timer.isActive()
 
 
-def test_first_player_snapshot_runs_pending_override_sync(dungeon_widget, monkeypatch):
+def test_first_player_snapshot_does_not_auto_push_pending_character_overrides(dungeon_widget, monkeypatch):
     calls = []
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._local_player_id = "player-local"
@@ -169,8 +169,91 @@ def test_first_player_snapshot_runs_pending_override_sync(dungeon_widget, monkey
 
     dungeon_widget._on_client_snapshot_received(snapshot)
 
-    assert calls == ["called"]
+    assert calls == []
     assert dungeon_widget._pending_join_character_override_sync is False
+
+
+def test_snapshot_with_newer_local_linked_character_prompts_conflict_instead_of_auto_push(
+    dungeon_widget, monkeypatch
+):
+    pushed = []
+    prompted = []
+
+    class _ClientStub:
+        def send_command(self, action, payload, request_id=None):
+            pushed.append((action, dict(payload), request_id))
+            return True
+
+        def disconnect(self):
+            return None
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._pending_join_character_override_sync = True
+    dungeon_widget._client_controller = _ClientStub()
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda _identifier: {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": "character-1",
+            "save_revision": 5,
+            "last_saved_at": "",
+            "content_hash": "local-hash",
+            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+            "stats": {"name": "Hero"},
+        },
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_linked_character_conflict",
+        lambda conflict, **_kwargs: prompted.append(dict(conflict)),
+    )
+
+    snapshot = {
+        "collection_name": "Remote Collection",
+        "active_dungeon_id": "d-1",
+        "players_dungeon_id": "d-1",
+        "dungeons": [
+            {
+                "id": "d-1",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-local",
+                            "linked_sheet_id": "sheet-1",
+                            "linked_sheet_name": "Hero",
+                            "linked_character_id": "character-1",
+                            "linked_save_revision": 2,
+                            "linked_content_hash": "host-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                            "pos": [0.0, 0.0],
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+        "players": {"player-local": "Mira"},
+        "loot_pool": [],
+        "initiative_state": {
+            "active": False,
+            "collapsed": False,
+            "player_entries": {},
+            "entity_entries": {},
+        },
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert pushed == []
+    assert len(prompted) == 1
+    assert prompted[0]["character_id"] == "character-1"
 
 
 def test_push_local_character_overrides_uses_linked_character_id_lookup(dungeon_widget, monkeypatch):

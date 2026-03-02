@@ -5,6 +5,7 @@ import hashlib
 import os
 import json
 import math
+import shutil
 import sys
 import time
 import re
@@ -7611,7 +7612,7 @@ class DungeonAppletWidget(QWidget):
         self._local_player_id = player_id
         self._player_connection_ready = False
         self._awaiting_player_snapshot = True
-        self._pending_join_character_override_sync = True
+        self._pending_join_character_override_sync = False
         self._debug_log("client_hello_ack", player_id=str(player_id or ""))
         self._append_chat_message(
             "System",
@@ -8340,6 +8341,49 @@ class DungeonAppletWidget(QWidget):
         if updated > 0:
             self._broadcast_snapshot_if_host()
 
+    def _host_authoritative_link_conflict_data(
+        self,
+        *,
+        entity_id: str,
+        sheet_id: str,
+        sheet_name: str,
+        dungeon_id: str,
+        item_data: dict,
+        requested_character_id: str = "",
+    ) -> dict:
+        conflict_character_id = (
+            str(requested_character_id or "").strip()
+            or str(item_data.get("linked_character_id") or "").strip()
+            or str(item_data.get("linked_sheet_id") or sheet_id or "").strip()
+        )
+        conflict_key = self._linked_character_conflict_key(
+            dungeon_id,
+            entity_id,
+            conflict_character_id,
+        )
+        return {
+            "action": "resolve_linked_character_conflict",
+            "resolution": "host_authoritative",
+            "conflict": {
+                "conflict_key": conflict_key,
+                "entity_id": entity_id,
+                "character_id": conflict_character_id,
+                "sheet_id": str(item_data.get("linked_sheet_id") or sheet_id or "").strip(),
+                "sheet_name": (
+                    str(item_data.get("linked_sheet_name") or sheet_name or "").strip()
+                    or str(sheet_id or "").strip()
+                ),
+                "dungeon_id": dungeon_id,
+                "save_revision": int(item_data.get("linked_save_revision") or 0),
+                "last_saved_at": str(item_data.get("linked_last_saved_at") or "").strip(),
+                "content_hash": str(item_data.get("linked_content_hash") or "").strip(),
+                "inventory": normalize_inventory_payload(item_data.get("linked_inventory") or {}),
+                "archive_b64": str(item_data.get("linked_sheet_archive_b64") or "").strip(),
+                "allow_force_push": True,
+                "requires_local_create": False,
+            },
+        }
+
     def _handle_host_link_character_entity(
         self,
         player_id: str,
@@ -8347,6 +8391,7 @@ class DungeonAppletWidget(QWidget):
         *,
         request_id: str | None = None,
         result_data: dict | None = None,
+        allow_existing_link_overwrite: bool = False,
     ) -> None:
         if self._host_controller is None:
             return
@@ -8415,8 +8460,34 @@ class DungeonAppletWidget(QWidget):
                         ok=False,
                         message="That character is already actively assigned to another player-owned entity.",
                         request_id=request_id,
-                    )
+                )
                     return
+
+        existing_sheet_id = str(item_data.get("linked_sheet_id") or "").strip()
+        existing_character_id = str(item_data.get("linked_character_id") or "").strip()
+        if (
+            (existing_sheet_id or existing_character_id)
+            and not allow_existing_link_overwrite
+        ):
+            response_data = self._host_authoritative_link_conflict_data(
+                entity_id=entity_id,
+                sheet_id=sheet_id,
+                sheet_name=sheet_name,
+                dungeon_id=dungeon_id,
+                item_data=item_data,
+                requested_character_id=character_id,
+            )
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=(
+                    "Entity already has host-authoritative linked character data. "
+                    "Use the conflict prompt to overwrite your local copy or request a DM-approved overwrite."
+                ),
+                request_id=request_id,
+                data=response_data,
+            )
+            return
 
         existing_inventory = item_data.get("linked_inventory") if isinstance(item_data.get("linked_inventory"), dict) else {}
         resolution_status, resolved_inventory_payload, resolution_note = self._resolve_unknown_linked_items_for_host(
@@ -8448,9 +8519,6 @@ class DungeonAppletWidget(QWidget):
             resolved_inventory_payload,
             existing_inventory=existing_inventory,
         )
-        # Intentional: player-side character edits are allowed to overwrite the host copy
-        # for that player's linked entity so DM/runtime state stays in sync with the
-        # player's latest character sheet on (re)join and subsequent link syncs.
         label, max_hp, hp, ac, abilities = self._normalized_linked_stats(stats, fallback_name=sheet_name)
         item_data["linked_sheet_id"] = sheet_id
         item_data["linked_sheet_name"] = sheet_name
@@ -8697,6 +8765,7 @@ class DungeonAppletWidget(QWidget):
                     "content_hash": str(item_data.get("linked_content_hash") or ""),
                 },
             },
+            allow_existing_link_overwrite=True,
         )
 
     def _player_has_linked_sheet(self, player_id: str, sheet_id: str) -> bool:
@@ -10127,7 +10196,7 @@ class DungeonAppletWidget(QWidget):
             ],
             "signature": signature,
         }
-        if resolved["action"] in {"remove", "kick"}:
+        if resolved["action"] in {"blocked", "remove", "kick"}:
             self._host_unknown_item_review_cache[cache_key] = dict(resolved)
         return resolved
 
@@ -10667,7 +10736,7 @@ class DungeonAppletWidget(QWidget):
                 dialog.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
             else:
                 dialog.setText(
-                    f"The DM has a newer linked version of '{sheet_name}' for this character."
+                    f"Your local copy differs from the host-authoritative linked version of '{sheet_name}'."
                 )
                 if allow_force_push:
                     dialog.setInformativeText(
@@ -10913,13 +10982,14 @@ class DungeonAppletWidget(QWidget):
                         except (TypeError, ValueError):
                             local_save_revision = 0
                         local_content_hash = str(local_payload.get("content_hash") or "").strip()
-                        if local_save_revision > host_save_revision:
-                            self._pending_link_conflicts.pop(conflict_key, None)
-                            self._suppressed_link_conflicts.pop(conflict_key, None)
-                            continue
                         local_inventory = normalize_inventory_payload(local_payload.get("inventory") or {})
                         needs_conflict = False
-                        if local_save_revision == host_save_revision:
+                        if local_save_revision > host_save_revision:
+                            self._append_server_log(
+                                "[WARN] Character sync conflict: local copy is newer than host authority and requires explicit resolution."
+                            )
+                            needs_conflict = True
+                        elif local_save_revision == host_save_revision:
                             if local_content_hash and host_content_hash:
                                 if local_content_hash == host_content_hash:
                                     self._pending_link_conflicts.pop(conflict_key, None)
@@ -11024,19 +11094,9 @@ class DungeonAppletWidget(QWidget):
                     self._append_server_log(f"[WARN] {message}")
 
         def _run_post_snapshot_character_sync() -> None:
-            should_push_overrides = bool(self._pending_join_character_override_sync)
             self._pending_join_character_override_sync = False
             _sync_owned_sheet_inventories_from_snapshot()
             self._cleanup_unlinked_managed_character_artifacts()
-            if should_push_overrides and not conflicts_detected:
-                try:
-                    sent_count = int(self._push_local_character_overrides_to_host())
-                except Exception as exc:
-                    self._append_server_log(
-                        f"[WARN] Failed to push local character overrides after join: {exc}"
-                    )
-                    return
-                self._debug_log("client_join_override_sync_sent", count=sent_count)
 
         initiative_state_raw = snapshot.get("initiative_state")
         player_entry_count = 0
@@ -11286,6 +11346,20 @@ class DungeonAppletWidget(QWidget):
                     )
         if action == "resolve_linked_character_conflict":
             resolution = str(data.get("resolution") or "").strip()
+            if resolution == "host_authoritative":
+                conflict = data.get("conflict")
+                if isinstance(conflict, dict):
+                    conflict_key = str(conflict.get("conflict_key") or "").strip()
+                    if conflict_key:
+                        conflict_signature = self._linked_character_conflict_signature(conflict)
+                        if self._suppressed_link_conflicts.get(conflict_key) == conflict_signature:
+                            self._append_server_log(
+                                "[WARN] Host kept the authoritative linked character state."
+                            )
+                            return
+                        self._suppressed_link_conflicts.pop(conflict_key, None)
+                    self._prompt_linked_character_conflict(conflict)
+                    return
             if resolution == "dm_denied":
                 conflict = data.get("conflict")
                 if isinstance(conflict, dict):
@@ -13244,6 +13318,51 @@ class DungeonAppletWidget(QWidget):
             item_data["icon_path"] = asset_name
         return state
 
+    def _sync_collection_icon_assets_dir(self, icon_dir: Path, assets: dict[str, bytes]) -> None:
+        expected_assets: dict[str, bytes] = {}
+        for asset_name, raw in assets.items():
+            if not str(asset_name).startswith("assets/icons/"):
+                continue
+            icon_name = _sanitize_filename(Path(asset_name).name, "")
+            if not icon_name:
+                continue
+            if not isinstance(raw, bytes) or not raw:
+                continue
+            expected_assets[icon_name] = raw
+
+        if expected_assets:
+            icon_dir.mkdir(parents=True, exist_ok=True)
+            for icon_name, raw in expected_assets.items():
+                target_path = icon_dir / icon_name
+                if target_path.exists():
+                    try:
+                        if target_path.read_bytes() == raw:
+                            continue
+                    except Exception:
+                        pass
+                target_path.write_bytes(raw)
+
+        expected_names = set(expected_assets.keys())
+        if icon_dir.exists():
+            for stale_path in list(icon_dir.iterdir()):
+                if stale_path.is_dir():
+                    shutil.rmtree(stale_path, ignore_errors=True)
+                    continue
+                if stale_path.name in expected_names:
+                    continue
+                try:
+                    stale_path.unlink()
+                except Exception:
+                    continue
+            try:
+                if not any(icon_dir.iterdir()):
+                    icon_dir.rmdir()
+                    parent = icon_dir.parent
+                    if parent.exists() and not any(parent.iterdir()):
+                        parent.rmdir()
+            except Exception:
+                return
+
     def _build_collection_payload(self) -> tuple[dict, dict[str, bytes]]:
         self._save_active_dungeon_state()
         assets: dict[str, bytes] = {}
@@ -13311,6 +13430,10 @@ class DungeonAppletWidget(QWidget):
             if commit_as_primary:
                 QMessageBox.critical(self, "Save Failed", str(exc))
             return False
+        try:
+            self._sync_collection_icon_assets_dir(self._collection_working_icon_dir(path), assets)
+        except Exception as exc:
+            print(f"[WARN] Failed to synchronize collection icon assets for {path}: {exc}", file=sys.stderr)
         if commit_as_primary:
             self._collection_path = path
             for dungeon in self._dungeons:
@@ -13371,13 +13494,7 @@ class DungeonAppletWidget(QWidget):
                 icon_bytes_by_asset[str(asset_name)] = raw
         try:
             icons_dir = self._collection_working_icon_dir(path)
-            if icon_bytes_by_asset:
-                icons_dir.mkdir(parents=True, exist_ok=True)
-                for asset_name, raw in icon_bytes_by_asset.items():
-                    icon_name = Path(asset_name).name
-                    target_path = icons_dir / icon_name
-                    if not target_path.exists():
-                        target_path.write_bytes(raw)
+            self._sync_collection_icon_assets_dir(icons_dir, icon_bytes_by_asset)
         except Exception as exc:
             QMessageBox.critical(self, "Load Failed", str(exc))
             return
