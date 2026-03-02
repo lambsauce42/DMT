@@ -190,6 +190,36 @@ def test_load_entries_prefers_archive_over_stale_cache_row(
     assert persisted[0]["gold"] == 5
 
 
+def test_apply_remote_character_package_can_create_managed_copy_despite_same_name_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    existing_pdf = tmp_path / "existing.pdf"
+    existing_pdf.write_bytes(b"%PDF-1.4 existing")
+    existing_entry = player_sheets.PlayerSheetEntry(
+        name="Hero",
+        pdf_path=str(existing_pdf),
+        character_id="character-local",
+    )
+    assert player_sheets.ensure_entry_archive(existing_entry)
+    player_sheets.save_entries_to_storage([existing_entry])
+
+    ok, message, payload = player_sheets.apply_remote_character_package_for_character_id(
+        "character-remote",
+        "Hero",
+        {"inventory": []},
+        emit_event=False,
+    )
+
+    assert ok is True, message
+    assert isinstance(payload, dict)
+    entries = player_sheets.load_entries_from_storage()
+    assert sorted(
+        str(player_sheets.character_id_for_entry(entry) or "")
+        for entry in entries
+    ) == ["character-local", "character-remote"]
+
+
 def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> None:
     source_pdf = tmp_path / "sheet.pdf"
     source_pdf.write_bytes(b"%PDF-1.4 test sheet")

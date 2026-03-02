@@ -38,6 +38,7 @@ from dungeon_constants import (
 from dungeon_items import EntityItem
 from dmt_package import read_dmt_package_info
 from item_file_format import build_item_document, load_item_payload, write_item_document
+from save_paths import online_icon_cache_dir
 
 _PNG_1X1_BYTES = (
     base64.b64decode(
@@ -1145,7 +1146,29 @@ def test_clear_online_runtime_cache_uses_shared_runtime_cleanup(dungeon_widget, 
     )
     dungeon_widget._online_session_id = "session-cleanup"
     dungeon_widget._clear_online_runtime_cache()
-    assert calls == ["session-cleanup"]
+    assert calls == [dungeon_widget._active_online_runtime_cache_id()]
+
+
+def test_online_runtime_cache_isolated_per_widget_for_same_session(qtbot):
+    first = DungeonAppletWidget()
+    second = DungeonAppletWidget()
+    qtbot.addWidget(first)
+    qtbot.addWidget(second)
+
+    first._online_session_id = "join_127.0.0.1_9000"
+    second._online_session_id = "join_127.0.0.1_9000"
+
+    first_marker = online_icon_cache_dir(first._active_online_runtime_cache_id()) / "marker.txt"
+    second_marker = online_icon_cache_dir(second._active_online_runtime_cache_id()) / "marker.txt"
+    first_marker.parent.mkdir(parents=True, exist_ok=True)
+    second_marker.parent.mkdir(parents=True, exist_ok=True)
+    first_marker.write_text("first", encoding="utf-8")
+    second_marker.write_text("second", encoding="utf-8")
+
+    first._clear_online_runtime_cache()
+
+    assert not first_marker.exists()
+    assert second_marker.exists()
 
 
 def test_client_icon_asset_does_not_escape_icon_cache(dungeon_widget, monkeypatch, tmp_path):
@@ -2150,6 +2173,144 @@ def test_host_link_character_sync_rejects_overwriting_existing_authoritative_lin
     entity_state = dungeon_widget._dungeons[0]["state"]["items"][0]
     assert entity_state["linked_sheet_id"] == "sheet-host"
     assert entity_state["linked_character_id"] == "character-host"
+
+
+def test_host_link_character_sync_rejects_duplicate_active_assignment_without_character_id(
+    dungeon_widget,
+):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            return None
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_sheet_name": "Hero",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {"inventory": []},
+                        "pos": [0.0, 0.0],
+                    },
+                    {
+                        "type": "entity",
+                        "entity_id": "e2",
+                        "owner_player_id": "player-1",
+                        "pos": [1.0, 1.0],
+                    },
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        {
+            "entity_id": "e2",
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": "",
+            "dungeon_id": "d1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+        },
+        request_id="link-duplicate-empty-character-id",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert "already actively assigned" in result["message"]
+    entity_state = next(
+        item
+        for item in dungeon_widget._dungeons[0]["state"]["items"]
+        if item.get("entity_id") == "e2"
+    )
+    assert str(entity_state.get("linked_sheet_id") or "") == ""
+    assert str(entity_state.get("linked_character_id") or "") == ""
+
+
+def test_host_authoritative_conflict_reports_authoritative_character_id(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            return None
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-host",
+                        "linked_sheet_name": "Host Hero",
+                        "linked_character_id": "character-host",
+                        "linked_save_revision": 4,
+                        "linked_content_hash": "host-hash",
+                        "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        {
+            "entity_id": "e1",
+            "sheet_id": "sheet-local",
+            "sheet_name": "Local Hero",
+            "character_id": "character-local",
+            "dungeon_id": "d1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Local Hero"},
+        },
+        request_id="link-authority-character-id",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert result["data"]["resolution"] == "host_authoritative"
+    assert result["data"]["conflict"]["character_id"] == "character-host"
 
 
 def test_host_authoritative_conflict_result_prompts_player_resolution_once(dungeon_widget, monkeypatch):

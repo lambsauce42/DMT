@@ -4263,6 +4263,7 @@ class DungeonAppletWidget(QWidget):
         self._host_port: int | None = None
         self._host_ip: str = ""
         self._online_session_id: str = "local"
+        self._online_runtime_cache_id: str = "local"
         self._local_player_id: str | None = None
         self._local_player_name: str = ""
         self._local_profile = self._load_or_create_local_profile()
@@ -4685,7 +4686,7 @@ class DungeonAppletWidget(QWidget):
             port=int(port),
             collection_path=str(collection_path or ""),
         )
-        previous_session_id = str(self._online_session_id or "")
+        previous_runtime_cache_id = str(self._online_runtime_cache_id or "")
         self._session_loot_pool = []
         self._loot_claim_reservations.clear()
         self._loot_claim_entry_reservations.clear()
@@ -4716,10 +4717,12 @@ class DungeonAppletWidget(QWidget):
         if collection_path:
             path = Path(collection_path)
             if path.exists():
-                self._load_collection_from_path(path)
-        if previous_session_id and previous_session_id != "local":
-            self._clear_online_runtime_cache(previous_session_id)
+                if not self._load_collection_from_path(path):
+                    return False
+        if previous_runtime_cache_id and previous_runtime_cache_id != "local":
+            self._clear_online_runtime_cache(previous_runtime_cache_id)
         self._online_session_id = f"host_{int(port)}"
+        self._online_runtime_cache_id = self._runtime_cache_session_id_for(self._online_session_id)
         self._host_port = int(port)
         self._set_online_mode(ONLINE_MODE_DM_HOST)
         if self._host_controller is None:
@@ -4736,7 +4739,7 @@ class DungeonAppletWidget(QWidget):
             self._debug_log("start_online_host_failed", port=int(port), error=str(error or ""))
             self._set_online_mode(ONLINE_MODE_LOCAL_DM)
             self._update_connected_players({})
-            self._clear_online_runtime_cache(self._online_session_id)
+            self._clear_online_runtime_cache(self._online_runtime_cache_id)
             QMessageBox.critical(self, "Host Failed", error or "Failed to start host server.")
             return False
         self._set_online_mode(ONLINE_MODE_DM_HOST)
@@ -4756,7 +4759,7 @@ class DungeonAppletWidget(QWidget):
             port=int(port),
             player_name=str(player_name or ""),
         )
-        previous_session_id = str(self._online_session_id or "")
+        previous_runtime_cache_id = str(self._online_runtime_cache_id or "")
         self._session_loot_pool = []
         self._loot_claim_reservations.clear()
         self._loot_claim_entry_reservations.clear()
@@ -4773,12 +4776,13 @@ class DungeonAppletWidget(QWidget):
         self._refresh_loot_pool_list()
         if self._host_controller is not None:
             self._host_controller.stop()
-        if previous_session_id and previous_session_id != "local":
-            self._clear_online_runtime_cache(previous_session_id)
+        if previous_runtime_cache_id and previous_runtime_cache_id != "local":
+            self._clear_online_runtime_cache(previous_runtime_cache_id)
         self._update_connected_players({})
         self._collection_path = None
         self._collection_autosave_timer.stop()
         self._online_session_id = f"join_{host_ip}_{int(port)}".replace(":", "_")
+        self._online_runtime_cache_id = self._runtime_cache_session_id_for(self._online_session_id)
         self._host_ip = host_ip
         self._host_port = int(port)
         self._local_player_name = player_name.strip() or "Player"
@@ -4815,10 +4819,28 @@ class DungeonAppletWidget(QWidget):
         )
 
     def _clear_online_runtime_cache(self, session_id: str | None = None) -> None:
-        target_session = str(session_id or self._online_session_id or "").strip()
+        target_session = str(
+            session_id or self._active_online_runtime_cache_id() or self._online_session_id or ""
+        ).strip()
         if not target_session or target_session == "local":
             return
         clear_online_runtime_storage(target_session)
+
+    def _runtime_cache_session_id_for(self, session_id: str) -> str:
+        clean_session = str(session_id or "").strip() or "local"
+        if clean_session == "local":
+            return "local"
+        return f"{clean_session}__{self._debug_instance_id}"
+
+    def _active_online_runtime_cache_id(self) -> str:
+        logical_session_id = str(self._online_session_id or "").strip() or "local"
+        runtime_cache_id = str(self._online_runtime_cache_id or "").strip()
+        if logical_session_id == "local":
+            return "local"
+        expected_runtime_cache_id = self._runtime_cache_session_id_for(logical_session_id)
+        if runtime_cache_id != expected_runtime_cache_id:
+            self._online_runtime_cache_id = expected_runtime_cache_id
+        return self._online_runtime_cache_id
 
     def _set_online_mode(self, mode: str) -> None:
         previous_mode = str(self._online_mode)
@@ -5357,7 +5379,9 @@ class DungeonAppletWidget(QWidget):
             return None
 
     def _loot_pool_materialized_items_dir(self) -> Path:
-        session_key = str(self._online_session_id or self._collection_name or "local")
+        session_key = str(
+            self._active_online_runtime_cache_id() or self._collection_name or "local"
+        )
         materialized_dir = online_loot_item_cache_dir(session_key)
         materialized_dir.mkdir(parents=True, exist_ok=True)
         return materialized_dir
@@ -7549,7 +7573,6 @@ class DungeonAppletWidget(QWidget):
         self._player_connection_ready = False
         self._awaiting_player_snapshot = False
         self._pending_join_character_override_sync = False
-        self._pending_link_conflicts.clear()
         self._active_link_conflict_prompt_key = ""
         if isinstance(self._pending_player_state_update, dict):
             self._pending_player_state_update = None
@@ -7577,6 +7600,7 @@ class DungeonAppletWidget(QWidget):
         if not was_ready:
             self._pending_player_state_update = None
             self._pending_player_state_update_request_id = ""
+            self._pending_link_conflicts.clear()
             self._approved_host_inventory_sync_characters.clear()
             self._suppressed_link_conflicts.clear()
             if self._client_controller is not None:
@@ -7592,6 +7616,7 @@ class DungeonAppletWidget(QWidget):
         if terminal_disconnect_message:
             self._pending_player_state_update = None
             self._pending_player_state_update_request_id = ""
+            self._pending_link_conflicts.clear()
             self._approved_host_inventory_sync_characters.clear()
             self._suppressed_link_conflicts.clear()
             self._append_server_log(f"[WARN] {terminal_disconnect_message}")
@@ -7847,7 +7872,7 @@ class DungeonAppletWidget(QWidget):
             if dedupe_key in sent_keys:
                 continue
             sent_keys.add(dedupe_key)
-            cache_path = online_icon_cache_dir(self._online_session_id) / cache_name
+            cache_path = online_icon_cache_dir(self._active_online_runtime_cache_id()) / cache_name
             if not cache_path.exists():
                 continue
             try:
@@ -8404,9 +8429,11 @@ class DungeonAppletWidget(QWidget):
         item_data: dict,
         requested_character_id: str = "",
     ) -> dict:
+        authoritative_character_id = str(item_data.get("linked_character_id") or "").strip()
+        requested_local_character_id = str(requested_character_id or "").strip()
         conflict_character_id = (
-            str(requested_character_id or "").strip()
-            or str(item_data.get("linked_character_id") or "").strip()
+            authoritative_character_id
+            or requested_local_character_id
             or str(item_data.get("linked_sheet_id") or sheet_id or "").strip()
         )
         conflict_key = self._linked_character_conflict_key(
@@ -8421,6 +8448,7 @@ class DungeonAppletWidget(QWidget):
                 "conflict_key": conflict_key,
                 "entity_id": entity_id,
                 "character_id": conflict_character_id,
+                "requested_character_id": requested_local_character_id,
                 "sheet_id": str(item_data.get("linked_sheet_id") or sheet_id or "").strip(),
                 "sheet_name": (
                     str(item_data.get("linked_sheet_name") or sheet_name or "").strip()
@@ -8498,33 +8526,42 @@ class DungeonAppletWidget(QWidget):
                 request_id=request_id,
             )
             return
-        if character_id:
-            for other_dungeon in self._dungeons:
-                state = other_dungeon.get("state")
-                if not isinstance(state, dict):
+        duplicate_link_found = False
+        for other_dungeon in self._dungeons:
+            state = other_dungeon.get("state")
+            if not isinstance(state, dict):
+                continue
+            items = state.get("items")
+            if not isinstance(items, list):
+                continue
+            for other_item in items:
+                if not isinstance(other_item, dict):
                     continue
-                items = state.get("items")
-                if not isinstance(items, list):
+                if other_item.get("type") != "entity":
                     continue
-                for other_item in items:
-                    if not isinstance(other_item, dict):
-                        continue
-                    if other_item.get("type") != "entity":
-                        continue
-                    if str(other_item.get("entity_id") or "").strip() == entity_id:
-                        continue
+                if str(other_item.get("entity_id") or "").strip() == entity_id:
+                    continue
+                other_owner = str(other_item.get("owner_player_id") or "").strip()
+                if not other_owner:
+                    continue
+                if character_id:
                     if str(other_item.get("linked_character_id") or "").strip() != character_id:
                         continue
-                    other_owner = str(other_item.get("owner_player_id") or "").strip()
-                    if not other_owner:
+                else:
+                    if str(other_item.get("linked_sheet_id") or "").strip() != sheet_id:
                         continue
-                    self._host_controller.send_command_result(
-                        player_id,
-                        ok=False,
-                        message="That character is already actively assigned to another player-owned entity.",
-                        request_id=request_id,
-                )
-                    return
+                duplicate_link_found = True
+                break
+            if duplicate_link_found:
+                break
+        if duplicate_link_found:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message="That character is already actively assigned to another player-owned entity.",
+                request_id=request_id,
+            )
+            return
 
         existing_sheet_id = str(item_data.get("linked_sheet_id") or "").strip()
         existing_character_id = str(item_data.get("linked_character_id") or "").strip()
@@ -9828,7 +9865,7 @@ class DungeonAppletWidget(QWidget):
             ext = ".png"
         digest = hashlib.sha256(raw).hexdigest()
         cache_name = f"{digest}{ext}"
-        cache_dir = online_icon_cache_dir(self._online_session_id)
+        cache_dir = online_icon_cache_dir(self._active_online_runtime_cache_id())
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / cache_name
         if not cache_path.exists():
@@ -10789,6 +10826,7 @@ class DungeonAppletWidget(QWidget):
             "dungeon_id": str(conflict.get("dungeon_id") or "").strip(),
             "entity_id": str(conflict.get("entity_id") or "").strip(),
             "character_id": str(conflict.get("character_id") or "").strip(),
+            "requested_character_id": str(conflict.get("requested_character_id") or "").strip(),
             "sheet_id": str(conflict.get("sheet_id") or "").strip(),
             "save_revision": save_revision,
             "last_saved_at": str(conflict.get("last_saved_at") or "").strip(),
@@ -10895,6 +10933,7 @@ class DungeonAppletWidget(QWidget):
         dungeon_id = str(conflict.get("dungeon_id") or "").strip()
         entity_id = str(conflict.get("entity_id") or "").strip()
         character_id = str(conflict.get("character_id") or "").strip()
+        requested_character_id = str(conflict.get("requested_character_id") or "").strip()
         sheet_id = str(conflict.get("sheet_id") or "").strip()
         sheet_name = str(conflict.get("sheet_name") or sheet_id or character_id).strip() or character_id
         host_inventory = normalize_inventory_payload(conflict.get("inventory") or {})
@@ -10999,9 +11038,10 @@ class DungeonAppletWidget(QWidget):
                     from player_sheets import bump_character_revision_for_character_id
                 except Exception:
                     bump_character_revision_for_character_id = None  # type: ignore[assignment]
+                local_character_id = requested_character_id or character_id
                 if bump_character_revision_for_character_id is not None:
-                    bump_character_revision_for_character_id(character_id)
-                local_payload = self._resolve_local_sheet_sync_payload(character_id)
+                    bump_character_revision_for_character_id(local_character_id)
+                local_payload = self._resolve_local_sheet_sync_payload(local_character_id)
                 if not isinstance(local_payload, dict):
                     QMessageBox.warning(
                         self,
@@ -11314,7 +11354,8 @@ class DungeonAppletWidget(QWidget):
         def _run_post_snapshot_character_sync() -> None:
             self._pending_join_character_override_sync = False
             _sync_owned_sheet_inventories_from_snapshot()
-            self._cleanup_unlinked_managed_character_artifacts()
+            if self._online_mode != ONLINE_MODE_PLAYER:
+                self._cleanup_unlinked_managed_character_artifacts()
 
         initiative_state_raw = snapshot.get("initiative_state")
         player_entry_count = 0
@@ -11605,7 +11646,7 @@ class DungeonAppletWidget(QWidget):
             raw = base64.b64decode(content_b64.encode("ascii"), validate=True)
         except Exception:
             return
-        cache_dir = online_icon_cache_dir(self._online_session_id)
+        cache_dir = online_icon_cache_dir(self._active_online_runtime_cache_id())
         cache_dir.mkdir(parents=True, exist_ok=True)
         safe_filename = _sanitize_filename(Path(filename).name, "icon.png")
         cache_path = cache_dir / safe_filename
@@ -11655,7 +11696,7 @@ class DungeonAppletWidget(QWidget):
             safe_cache_name = _sanitize_filename(Path(cache_name).name, "")
             if not safe_cache_name:
                 return ""
-            return str(online_icon_cache_dir(self._online_session_id) / safe_cache_name)
+            return str(online_icon_cache_dir(self._active_online_runtime_cache_id()) / safe_cache_name)
         return icon_ref_or_path
 
     def _on_deferred_icon_selected(self, filename: str) -> None:
@@ -11697,7 +11738,11 @@ class DungeonAppletWidget(QWidget):
         self.canvas.current_tool = tool
 
     def closeEvent(self, event) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER and self._collection_dirty and not self._confirm_unsaved_changes():
+            event.ignore()
+            return
         current_session = str(self._online_session_id or "")
+        current_runtime_cache_id = str(self._active_online_runtime_cache_id() or "")
         self._debug_log("close_event", session=current_session)
         self._suppress_change_tracking = True
         self._suppress_network_sync = True
@@ -11721,7 +11766,7 @@ class DungeonAppletWidget(QWidget):
             self._host_controller.stop()
         if self._client_controller is not None:
             self._client_controller.disconnect()
-        self._clear_online_runtime_cache(current_session)
+        self._clear_online_runtime_cache(current_runtime_cache_id)
         self._preview_timer.stop()
         self._host_scene_sync_timer.stop()
         self._host_scene_watchdog_timer.stop()
@@ -13645,6 +13690,8 @@ class DungeonAppletWidget(QWidget):
     def _save_collection_to_path(self, path: Path, *, commit_as_primary: bool = True) -> bool:
         if path.suffix.lower() != COLLECTION_FILE_EXTENSION:
             path = path.with_suffix(COLLECTION_FILE_EXTENSION)
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            self._cleanup_unlinked_managed_character_artifacts()
         payload, assets = self._build_collection_payload()
         if not str(payload.get("object_id") or "").strip():
             payload["object_id"] = generate_named_object_id(self._collection_name, "collection")
@@ -13683,7 +13730,7 @@ class DungeonAppletWidget(QWidget):
             return
         self._load_collection_from_path(Path(filename))
 
-    def _confirm_unsaved_before_load(self) -> bool:
+    def _confirm_unsaved_changes(self) -> bool:
         if not self._collection_dirty:
             return True
         dialog = QMessageBox(self)
@@ -13702,11 +13749,14 @@ class DungeonAppletWidget(QWidget):
             return True
         return False
 
-    def _load_collection_from_path(self, path: Path) -> None:
+    def _confirm_unsaved_before_load(self) -> bool:
+        return self._confirm_unsaved_changes()
+
+    def _load_collection_from_path(self, path: Path) -> bool:
         payload = read_dmt_package_info(path)
         if not isinstance(payload, dict) or str(payload.get("format") or "") != COLLECTION_FILE_FORMAT:
             QMessageBox.critical(self, "Load Failed", "Collection file is invalid.")
-            return
+            return False
         try:
             icon_assets = list_dmt_package_assets(path)
         except Exception:
@@ -13723,7 +13773,7 @@ class DungeonAppletWidget(QWidget):
             self._sync_collection_icon_assets_dir(icons_dir, icon_bytes_by_asset)
         except Exception as exc:
             QMessageBox.critical(self, "Load Failed", str(exc))
-            return
+            return False
         name = payload.get("collection_name") or path.stem
         loaded_object_id = str(payload.get("object_id") or "").strip()
         if loaded_object_id:
@@ -13794,6 +13844,8 @@ class DungeonAppletWidget(QWidget):
         self._refresh_collection_dirty()
         self._preview_timer.start()
         self._update_active_dungeon_label()
+        self._cleanup_unlinked_managed_character_artifacts()
+        return True
 
     def open_linked_dungeon(self, collection_path: str, dungeon_id: str) -> bool:
         clean_dungeon_id = str(dungeon_id or "").strip()
@@ -13809,7 +13861,8 @@ class DungeonAppletWidget(QWidget):
             if current_path is None or current_path != target_path:
                 if not self._confirm_unsaved_before_load():
                     return False
-                self._load_collection_from_path(target_path)
+                if not self._load_collection_from_path(target_path):
+                    return False
 
         target_dungeon = self._find_dungeon(clean_dungeon_id)
         if target_dungeon is None:

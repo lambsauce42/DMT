@@ -2100,11 +2100,17 @@ def ensure_network_linked_character_entry(
 
     if target_entry is None:
         display_name = str(sheet_name or "").strip() or target
-        storage_name = sanitize_filename(display_name)
+        target_entry = PlayerSheetEntry(
+            name=display_name,
+            pdf_path="",
+            character_id=target,
+            managed_linked=True,
+        )
+        storage_name = _ensure_entry_sheet_id(target_entry)
         archive_path = character_sheet_archive_path(storage_name)
-        if archive_path.exists():
-            return False, "A local character with that name already exists.", None
         pdf_path = character_sheet_pdf_path(storage_name)
+        target_entry.archive_path = str(archive_path)
+        target_entry.pdf_path = str(pdf_path)
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         if not pdf_path.exists():
             template_path = default_sheet_pdf_path()
@@ -2115,14 +2121,6 @@ def ensure_network_linked_character_entry(
                     logger.exception("Failed to copy default character sheet template for %s", target)
             if not pdf_path.exists():
                 pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
-        target_entry = PlayerSheetEntry(
-            name=display_name,
-            pdf_path=str(pdf_path),
-            archive_path=str(archive_path),
-            sheet_id=storage_name,
-            character_id=target,
-            managed_linked=True,
-        )
         entries.append(target_entry)
     else:
         target_entry.managed_linked = True

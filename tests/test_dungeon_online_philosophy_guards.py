@@ -14,6 +14,7 @@ if SRC not in sys.path:
 from dungeon_applet import (
     DungeonAppletWidget,
     ONLINE_MODE_DM_HOST,
+    ONLINE_MODE_LOCAL_DM,
     ONLINE_MODE_PLAYER,
     ToolType,
 )
@@ -217,6 +218,37 @@ def test_player_mode_collection_autosave_is_suspended(dungeon_widget, tmp_path):
     dungeon_widget._run_collection_autosave()
 
     assert not (tmp_path / "campaign_autosave.dmtcollection").exists()
+
+
+def test_invalid_requested_collection_blocks_host_start(dungeon_widget, monkeypatch, tmp_path):
+    invalid_collection = tmp_path / "invalid.dmtcollection"
+    invalid_collection.write_text('{"format":"wrong"}', encoding="utf-8")
+    messages = []
+    monkeypatch.setattr(
+        "dungeon_applet.QMessageBox.critical",
+        lambda *args, **kwargs: messages.append((args[1], args[2])),
+    )
+
+    started = dungeon_widget.start_online_host(8765, str(invalid_collection))
+
+    assert started is False
+    assert dungeon_widget._online_mode == ONLINE_MODE_LOCAL_DM
+    assert messages == [("Load Failed", "Collection file is invalid.")]
+
+
+def test_dirty_dm_collection_close_is_vetoed_when_unsaved_changes_are_cancelled(
+    dungeon_widget, monkeypatch
+):
+    dungeon_widget.show()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._collection_dirty = True
+    monkeypatch.setattr(dungeon_widget, "_confirm_unsaved_changes", lambda: False)
+
+    closed = dungeon_widget.close()
+
+    assert closed is False
+    assert dungeon_widget.isVisible() is True
+    dungeon_widget._collection_dirty = False
 
 
 def test_join_online_session_clears_previous_collection_path(dungeon_widget):
