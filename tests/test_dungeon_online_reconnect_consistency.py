@@ -23,77 +23,24 @@ def _debug_log(line: str) -> None:
         handle.write(f"{line}\n")
 
 
-def test_reconnect_snapshot_does_not_reapply_stale_player_state_to_host(qtbot):
-    class _HostControllerStub:
-        def __init__(self):
-            self.players = {"player-1": "Mira"}
-            self.results = []
+def _entity_state(*, hp: int, label: str) -> dict:
+    return {
+        "type": "entity",
+        "entity_id": "entity-1",
+        "owner_player_id": "player-1",
+        "hp": hp,
+        "label": label,
+        "pos": [0.0, 0.0],
+    }
 
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
 
-        def send_snapshot_to(self, player_id, snapshot):
-            _debug_log(
-                "host send_snapshot_to invoked "
-                f"player_id={player_id!r} hp={snapshot['dungeons'][0]['state']['items'][0].get('hp')!r}"
-            )
-
-        def send_icon_asset(self, player_id, **kwargs):
-            _debug_log(f"host send_icon_asset invoked player_id={player_id!r} kwargs={kwargs!r}")
-
-        def stop(self):
-            return None
-
-    class _PlayerClientStub:
-        def __init__(self, host_widget: DungeonAppletWidget):
-            self.host_widget = host_widget
-            self.calls = []
-
-        def send_command(self, action, payload, request_id=None):
-            self.calls.append((action, dict(payload), request_id))
-            _debug_log(
-                "player send_command "
-                f"action={action!r} request_id={request_id!r} "
-                f"hp={payload.get('state', {}).get('items', [{}])[0].get('hp')!r}"
-            )
-            self.host_widget._on_host_command_received(
-                "player-1",
-                {
-                    "action": action,
-                    "payload": payload,
-                    "request_id": request_id,
-                },
-            )
-            return True
-
-        def disconnect(self):
-            _debug_log("player client disconnect invoked")
-            return None
-
-    host = DungeonAppletWidget()
-    player = DungeonAppletWidget()
-    qtbot.addWidget(host)
-    qtbot.addWidget(player)
-
-    host._online_mode = ONLINE_MODE_DM_HOST
-    host._host_controller = _HostControllerStub()
-    host._active_dungeon_id = "d1"
-    host._players_dungeon_id = "d1"
-    host._dungeons = [
+def _players_dungeon(*, item: dict) -> list[dict]:
+    return [
         {
             "id": "d1",
             "name": "Players",
             "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "entity-1",
-                        "owner_player_id": "player-1",
-                        "hp": 9,
-                        "label": "Host Newer",
-                        "pos": [0.0, 0.0],
-                    }
-                ],
+                "items": [item],
                 "fog": {"path": []},
             },
             "preview": None,
@@ -101,27 +48,87 @@ def test_reconnect_snapshot_does_not_reapply_stale_player_state_to_host(qtbot):
             "dirty": False,
         }
     ]
+
+
+class _HostControllerStub:
+    def __init__(self):
+        self.players = {"player-1": "Mira"}
+        self.results = []
+
+    def send_command_result(self, player_id, **kwargs):
+        self.results.append((player_id, kwargs))
+
+    def send_snapshot_to(self, player_id, snapshot):
+        _debug_log(
+            "host send_snapshot_to invoked "
+            f"player_id={player_id!r} hp={snapshot['dungeons'][0]['state']['items'][0].get('hp')!r}"
+        )
+
+    def send_icon_asset(self, player_id, **kwargs):
+        _debug_log(f"host send_icon_asset invoked player_id={player_id!r} kwargs={kwargs!r}")
+
+    def stop(self):
+        return None
+
+
+class _PlayerClientStub:
+    def __init__(self, host_widget: DungeonAppletWidget):
+        self.host_widget = host_widget
+        self.calls = []
+
+    def send_command(self, action, payload, request_id=None):
+        self.calls.append((action, dict(payload), request_id))
+        _debug_log(
+            "player send_command "
+            f"action={action!r} request_id={request_id!r} "
+            f"hp={payload.get('state', {}).get('items', [{}])[0].get('hp')!r}"
+        )
+        self.host_widget._on_host_command_received(
+            "player-1",
+            {
+                "action": action,
+                "payload": payload,
+                "request_id": request_id,
+            },
+        )
+        return True
+
+    def disconnect(self):
+        _debug_log("player client disconnect invoked")
+        return None
+
+
+def _build_online_widget(qtbot, *, mode: str, item: dict) -> DungeonAppletWidget:
+    widget = DungeonAppletWidget()
+    qtbot.addWidget(widget)
+    widget._online_mode = mode
+    widget._active_dungeon_id = "d1"
+    widget._players_dungeon_id = "d1"
+    widget._dungeons = _players_dungeon(item=item)
+    return widget
+
+
+def test_reconnect_snapshot_does_not_reapply_stale_player_state_to_host(qtbot):
+    host = _build_online_widget(
+        qtbot,
+        mode=ONLINE_MODE_DM_HOST,
+        item=_entity_state(hp=9, label="Host Newer"),
+    )
+    host._host_controller = _HostControllerStub()
     host._load_dungeon_state(host._dungeons[0]["state"])
 
-    player._online_mode = ONLINE_MODE_PLAYER
+    player = _build_online_widget(
+        qtbot,
+        mode=ONLINE_MODE_PLAYER,
+        item=_entity_state(hp=5, label="Player Stale"),
+    )
     player._client_controller = _PlayerClientStub(host)
     player._local_player_id = "player-1"
     player._player_connection_ready = True
-    player._active_dungeon_id = "d1"
-    player._players_dungeon_id = "d1"
     player._pending_player_state_update = {
         "dungeon_id": "d1",
         "state": {
-            "items": [
-                {
-                    "type": "entity",
-                    "entity_id": "entity-1",
-                    "owner_player_id": "player-1",
-                    "hp": 5,
-                    "label": "Player Stale",
-                    "pos": [0.0, 0.0],
-                }
-            ],
+            "items": [_entity_state(hp=5, label="Player Stale")],
             "fog": {"path": []},
         },
     }

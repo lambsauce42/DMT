@@ -8,6 +8,7 @@ Archive layout:
 - info.json
 """
 
+import io
 import json
 import hashlib
 import zipfile
@@ -112,9 +113,9 @@ def normalize_inventory_payload(payload: dict[str, Any] | None) -> dict[str, Any
             normalized_item = _normalize_item_entry(item, default_quantity=1)
             if normalized_item is None:
                 continue
-            key = str(normalized_item.get("normalized_item_name") or "").strip() or str(
-                normalized_item.get("item_id") or ""
-            ).strip()
+            key = str(normalized_item.get("item_id") or "").strip()
+            if not key:
+                key = str(normalized_item.get("normalized_item_name") or "").strip()
             if not key:
                 continue
             existing = merged_inventory.get(key)
@@ -184,6 +185,51 @@ def inventory_payload_content_hash(payload: dict[str, Any] | None) -> str:
     normalized = normalize_inventory_payload(payload)
     serialized = json.dumps(
         normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def character_archive_pdf_hash(archive_bytes: bytes | None) -> str | None:
+    if not archive_bytes:
+        return ""
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as zf:
+            names = set(zf.namelist())
+            if not {PDF_ENTRY_NAME, INVENTORY_ENTRY_NAME, INFO_ENTRY_NAME}.issubset(names):
+                return None
+            raw_pdf = zf.read(PDF_ENTRY_NAME)
+            raw_inventory = json.loads(zf.read(INVENTORY_ENTRY_NAME).decode("utf-8"))
+            raw_meta = json.loads(zf.read(INFO_ENTRY_NAME).decode("utf-8"))
+    except Exception:
+        return None
+    if not raw_pdf or not isinstance(raw_inventory, dict) or not isinstance(raw_meta, dict):
+        return None
+    normalize_inventory_payload(raw_inventory)
+    return hashlib.sha256(raw_pdf).hexdigest()
+
+
+def validate_character_archive_bytes(archive_bytes: bytes | None) -> bool:
+    return character_archive_pdf_hash(archive_bytes) is not None
+
+
+def character_sync_content_hash(
+    character_id: str,
+    inventory_payload: dict[str, Any] | None,
+    archive_bytes: bytes | None = None,
+) -> str:
+    archive_hash = character_archive_pdf_hash(archive_bytes)
+    if archive_hash is None:
+        raise ValueError("invalid character archive")
+    payload = {
+        "character_id": str(character_id or "").strip(),
+        "inventory": normalize_inventory_payload(inventory_payload),
+        "archive_hash": archive_hash or "",
+    }
+    serialized = json.dumps(
+        payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

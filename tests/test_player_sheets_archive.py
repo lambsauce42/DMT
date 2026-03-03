@@ -20,6 +20,7 @@ from character_archive import (
     META_ENTRY_NAME,
     PDF_ENTRY_NAME,
     extract_character_pdf,
+    normalize_inventory_payload,
     read_character_inventory,
     write_character_archive,
 )
@@ -282,6 +283,58 @@ def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> No
     extracted_pdf = tmp_path / "restored.pdf"
     assert extract_character_pdf(archive_path, extracted_pdf)
     assert extracted_pdf.read_bytes() == source_pdf.read_bytes()
+
+
+def test_normalize_inventory_payload_keeps_distinct_item_ids_with_same_name() -> None:
+    payload = normalize_inventory_payload(
+        {
+            "inventory": [
+                {
+                    "item_id": "sword_a",
+                    "normalized_item_name": "longsword",
+                    "quantity": 1,
+                },
+                {
+                    "item_id": "sword_b",
+                    "normalized_item_name": "longsword",
+                    "quantity": 1,
+                },
+            ],
+            "item_documents": {
+                "sword_a": build_item_document(
+                    {"item_id": "sword_a", "title": "Sword A"},
+                    None,
+                ),
+                "sword_b": build_item_document(
+                    {"item_id": "sword_b", "title": "Sword B"},
+                    None,
+                ),
+            },
+        }
+    )
+
+    assert [entry["item_id"] for entry in payload["inventory"]] == ["sword_a", "sword_b"]
+    assert [entry["quantity"] for entry in payload["inventory"]] == [1, 1]
+    assert sorted(payload["item_documents"]) == ["sword_a", "sword_b"]
+
+
+def test_apply_remote_character_package_rejects_invalid_archive_without_creating_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+
+    ok, message, payload = player_sheets.apply_remote_character_package_for_character_id(
+        "character-remote",
+        "Hero",
+        {"inventory": []},
+        archive_bytes=b"not a valid archive",
+        emit_event=False,
+    )
+
+    assert ok is False
+    assert message == "Unable to synchronize linked character archive."
+    assert payload is None
+    assert player_sheets.load_entries_from_storage() == []
 
 
 def test_sync_entry_archive_materializes_item_document_cache(

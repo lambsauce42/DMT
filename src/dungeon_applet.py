@@ -132,7 +132,12 @@ from save_paths import (
     collection_icon_assets_dir,
     working_collection_icon_assets_dir,
 )
-from character_archive import extract_character_pdf, normalize_inventory_payload
+from character_archive import (
+    character_sync_content_hash,
+    extract_character_pdf,
+    normalize_inventory_payload,
+    validate_character_archive_bytes,
+)
 from loot_applet import LootPreviewTooltip
 from item_file_format import (
     ITEM_FILE_EXTENSION,
@@ -746,6 +751,7 @@ class DungeonCanvas(QGraphicsView):
         self._stroke_color = QColor(WALL_COLOR)
         self._stroke_owner_player_id = ""
         self._interaction_blocked_checker: Callable[[], bool] | None = None
+        self._delete_change_callback: Callable[[], None] | None = None
         
         # Undo stack for commands
         self.undo_stack = QUndoStack(self)
@@ -1165,8 +1171,15 @@ class DungeonCanvas(QGraphicsView):
         from dungeon_commands import DeleteItemsCommand
         
         # Create a single command for all
-        cmd = DeleteItemsCommand(self.scene(), selected)
+        cmd = DeleteItemsCommand(
+            self.scene(),
+            selected,
+            on_change=self._delete_change_callback,
+        )
         self.undo_stack.push(cmd)
+
+    def set_delete_change_callback(self, callback: Callable[[], None] | None) -> None:
+        self._delete_change_callback = callback
 
     def show_ping(self, scene_pos: QPointF, *, emit_signal: bool = True) -> None:
         from dungeon_items import PingItem
@@ -4644,6 +4657,7 @@ class DungeonAppletWidget(QWidget):
         self.canvas.scene().selectionChanged.connect(self._on_selection_changed)
         self.canvas.scene().changed.connect(self._on_scene_changed_for_online_sync)
         self.canvas.scene().changed.connect(self._refresh_scene_item_references)
+        self.canvas.set_delete_change_callback(self._on_canvas_delete_items_changed)
         
         # FoW connections
         self.tool_panel.fogFillRequested.connect(self.canvas.fill_fog)
@@ -8289,7 +8303,7 @@ class DungeonAppletWidget(QWidget):
             save_revision = 0
         last_saved_at = str(payload.get("last_saved_at") or "").strip()
         content_hash = str(payload.get("content_hash") or "").strip()
-        archive_ok, archive_b64 = self._validate_archive_payload(
+        archive_ok, archive_b64, archive_bytes = self._validate_archive_payload(
             str(payload.get("archive_b64") or "")
         )
         inventory_payload = payload.get("inventory")
@@ -8353,6 +8367,22 @@ class DungeonAppletWidget(QWidget):
         )
         if linked_entries:
             conflict_dungeon, host_item_data = linked_entries[0]
+            metadata_ok, archive_b64, content_hash, metadata_message = self._validated_linked_character_sync_metadata(
+                character_id=character_id,
+                inventory_payload=inventory_payload,
+                incoming_content_hash=content_hash,
+                archive_b64=archive_b64,
+                archive_bytes=archive_bytes,
+                fallback_archive_b64=str(host_item_data.get("linked_sheet_archive_b64") or "").strip(),
+            )
+            if not metadata_ok:
+                self._host_controller.send_command_result(
+                    player_id,
+                    ok=False,
+                    message=metadata_message,
+                    request_id=request_id,
+                )
+                return
             if self._host_should_reject_stale_inventory_sync(
                 host_item_data=host_item_data,
                 incoming_inventory=inventory_payload,
@@ -8384,6 +8414,22 @@ class DungeonAppletWidget(QWidget):
                     ),
                     request_id=request_id,
                     data=response_data,
+                )
+                return
+        else:
+            metadata_ok, archive_b64, content_hash, metadata_message = self._validated_linked_character_sync_metadata(
+                character_id=character_id,
+                inventory_payload=inventory_payload,
+                incoming_content_hash=content_hash,
+                archive_b64=archive_b64,
+                archive_bytes=archive_bytes,
+            )
+            if not metadata_ok:
+                self._host_controller.send_command_result(
+                    player_id,
+                    ok=False,
+                    message=metadata_message,
+                    request_id=request_id,
                 )
                 return
 
@@ -8513,7 +8559,7 @@ class DungeonAppletWidget(QWidget):
             save_revision = 0
         last_saved_at = str(payload.get("last_saved_at") or "").strip()
         content_hash = str(payload.get("content_hash") or "").strip()
-        archive_ok, archive_b64 = self._validate_archive_payload(
+        archive_ok, archive_b64, archive_bytes = self._validate_archive_payload(
             str(payload.get("archive_b64") or "")
         )
         allowed_dungeon_id = self._player_action_dungeon_id()
@@ -8564,6 +8610,8 @@ class DungeonAppletWidget(QWidget):
                 request_id=request_id,
             )
             return
+        existing_sheet_id = str(item_data.get("linked_sheet_id") or "").strip()
+        existing_character_id = str(item_data.get("linked_character_id") or "").strip()
         if not character_id:
             for other_dungeon in self._dungeons:
                 state = other_dungeon.get("state")
@@ -8588,6 +8636,17 @@ class DungeonAppletWidget(QWidget):
                         break
                 if character_id:
                     break
+
+        if not existing_sheet_id and not existing_character_id:
+            if not self._player_owns_linked_character(player_id, sheet_id, character_id, dungeon_id=allowed_dungeon_id):
+                self._host_controller.send_command_result(
+                    player_id,
+                    ok=False,
+                    message="Only the DM can create the initial authoritative character link.",
+                    request_id=request_id,
+                    data={"action": "link_character_entity"},
+                )
+                return
 
         duplicate_link_found = False
         for other_dungeon in self._dungeons:
@@ -8628,8 +8687,6 @@ class DungeonAppletWidget(QWidget):
             )
             return
 
-        existing_sheet_id = str(item_data.get("linked_sheet_id") or "").strip()
-        existing_character_id = str(item_data.get("linked_character_id") or "").strip()
         if (
             (existing_sheet_id or existing_character_id)
             and not allow_existing_link_overwrite
@@ -8684,13 +8741,32 @@ class DungeonAppletWidget(QWidget):
             resolved_inventory_payload,
             existing_inventory=existing_inventory,
         )
+        resolved_character_id = (
+            str(character_id or "").strip()
+            or existing_character_id
+            or _generate_probabilistic_unique_id("character")
+        )
+        metadata_ok, archive_b64, content_hash, metadata_message = self._validated_linked_character_sync_metadata(
+            character_id=resolved_character_id,
+            inventory_payload=normalized_inventory,
+            incoming_content_hash=content_hash,
+            archive_b64=archive_b64,
+            archive_bytes=archive_bytes,
+            fallback_archive_b64=str(item_data.get("linked_sheet_archive_b64") or "").strip(),
+        )
+        if not metadata_ok:
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=metadata_message,
+                request_id=request_id,
+                data={"action": "link_character_entity"},
+            )
+            return
         label, max_hp, hp, ac, abilities = self._normalized_linked_stats(stats, fallback_name=sheet_name)
         item_data["linked_sheet_id"] = sheet_id
         item_data["linked_sheet_name"] = sheet_name
-        if character_id:
-            item_data["linked_character_id"] = character_id
-        elif not str(item_data.get("linked_character_id") or "").strip():
-            item_data["linked_character_id"] = _generate_probabilistic_unique_id("character")
+        item_data["linked_character_id"] = resolved_character_id
         item_data["linked_save_revision"] = save_revision
         item_data["linked_last_saved_at"] = last_saved_at
         item_data["linked_content_hash"] = content_hash
@@ -9136,15 +9212,59 @@ class DungeonAppletWidget(QWidget):
             )
         return False
 
-    def _validate_archive_payload(self, archive_b64: str) -> tuple[bool, str]:
+    def _validate_archive_payload(self, archive_b64: str) -> tuple[bool, str, bytes | None]:
         clean_archive_b64 = str(archive_b64 or "").strip()
         if not clean_archive_b64:
-            return True, ""
+            return True, "", None
         try:
-            base64.b64decode(clean_archive_b64.encode("ascii"), validate=True)
+            raw_archive = base64.b64decode(clean_archive_b64.encode("ascii"), validate=True)
         except Exception:
-            return False, ""
-        return True, clean_archive_b64
+            return False, "", None
+        if not validate_character_archive_bytes(raw_archive):
+            return False, "", None
+        return True, clean_archive_b64, raw_archive
+
+    def _validated_linked_character_sync_metadata(
+        self,
+        *,
+        character_id: str,
+        inventory_payload: dict,
+        incoming_content_hash: str,
+        archive_b64: str,
+        archive_bytes: bytes | None,
+        fallback_archive_b64: str = "",
+    ) -> tuple[bool, str, str, str]:
+        effective_archive_b64 = str(archive_b64 or "").strip()
+        effective_archive_bytes = archive_bytes
+        if effective_archive_bytes is None and fallback_archive_b64:
+            fallback_ok, validated_fallback_b64, validated_fallback_bytes = self._validate_archive_payload(
+                fallback_archive_b64
+            )
+            if not fallback_ok:
+                return False, "", "", "Stored authoritative linked character archive payload is invalid."
+            effective_archive_b64 = validated_fallback_b64
+            effective_archive_bytes = validated_fallback_bytes
+
+        clean_character = str(character_id or "").strip()
+        clean_content_hash = str(incoming_content_hash or "").strip()
+        if not clean_character:
+            return False, "", "", "Character sync requires a character id."
+        try:
+            verified_content_hash = character_sync_content_hash(
+                clean_character,
+                inventory_payload,
+                effective_archive_bytes,
+            )
+        except ValueError:
+            return False, "", "", "Linked character archive payload is invalid."
+        if clean_content_hash and clean_content_hash != verified_content_hash:
+            return (
+                False,
+                "",
+                "",
+                "Linked character payload does not match the claimed content hash.",
+            )
+        return True, effective_archive_b64, verified_content_hash, ""
 
     def _apply_authoritative_item_documents_to_inventory_payload(
         self,
@@ -12989,6 +13109,51 @@ class DungeonAppletWidget(QWidget):
         content_hash = str(getattr(entry, "content_hash", "") or "").strip()
         local_sync_payload = self._resolve_local_sheet_sync_payload(character_id) or {}
         archive_b64 = str(local_sync_payload.get("archive_b64") or "").strip()
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            existing_sheet_id = str(entity.data(ROLE_LINKED_SHEET_ID) or "").strip()
+            existing_character_id = str(entity.data(ROLE_LINKED_CHARACTER_ID) or "").strip()
+            if not existing_sheet_id and not existing_character_id:
+                if not self._player_owns_linked_character(
+                    str(self._local_player_id or ""),
+                    sheet_id,
+                    character_id,
+                    dungeon_id=self._player_action_dungeon_id(),
+                ):
+                    QMessageBox.information(
+                        self,
+                        "Link Character",
+                        "Only the DM can create the initial authoritative character link for a new online character.",
+                    )
+                    return
+        if (
+            self._online_mode == ONLINE_MODE_PLAYER
+        ):
+            entity_id = str(entity.data(ROLE_ENTITY_ID) or "").strip()
+            if not entity_id:
+                entity_id = uuid.uuid4().hex
+                entity.setData(ROLE_ENTITY_ID, entity_id)
+            if entity_id:
+                self._dispatch_player_command(
+                    "link_character_entity",
+                    {
+                        "entity_id": entity_id,
+                        "sheet_id": sheet_id,
+                        "sheet_name": sheet_name,
+                        "character_id": character_id,
+                        "save_revision": save_revision,
+                        "last_saved_at": last_saved_at,
+                        "content_hash": content_hash,
+                        "inventory": normalize_inventory_payload(
+                            linked_inventory if isinstance(linked_inventory, dict) else {}
+                        ),
+                        "stats": dict(stats),
+                        "archive_b64": archive_b64,
+                        "dungeon_id": str(self._active_dungeon_id or ""),
+                    },
+                    silent=True,
+                )
+            return
+
         self._apply_character_link_to_entity(
             entity,
             sheet_id=sheet_id,
@@ -13029,36 +13194,8 @@ class DungeonAppletWidget(QWidget):
         self.inspector.set_entity(entity)
         self._position_floating_overlays()
         self._mark_active_dungeon_dirty()
-        if self._online_mode != ONLINE_MODE_PLAYER:
-            self._cleanup_unlinked_managed_character_artifacts()
-        if (
-            self._online_mode == ONLINE_MODE_PLAYER
-        ):
-            entity_id = str(entity.data(ROLE_ENTITY_ID) or "").strip()
-            if not entity_id:
-                entity_id = uuid.uuid4().hex
-                entity.setData(ROLE_ENTITY_ID, entity_id)
-            if entity_id:
-                self._dispatch_player_command(
-                    "link_character_entity",
-                    {
-                        "entity_id": entity_id,
-                        "sheet_id": sheet_id,
-                        "sheet_name": sheet_name,
-                        "character_id": character_id,
-                        "save_revision": save_revision,
-                        "last_saved_at": last_saved_at,
-                        "content_hash": content_hash,
-                        "inventory": normalize_inventory_payload(
-                            linked_inventory if isinstance(linked_inventory, dict) else {}
-                        ),
-                        "stats": dict(stats),
-                        "archive_b64": archive_b64,
-                        "dungeon_id": str(self._active_dungeon_id or ""),
-                    },
-                    silent=True,
-                )
-        elif self._online_mode == ONLINE_MODE_DM_HOST:
+        self._cleanup_unlinked_managed_character_artifacts()
+        if self._online_mode == ONLINE_MODE_DM_HOST:
             self._broadcast_snapshot_if_host()
 
     def _apply_inventory_sync_to_linked_entities(
@@ -13757,6 +13894,11 @@ class DungeonAppletWidget(QWidget):
                 "dungeon_id": self._active_dungeon_id,
             }
             self._send_player_state_update(state_update_payload)
+
+    def _on_canvas_delete_items_changed(self) -> None:
+        self._save_active_dungeon_state()
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            self._cleanup_unlinked_managed_character_artifacts()
 
     def _refresh_entity_duplicate_badges(self) -> None:
         scene = self.canvas.scene()

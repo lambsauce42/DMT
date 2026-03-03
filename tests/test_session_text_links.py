@@ -27,6 +27,99 @@ def _write_character_base_dir_debug(lines: list[str]) -> None:
     debug_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_contextual_link_packages(base_dir: Path) -> None:
+    npc_dir = base_dir / "npcs"
+    maps_dir = base_dir / "maps"
+    collections_dir = base_dir / "dungeon_collections"
+    encounters_dir = base_dir / "encounters"
+    npc_dir.mkdir(parents=True, exist_ok=True)
+    maps_dir.mkdir(parents=True, exist_ok=True)
+    collections_dir.mkdir(parents=True, exist_ok=True)
+    encounters_dir.mkdir(parents=True, exist_ok=True)
+
+    write_dmt_package(
+        npc_dir / "npc_1.dmtnpc",
+        info={
+            "format": "dmtnpc.v1",
+            "object_type": "npc",
+            "object_id": "npc_1",
+            "payload": {
+                "id": "npc_1",
+                "name": "Goblin Guide",
+                "world": "Eldervale",
+                "campaign": "Ashen Crown",
+                "group": "Silver Lances",
+            },
+        },
+        assets={},
+    )
+    write_dmt_package(
+        npc_dir / "npc_2.dmtnpc",
+        info={
+            "format": "dmtnpc.v1",
+            "object_type": "npc",
+            "object_id": "npc_2",
+            "payload": {
+                "id": "npc_2",
+                "name": "Goblin Wrong Context",
+                "world": "Stormreach",
+                "campaign": "Iron Meridian",
+                "group": "Cinderwatch",
+            },
+        },
+        assets={},
+    )
+    write_dmt_package(
+        maps_dir / "map_1.dmtmap",
+        info={
+            "format": "dmtmap.v1",
+            "object_type": "map",
+            "object_id": "map_1",
+            "payload": {
+                "id": "map_1",
+                "name": "Sewer Entrance",
+                "image_path": "",
+                "world": "Eldervale",
+                "campaign": "Ashen Crown",
+                "group": "Silver Lances",
+            },
+        },
+        assets={},
+    )
+    write_dmt_package(
+        collections_dir / "catacombs.dmtcollection",
+        info={
+            "format": "dmtcollection.v1",
+            "object_type": "collection",
+            "object_id": "collection_1",
+            "collection_name": "Catacombs",
+            "dungeons": [
+                {"id": "dng_1", "name": "Catacombs Alpha", "state": {"items": [], "fog": {"path": []}}},
+                {"id": "dng_2", "name": "Sewer Depths", "state": {"items": [], "fog": {"path": []}}},
+            ],
+        },
+        assets={},
+    )
+    write_dmt_package(
+        encounters_dir / "ambush.dmtencounter",
+        info={
+            "format": "dmtencounter.v1",
+            "object_type": "encounter",
+            "object_id": "enc_1",
+            "name": "Goblin Ambush",
+            "monsters": [],
+        },
+        assets={},
+    )
+
+
+@pytest.fixture
+def contextual_link_base_dir(tmp_path: Path) -> Path:
+    base_dir = tmp_path / "DMT"
+    _write_contextual_link_packages(base_dir)
+    return base_dir
+
+
 def test_detects_supported_slash_commands() -> None:
     text = "/npc goblin"
     trigger = detect_slash_trigger(text, len(text))
@@ -126,127 +219,48 @@ def test_markdown_link_roundtrip_for_item_and_character() -> None:
     assert encounter_parsed.target_id == "enc_001"
 
 
-def test_load_link_suggestions_by_command_query_and_context(tmp_path: Path) -> None:
-    base_dir = tmp_path / "DMT"
-    npc_dir = base_dir / "npcs"
-    maps_dir = base_dir / "maps"
-    collections_dir = base_dir / "dungeon_collections"
-    encounters_dir = base_dir / "encounters"
-    npc_dir.mkdir(parents=True, exist_ok=True)
-    maps_dir.mkdir(parents=True, exist_ok=True)
-    collections_dir.mkdir(parents=True, exist_ok=True)
-    encounters_dir.mkdir(parents=True, exist_ok=True)
-
-    write_dmt_package(
-        npc_dir / "npc_1.dmtnpc",
-        info={
-            "format": "dmtnpc.v1",
-            "object_type": "npc",
-            "object_id": "npc_1",
-            "payload": {
-                "id": "npc_1",
-                "name": "Goblin Guide",
-                "world": "Eldervale",
-                "campaign": "Ashen Crown",
-                "group": "Silver Lances",
-            },
-        },
-        assets={},
-    )
-    write_dmt_package(
-        npc_dir / "npc_2.dmtnpc",
-        info={
-            "format": "dmtnpc.v1",
-            "object_type": "npc",
-            "object_id": "npc_2",
-            "payload": {
-                "id": "npc_2",
-                "name": "Goblin Wrong Context",
-                "world": "Stormreach",
-                "campaign": "Iron Meridian",
-                "group": "Cinderwatch",
-            },
-        },
-        assets={},
-    )
-    write_dmt_package(
-        maps_dir / "map_1.dmtmap",
-        info={
-            "format": "dmtmap.v1",
-            "object_type": "map",
-            "object_id": "map_1",
-            "payload": {
-                "id": "map_1",
-                "name": "Sewer Entrance",
-                "image_path": "",
-                "world": "Eldervale",
-                "campaign": "Ashen Crown",
-                "group": "Silver Lances",
-            },
-        },
-        assets={},
-    )
-    write_dmt_package(
-        collections_dir / "catacombs.dmtcollection",
-        info={
-            "format": "dmtcollection.v1",
-            "object_type": "collection",
-            "object_id": "collection_1",
-            "collection_name": "Catacombs",
-            "dungeons": [
-                {"id": "dng_1", "name": "Catacombs Alpha", "state": {"items": [], "fog": {"path": []}}},
-                {"id": "dng_2", "name": "Sewer Depths", "state": {"items": [], "fog": {"path": []}}},
-            ],
-        },
-        assets={},
-    )
-    write_dmt_package(
-        encounters_dir / "ambush.dmtencounter",
-        info={
-            "format": "dmtencounter.v1",
-            "object_type": "encounter",
-            "object_id": "enc_1",
-            "name": "Goblin Ambush",
-            "monsters": [],
-        },
-        assets={},
-    )
-
+def test_npc_link_suggestions_filter_by_context(contextual_link_base_dir: Path) -> None:
     npc_suggestions = load_link_suggestions(
         "npc",
         "goblin",
         world="Eldervale",
         campaign="Ashen Crown",
         group="Silver Lances",
-        base_dir=base_dir,
+        base_dir=contextual_link_base_dir,
     )
     assert [s.target_id for s in npc_suggestions] == ["npc_1"]
     assert npc_suggestions[0].display_label == "Goblin Guide"
 
+
+def test_map_link_suggestions_filter_by_context(contextual_link_base_dir: Path) -> None:
     map_suggestions = load_link_suggestions(
         "map",
         "sewer",
         world="Eldervale",
         campaign="Ashen Crown",
         group="Silver Lances",
-        base_dir=base_dir,
+        base_dir=contextual_link_base_dir,
     )
     assert [s.target_id for s in map_suggestions] == ["map_1"]
     assert map_suggestions[0].display_label == "Sewer Entrance"
 
+
+def test_dungeon_link_suggestions_include_collection_path(contextual_link_base_dir: Path) -> None:
     dungeon_suggestions = load_link_suggestions(
         "dungeon",
         "alpha",
-        base_dir=base_dir,
+        base_dir=contextual_link_base_dir,
     )
     assert [s.target_id for s in dungeon_suggestions] == ["dng_1"]
     assert dungeon_suggestions[0].collection_path is not None
     assert dungeon_suggestions[0].collection_path.endswith("catacombs.dmtcollection")
 
+
+def test_encounter_link_suggestions_use_matching_name(contextual_link_base_dir: Path) -> None:
     encounter_suggestions = load_link_suggestions(
         "encounter",
         "ambush",
-        base_dir=base_dir,
+        base_dir=contextual_link_base_dir,
     )
     assert [s.target_id for s in encounter_suggestions] == ["enc_1"]
     assert encounter_suggestions[0].display_label == "Goblin Ambush"

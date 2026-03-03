@@ -26,6 +26,7 @@ from item_file_format import (
 )
 from character_archive import (
     ARCHIVE_EXTENSION,
+    validate_character_archive_bytes,
     extract_character_pdf,
     normalize_inventory_payload,
     read_character_inventory,
@@ -2250,6 +2251,8 @@ def apply_remote_character_package_for_character_id(
     target = str(character_id or "").strip()
     if not target:
         return False, "Missing character selection.", None
+    if archive_bytes and not validate_character_archive_bytes(archive_bytes):
+        return False, "Unable to synchronize linked character archive.", None
     entries = load_entries_from_storage()
     target_entry = next(
         (entry for entry in entries if character_id_for_entry(entry) == target),
@@ -2279,9 +2282,11 @@ def apply_remote_character_package_for_character_id(
             archive_path.parent.mkdir(parents=True, exist_ok=True)
             archive_path.write_bytes(archive_bytes)
             target_entry.archive_path = str(archive_path)
-            extract_character_pdf(archive_path, pdf_path)
+            if not extract_character_pdf(archive_path, pdf_path):
+                return False, "Unable to synchronize linked character archive.", None
             target_entry.pdf_path = str(pdf_path)
-            _load_entry_from_archive(target_entry)
+            if not _load_entry_from_archive(target_entry):
+                return False, "Unable to synchronize linked character archive.", None
         except Exception:
             logger.exception("Failed to apply remote character archive for %s", target)
             return False, "Unable to synchronize linked character archive.", None

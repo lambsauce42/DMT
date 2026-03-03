@@ -30,44 +30,24 @@ def dungeon_widget(qtbot):
     return widget
 
 
-def test_player_state_update_only_merges_owned_entities(dungeon_widget, monkeypatch):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
+class _HostStub:
+    def __init__(self):
+        self.results = []
 
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
+    def send_command_result(self, player_id, **kwargs):
+        self.results.append((player_id, kwargs))
 
-        def stop(self):
-            return None
+    def stop(self):
+        return None
 
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    broadcasts = []
-    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: broadcasts.append(True))
 
-    dungeon_widget._dungeons = [
+def _players_dungeon_state(*items, dungeon_id="players-dungeon"):
+    return [
         {
-            "id": "players-dungeon",
+            "id": dungeon_id,
             "name": "Players",
             "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "owned-1",
-                        "owner_player_id": "player-1",
-                        "pos": [1.0, 1.0],
-                        "hp": 10,
-                    },
-                    {
-                        "type": "entity",
-                        "entity_id": "other-1",
-                        "owner_player_id": "player-2",
-                        "pos": [2.0, 2.0],
-                        "hp": 10,
-                    },
-                    {"type": "room", "floor_path": [], "pos": [0.0, 0.0]},
-                ],
+                "items": list(items),
                 "fog": {"path": []},
             },
             "preview": None,
@@ -75,8 +55,55 @@ def test_player_state_update_only_merges_owned_entities(dungeon_widget, monkeypa
             "dirty": False,
         }
     ]
-    dungeon_widget._players_dungeon_id = "players-dungeon"
-    dungeon_widget._active_dungeon_id = "players-dungeon"
+
+
+def _entity_item(entity_id, owner_player_id, *, pos, hp, **extra):
+    item = {
+        "type": "entity",
+        "entity_id": entity_id,
+        "owner_player_id": owner_player_id,
+        "pos": list(pos),
+        "hp": hp,
+    }
+    item.update(extra)
+    return item
+
+
+def _stroke_item(stroke_id, owner_player_id, *, pos, path, pen_color, pen_width=2.0, z=305.0, **extra):
+    item = {
+        "type": "stroke",
+        "stroke_id": stroke_id,
+        "owner_player_id": owner_player_id,
+        "layer": "foreground",
+        "pos": list(pos),
+        "path": list(path),
+        "pen_color": pen_color,
+        "pen_width": pen_width,
+        "z": z,
+    }
+    item.update(extra)
+    return item
+
+
+def _configure_player_state_update_host(dungeon_widget, monkeypatch, *items, dungeon_id="players-dungeon"):
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    broadcasts = []
+    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: broadcasts.append(True))
+    dungeon_widget._dungeons = _players_dungeon_state(*items, dungeon_id=dungeon_id)
+    dungeon_widget._players_dungeon_id = dungeon_id
+    dungeon_widget._active_dungeon_id = dungeon_id
+    return broadcasts
+
+
+def test_player_state_update_only_merges_owned_entities(dungeon_widget, monkeypatch):
+    broadcasts = _configure_player_state_update_host(
+        dungeon_widget,
+        monkeypatch,
+        _entity_item("owned-1", "player-1", pos=(1.0, 1.0), hp=10),
+        _entity_item("other-1", "player-2", pos=(2.0, 2.0), hp=10),
+        {"type": "room", "floor_path": [], "pos": [0.0, 0.0]},
+    )
 
     dungeon_widget._on_host_command_received(
         "player-1",
@@ -87,20 +114,8 @@ def test_player_state_update_only_merges_owned_entities(dungeon_widget, monkeypa
                 "dungeon_id": "players-dungeon",
                 "state": {
                     "items": [
-                        {
-                            "type": "entity",
-                            "entity_id": "owned-1",
-                            "owner_player_id": "player-1",
-                            "pos": [7.0, 8.0],
-                            "hp": 21,
-                        },
-                        {
-                            "type": "entity",
-                            "entity_id": "other-1",
-                            "owner_player_id": "player-2",
-                            "pos": [99.0, 99.0],
-                            "hp": 1,
-                        },
+                        _entity_item("owned-1", "player-1", pos=(7.0, 8.0), hp=21),
+                        _entity_item("other-1", "player-2", pos=(99.0, 99.0), hp=1),
                     ],
                     "fog": {"path": []},
                 },
@@ -123,70 +138,31 @@ def test_player_state_update_only_merges_owned_entities(dungeon_widget, monkeypa
 
 
 def test_player_state_update_syncs_only_player_owned_strokes(dungeon_widget, monkeypatch):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    broadcasts = []
-    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: broadcasts.append(True))
-
-    dungeon_widget._dungeons = [
-        {
-            "id": "players-dungeon",
-            "name": "Players",
-            "state": {
-                "items": [
-                    {
-                        "type": "stroke",
-                        "stroke_id": "stroke-owned-1",
-                        "owner_player_id": "player-1",
-                        "layer": "foreground",
-                        "pos": [1.0, 1.0],
-                            "path": [{"type": 0, "x": 0.0, "y": 0.0}, {"type": 1, "x": 5.0, "y": 5.0}],
-                        "pen_color": "#ffffff",
-                        "pen_width": 2.0,
-                        "z": 305.0,
-                    },
-                    {
-                        "type": "stroke",
-                        "stroke_id": "stroke-owned-2",
-                        "owner_player_id": "player-1",
-                        "layer": "foreground",
-                        "pos": [2.0, 2.0],
-                            "path": [{"type": 0, "x": 1.0, "y": 1.0}, {"type": 1, "x": 6.0, "y": 6.0}],
-                        "pen_color": "#ffffff",
-                        "pen_width": 2.0,
-                        "z": 305.0,
-                    },
-                    {
-                        "type": "stroke",
-                        "stroke_id": "stroke-other",
-                        "owner_player_id": "player-2",
-                        "layer": "foreground",
-                        "pos": [10.0, 10.0],
-                            "path": [{"type": 0, "x": 0.0, "y": 0.0}, {"type": 1, "x": 9.0, "y": 9.0}],
-                        "pen_color": "#00ff00",
-                        "pen_width": 2.0,
-                        "z": 305.0,
-                    },
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    dungeon_widget._players_dungeon_id = "players-dungeon"
-    dungeon_widget._active_dungeon_id = "players-dungeon"
+    broadcasts = _configure_player_state_update_host(
+        dungeon_widget,
+        monkeypatch,
+        _stroke_item(
+            "stroke-owned-1",
+            "player-1",
+            pos=(1.0, 1.0),
+            path=[{"type": 0, "x": 0.0, "y": 0.0}, {"type": 1, "x": 5.0, "y": 5.0}],
+            pen_color="#ffffff",
+        ),
+        _stroke_item(
+            "stroke-owned-2",
+            "player-1",
+            pos=(2.0, 2.0),
+            path=[{"type": 0, "x": 1.0, "y": 1.0}, {"type": 1, "x": 6.0, "y": 6.0}],
+            pen_color="#ffffff",
+        ),
+        _stroke_item(
+            "stroke-other",
+            "player-2",
+            pos=(10.0, 10.0),
+            path=[{"type": 0, "x": 0.0, "y": 0.0}, {"type": 1, "x": 9.0, "y": 9.0}],
+            pen_color="#00ff00",
+        ),
+    )
 
     dungeon_widget._on_host_command_received(
         "player-1",
@@ -197,39 +173,30 @@ def test_player_state_update_syncs_only_player_owned_strokes(dungeon_widget, mon
                 "dungeon_id": "players-dungeon",
                 "state": {
                     "items": [
-                        {
-                            "type": "stroke",
-                            "stroke_id": "stroke-owned-1",
-                            "owner_player_id": "player-1",
-                            "layer": "foreground",
-                            "pos": [22.0, 33.0],
-                            "path": [{"type": 0, "x": 0.0, "y": 0.0}, {"type": 1, "x": 12.0, "y": 12.0}],
-                            "pen_color": "#ff00ff",
-                            "pen_width": 3.0,
-                            "z": 305.0,
-                        },
-                        {
-                            "type": "stroke",
-                            "stroke_id": "stroke-new",
-                            "owner_player_id": "player-1",
-                            "layer": "foreground",
-                            "pos": [44.0, 55.0],
-                            "path": [{"type": 0, "x": 2.0, "y": 2.0}, {"type": 1, "x": 8.0, "y": 8.0}],
-                            "pen_color": "#123456",
-                            "pen_width": 4.0,
-                            "z": 305.0,
-                        },
-                        {
-                            "type": "stroke",
-                            "stroke_id": "stroke-other",
-                            "owner_player_id": "player-2",
-                            "layer": "foreground",
-                            "pos": [999.0, 999.0],
-                            "path": [{"type": 0, "x": 0.0, "y": 0.0}, {"type": 1, "x": 1.0, "y": 1.0}],
-                            "pen_color": "#ff0000",
-                            "pen_width": 9.0,
-                            "z": 305.0,
-                        },
+                        _stroke_item(
+                            "stroke-owned-1",
+                            "player-1",
+                            pos=(22.0, 33.0),
+                            path=[{"type": 0, "x": 0.0, "y": 0.0}, {"type": 1, "x": 12.0, "y": 12.0}],
+                            pen_color="#ff00ff",
+                            pen_width=3.0,
+                        ),
+                        _stroke_item(
+                            "stroke-new",
+                            "player-1",
+                            pos=(44.0, 55.0),
+                            path=[{"type": 0, "x": 2.0, "y": 2.0}, {"type": 1, "x": 8.0, "y": 8.0}],
+                            pen_color="#123456",
+                            pen_width=4.0,
+                        ),
+                        _stroke_item(
+                            "stroke-other",
+                            "player-2",
+                            pos=(999.0, 999.0),
+                            path=[{"type": 0, "x": 0.0, "y": 0.0}, {"type": 1, "x": 1.0, "y": 1.0}],
+                            pen_color="#ff0000",
+                            pen_width=9.0,
+                        ),
                     ],
                     "fog": {"path": []},
                 },

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from PySide6.QtGui import QUndoCommand, QPainterPath
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsItem
 from PySide6.QtCore import QPointF, QRectF
@@ -35,20 +37,32 @@ class DeleteItemCommand(QUndoCommand):
              self._scene.addItem(self._item)
 
 class DeleteItemsCommand(QUndoCommand):
-    def __init__(self, scene: QGraphicsScene, items: list[QGraphicsItem]):
+    def __init__(
+        self,
+        scene: QGraphicsScene,
+        items: list[QGraphicsItem],
+        on_change: Callable[[], None] | None = None,
+    ):
         super().__init__("Delete items")
         self._scene = scene
         self._items = items
+        self._on_change = on_change
+
+    def _notify_change(self) -> None:
+        if callable(self._on_change):
+            self._on_change()
 
     def redo(self):
         for item in self._items:
             if item.scene() == self._scene:
                 self._scene.removeItem(item)
+        self._notify_change()
 
     def undo(self):
         for item in self._items:
             if item.scene() != self._scene:
                 self._scene.addItem(item)
+        self._notify_change()
 
 class MoveItemsCommand(QUndoCommand):
     def __init__(self, items: list[QGraphicsItem], start_positions: dict[QGraphicsItem, QPointF]):

@@ -66,6 +66,125 @@ def _load_assigned_players_dungeon_state(dungeon_widget, dungeon_id: str = "d1")
         dungeon_widget._load_dungeon_state(dungeon.get("state") or dungeon_widget._blank_dungeon_state())
 
 
+class _ResultHostStub:
+    def __init__(self, *, fail_on_kick: bool = False):
+        self.results = []
+        self.snapshots = []
+        self.kicks = []
+        self._fail_on_kick = fail_on_kick
+
+    def send_command_result(self, player_id, **kwargs):
+        self.results.append((player_id, kwargs))
+
+    def broadcast_snapshot(self, snapshot):
+        self.snapshots.append(snapshot)
+
+    def kick_player(self, player_id, *, message):
+        if self._fail_on_kick:
+            raise AssertionError("kick_player should not be called for this flow")
+        self.kicks.append((player_id, message))
+        return True
+
+    def stop(self):
+        return None
+
+
+def _dungeon_record(*items, dungeon_id: str = "d1", name: str = "Dungeon 1", dirty: bool = False) -> dict:
+    return {
+        "id": dungeon_id,
+        "name": name,
+        "state": {
+            "items": list(items),
+            "fog": {"path": []},
+        },
+        "preview": None,
+        "preview_signature": None,
+        "dirty": dirty,
+    }
+
+
+def _entity_state(entity_id: str, owner_player_id: str, *, pos=(0.0, 0.0), linked_inventory=None, **extra) -> dict:
+    item = {
+        "type": "entity",
+        "entity_id": entity_id,
+        "owner_player_id": owner_player_id,
+        "pos": [float(pos[0]), float(pos[1])],
+    }
+    if linked_inventory is not None:
+        item["linked_inventory"] = linked_inventory
+    item.update(extra)
+    return item
+
+
+def _configure_online_host(
+    dungeon_widget,
+    *items,
+    dungeon_id: str = "d1",
+    name: str = "Dungeon 1",
+    dirty: bool = False,
+    load_state: bool = False,
+    suppress_broadcast: bool = True,
+    fail_on_kick: bool = False,
+):
+    host = _ResultHostStub(fail_on_kick=fail_on_kick)
+    dungeon_widget._host_controller = host
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    if suppress_broadcast:
+        dungeon_widget._broadcast_snapshot_if_host = lambda: None
+    dungeon_widget._dungeons = [_dungeon_record(*items, dungeon_id=dungeon_id, name=name, dirty=dirty)]
+    if load_state:
+        _load_assigned_players_dungeon_state(dungeon_widget, dungeon_id)
+    else:
+        _set_assigned_players_dungeon(dungeon_widget, dungeon_id)
+    return host
+
+
+def _sync_inventory_payload(
+    *,
+    sheet_id: str = "sheet-1",
+    character_id: str | None = "character-sheet-1",
+    inventory: dict | None = None,
+    stats: dict | None = None,
+    archive_b64: str | None = None,
+):
+    payload = {
+        "sheet_id": sheet_id,
+        "inventory": inventory or {"inventory": []},
+    }
+    if character_id is not None:
+        payload["character_id"] = character_id
+    if stats is not None:
+        payload["stats"] = stats
+    if archive_b64 is not None:
+        payload["archive_b64"] = archive_b64
+    return payload
+
+
+def _link_character_payload(
+    *,
+    entity_id: str,
+    sheet_id: str,
+    sheet_name: str,
+    dungeon_id: str = "d1",
+    character_id: str | None = None,
+    inventory: dict | None = None,
+    stats: dict | None = None,
+    **extra,
+):
+    payload = {
+        "entity_id": entity_id,
+        "sheet_id": sheet_id,
+        "sheet_name": sheet_name,
+        "dungeon_id": dungeon_id,
+        "inventory": inventory or {"inventory": []},
+        "stats": stats or {"name": sheet_name},
+    }
+    if character_id is not None:
+        payload["character_id"] = character_id
+    payload.update(extra)
+    return payload
+
+
 def test_entity_owner_and_network_id_round_trip(dungeon_widget):
     scene = dungeon_widget.canvas.scene()
     entity = EntityItem(QPointF(10, 10))
@@ -1587,65 +1706,30 @@ def test_linked_character_fields_round_trip_in_scene_state(dungeon_widget):
 def test_host_sync_character_inventory_updates_owned_linked_entities(
     monkeypatch, dungeon_widget, tmp_path
 ):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-            self.snapshots = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            self.snapshots.append(snapshot)
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._broadcast_snapshot_if_host = lambda: None
-    dungeon_widget._active_dungeon_id = "d1"
-    dungeon_widget._players_dungeon_id = "d1"
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_character_id": "character-sheet-1",
-                        "linked_inventory": {},
-                        "icon_path": "",
-                        "pos": [0.0, 0.0],
-                    },
-                    {
-                        "type": "entity",
-                        "entity_id": "e2",
-                        "owner_player_id": "player-2",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_character_id": "character-sheet-2",
-                        "linked_inventory": {},
-                        "icon_path": "",
-                        "pos": [0.0, 0.0],
-                    },
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-1",
+            linked_character_id="character-sheet-1",
+            linked_inventory={},
+            icon_path="",
+        ),
+        _entity_state(
+            "e2",
+            "player-2",
+            linked_sheet_id="sheet-1",
+            linked_character_id="character-sheet-2",
+            linked_inventory={},
+            icon_path="",
+        ),
+    )
 
     dungeon_widget._handle_host_sync_character_inventory(
         "player-1",
-        {
-            "sheet_id": "sheet-1",
-            "inventory": {
+        _sync_inventory_payload(
+            inventory={
                 "inventory": ["item_x"],
                 "inventory_notes": "claimed",
                 "equipment": {"head": "helm_a"},
@@ -1662,11 +1746,12 @@ def test_host_sync_character_inventory_updates_owned_linked_entities(
                 },
                 "hp": 999,
             },
-        },
+            character_id=None,
+        ),
         request_id="sync-1",
     )
 
-    result = dungeon_widget._host_controller.results[-1][1]
+    result = host.results[-1][1]
     assert result["ok"] is True
     first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
     second_item = dungeon_widget._dungeons[0]["state"]["items"][1]
@@ -1682,20 +1767,6 @@ def test_host_sync_character_inventory_updates_owned_linked_entities(
 def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
     monkeypatch, dungeon_widget, tmp_path
 ):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-            self.snapshots = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            self.snapshots.append(snapshot)
-
-        def stop(self):
-            return None
-
     monkeypatch.setattr("dungeon_applet.items_dir", lambda: tmp_path)
     existing_item_path = tmp_path / "existing_item.dmtitem"
     write_item_document(
@@ -1730,41 +1801,23 @@ def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
 
     monkeypatch.setattr(dungeon_widget, "_review_unknown_linked_items", _review_unknown_items)
 
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._broadcast_snapshot_if_host = lambda: None
-    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_character_id": "character-sheet-1",
-                        "linked_inventory": {},
-                        "icon_path": "",
-                        "pos": [0.0, 0.0],
-                    }
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-1",
+            linked_character_id="character-sheet-1",
+            linked_inventory={},
+            icon_path="",
+        ),
+        load_state=True,
+    )
 
     dungeon_widget._handle_host_sync_character_inventory(
         "player-1",
-        {
-            "sheet_id": "sheet-1",
-            "character_id": "character-sheet-1",
-            "inventory": {
+        _sync_inventory_payload(
+            inventory={
                 "inventory": ["item_x"],
                 "inventory_notes": "claimed",
                 "equipment": {"head": "helm_a"},
@@ -1780,13 +1833,13 @@ def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
                     },
                 },
             },
-            "stats": {"name": "Hero", "hp_max": 12, "hp_current": 10, "ac": 15},
-            "archive_b64": "YXJjaGl2ZQ==",
-        },
+            stats={"name": "Hero", "hp_max": 12, "hp_current": 10, "ac": 15},
+            archive_b64="YXJjaGl2ZQ==",
+        ),
         request_id="sync-2",
     )
 
-    result = dungeon_widget._host_controller.results[-1][1]
+    result = host.results[-1][1]
     assert result["ok"] is True
     first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
     assert first_item["linked_inventory"]["inventory"] == [
@@ -1805,23 +1858,6 @@ def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
 def test_host_sync_character_inventory_can_remove_unapproved_unknown_items(
     monkeypatch, dungeon_widget
 ):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-            self.snapshots = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            self.snapshots.append(snapshot)
-
-        def kick_player(self, player_id, *, message):
-            raise AssertionError("kick_player should not be called for remove flow")
-
-        def stop(self):
-            return None
-
     monkeypatch.setattr(
         dungeon_widget,
         "_review_unknown_linked_items",
@@ -1832,42 +1868,23 @@ def test_host_sync_character_inventory_can_remove_unapproved_unknown_items(
         },
     )
 
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._broadcast_snapshot_if_host = lambda: None
-    dungeon_widget._active_dungeon_id = "d1"
-    dungeon_widget._players_dungeon_id = "d1"
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_character_id": "character-sheet-1",
-                        "linked_inventory": {},
-                        "icon_path": "",
-                        "pos": [0.0, 0.0],
-                    }
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-1",
+            linked_character_id="character-sheet-1",
+            linked_inventory={},
+            icon_path="",
+        ),
+        fail_on_kick=True,
+    )
 
     dungeon_widget._handle_host_sync_character_inventory(
         "player-1",
-        {
-            "sheet_id": "sheet-1",
-            "character_id": "character-sheet-1",
-            "inventory": {
+        _sync_inventory_payload(
+            inventory={
                 "inventory": ["item_unknown"],
                 "equipment": {},
                 "item_documents": {
@@ -1876,12 +1893,12 @@ def test_host_sync_character_inventory_can_remove_unapproved_unknown_items(
                         "payload": {"item_id": "item_unknown", "title": "Unknown Blade"},
                     }
                 },
-            },
-        },
+            }
+        ),
         request_id="sync-remove-1",
     )
 
-    result = dungeon_widget._host_controller.results[-1][1]
+    result = host.results[-1][1]
     assert result["ok"] is True
     first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
     assert first_item["linked_inventory"]["inventory"] == []
@@ -1891,25 +1908,6 @@ def test_host_sync_character_inventory_can_remove_unapproved_unknown_items(
 def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
     monkeypatch, dungeon_widget
 ):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-            self.snapshots = []
-            self.kicks = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            self.snapshots.append(snapshot)
-
-        def kick_player(self, player_id, *, message):
-            self.kicks.append((player_id, message))
-            return True
-
-        def stop(self):
-            return None
-
     monkeypatch.setattr(
         dungeon_widget,
         "_review_unknown_linked_items",
@@ -1920,42 +1918,22 @@ def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
         },
     )
 
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._broadcast_snapshot_if_host = lambda: None
-    dungeon_widget._active_dungeon_id = "d1"
-    dungeon_widget._players_dungeon_id = "d1"
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_character_id": "character-sheet-1",
-                        "linked_inventory": {},
-                        "icon_path": "",
-                        "pos": [0.0, 0.0],
-                    }
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-1",
+            linked_character_id="character-sheet-1",
+            linked_inventory={},
+            icon_path="",
+        ),
+    )
 
     dungeon_widget._handle_host_sync_character_inventory(
         "player-1",
-        {
-            "sheet_id": "sheet-1",
-            "character_id": "character-sheet-1",
-            "inventory": {
+        _sync_inventory_payload(
+            inventory={
                 "inventory": ["item_unknown"],
                 "equipment": {},
                 "item_documents": {
@@ -1964,14 +1942,14 @@ def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
                         "payload": {"item_id": "item_unknown", "title": "Unknown Blade"},
                     }
                 },
-            },
-        },
+            }
+        ),
         request_id="sync-kick-1",
     )
 
-    result = dungeon_widget._host_controller.results[-1][1]
+    result = host.results[-1][1]
     assert result["ok"] is False
-    assert dungeon_widget._host_controller.kicks == [
+    assert host.kicks == [
         ("player-1", "DM rejected unknown linked items and removed the player.")
     ]
     first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
@@ -1981,228 +1959,96 @@ def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
 def test_host_sync_character_inventory_rejects_unowned_character_target(
     dungeon_widget
 ):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-            self.snapshots = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            self.snapshots.append(snapshot)
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._broadcast_snapshot_if_host = lambda: None
-    dungeon_widget._active_dungeon_id = "d1"
-    dungeon_widget._players_dungeon_id = "d1"
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_character_id": "character-owned",
-                        "linked_inventory": {},
-                        "icon_path": "",
-                        "pos": [0.0, 0.0],
-                    },
-                    {
-                        "type": "entity",
-                        "entity_id": "e2",
-                        "owner_player_id": "player-2",
-                        "linked_sheet_id": "sheet-2",
-                        "linked_character_id": "character-other",
-                        "linked_inventory": {},
-                        "icon_path": "",
-                        "pos": [0.0, 0.0],
-                    },
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-1",
+            linked_character_id="character-owned",
+            linked_inventory={},
+            icon_path="",
+        ),
+        _entity_state(
+            "e2",
+            "player-2",
+            linked_sheet_id="sheet-2",
+            linked_character_id="character-other",
+            linked_inventory={},
+            icon_path="",
+        ),
+    )
 
     dungeon_widget._handle_host_sync_character_inventory(
         "player-1",
-        {
-            "sheet_id": "sheet-2",
-            "character_id": "character-other",
-            "inventory": {"inventory": ["item_x"]},
-        },
+        _sync_inventory_payload(
+            sheet_id="sheet-2",
+            character_id="character-other",
+            inventory={"inventory": ["item_x"]},
+        ),
         request_id="sync-denied",
     )
 
-    result = dungeon_widget._host_controller.results[-1][1]
+    result = host.results[-1][1]
     assert result["ok"] is False
     assert "not linked to one of your owned entities" in str(result["message"]).lower()
 
 
-def test_host_link_character_sync_allows_claim_for_player_owned_entity(
-    monkeypatch, dungeon_widget, tmp_path
+def test_host_link_character_sync_rejects_initial_authority_claim_from_player(
+    dungeon_widget,
 ):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-            self.snapshots = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            self.snapshots.append(snapshot)
-
-        def stop(self):
-            return None
-
-    monkeypatch.setattr("dungeon_applet.items_dir", lambda: tmp_path)
-    write_item_document(
-        tmp_path / "item_a.dmtitem",
-        build_item_document({"item_id": "item_a", "title": "Item A"}, None),
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state("e1", "player-1", label="Entity", hp=10, max_hp=10, ac=10),
+        load_state=True,
     )
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "label": "Entity",
-                        "hp": 10,
-                        "max_hp": 10,
-                        "ac": 10,
-                        "pos": [0.0, 0.0],
-                    }
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    dungeon_widget._session_loot_pool = [
-        {"entry_id": "loot-1", "type": "item", "item_id": "item_a", "title": "Item A"}
-    ]
-    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
-        {
-            "entity_id": "e1",
-            "sheet_id": "sheet-1",
-            "sheet_name": "test",
-            "dungeon_id": "d1",
-            "inventory": {"inventory": ["item_a"]},
-            "stats": {
-                "name": "test",
-                "strength": 11,
-                "dexterity": 12,
-                "constitution": 13,
-                "intelligence": 14,
-                "wisdom": 15,
-                "charisma": 16,
-                "ac": 17,
-                "hp_max": 23,
-                "hp_current": 14,
-            },
-        },
+        _link_character_payload(
+            entity_id="e1",
+            sheet_id="sheet-1",
+            sheet_name="test",
+            inventory={"inventory": []},
+            stats={"name": "test", "ac": 17, "hp_max": 23, "hp_current": 14},
+        ),
         request_id="link-1",
     )
-    link_result = dungeon_widget._host_controller.results[-1][1]
-    assert link_result["ok"] is True
+    link_result = host.results[-1][1]
+    assert link_result["ok"] is False
+    assert "initial authoritative character link" in str(link_result["message"]).lower()
     entity_state = dungeon_widget._dungeons[0]["state"]["items"][0]
-    assert entity_state["linked_sheet_id"] == "sheet-1"
-    assert entity_state["label"] == "test"
-    assert entity_state["ac"] == 17
-    assert entity_state["max_hp"] == 23
-    assert entity_state["hp"] == 14
-
-    dungeon_widget._handle_host_claim_loot(
-        "player-1",
-        {"entry_ids": ["loot-1"], "sheet_id": "sheet-1"},
-        request_id="claim-1",
-    )
-    claim_result = dungeon_widget._host_controller.results[-1][1]
-    assert claim_result["ok"] is True
+    assert str(entity_state.get("linked_sheet_id") or "") == ""
+    assert str(entity_state.get("linked_character_id") or "") == ""
 
 
 def test_host_link_character_sync_rejects_overwriting_existing_authoritative_link(dungeon_widget):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            return None
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-host",
-                        "linked_sheet_name": "Host Hero",
-                        "linked_character_id": "character-host",
-                        "linked_save_revision": 4,
-                        "linked_content_hash": "host-hash",
-                        "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-                        "pos": [0.0, 0.0],
-                    }
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-host",
+            linked_sheet_name="Host Hero",
+            linked_character_id="character-host",
+            linked_save_revision=4,
+            linked_content_hash="host-hash",
+            linked_inventory={"inventory": [{"item_id": "item-host", "quantity": 1}]},
+        ),
+        load_state=True,
+    )
 
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
-        {
-            "entity_id": "e1",
-            "sheet_id": "sheet-local",
-            "sheet_name": "Local Hero",
-            "character_id": "character-local",
-            "dungeon_id": "d1",
-            "inventory": {"inventory": []},
-            "stats": {"name": "Local Hero"},
-        },
+        _link_character_payload(
+            entity_id="e1",
+            sheet_id="sheet-local",
+            sheet_name="Local Hero",
+            character_id="character-local",
+        ),
         request_id="link-authority-1",
     )
 
-    result = dungeon_widget._host_controller.results[-1][1]
+    result = host.results[-1][1]
     assert result["ok"] is False
     assert result["data"]["action"] == "resolve_linked_character_conflict"
     assert result["data"]["resolution"] == "host_authoritative"
@@ -2214,68 +2060,32 @@ def test_host_link_character_sync_rejects_overwriting_existing_authoritative_lin
 def test_host_link_character_sync_allows_duplicate_active_assignment_for_same_player_without_character_id(
     dungeon_widget,
 ):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            return None
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_sheet_name": "Hero",
-                        "linked_character_id": "character-1",
-                        "linked_inventory": {"inventory": []},
-                        "pos": [0.0, 0.0],
-                    },
-                    {
-                        "type": "entity",
-                        "entity_id": "e2",
-                        "owner_player_id": "player-1",
-                        "pos": [1.0, 1.0],
-                    },
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-1",
+            linked_sheet_name="Hero",
+            linked_character_id="character-1",
+            linked_inventory={"inventory": []},
+        ),
+        _entity_state("e2", "player-1", pos=(1.0, 1.0)),
+        load_state=True,
+    )
 
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
-        {
-            "entity_id": "e2",
-            "sheet_id": "sheet-1",
-            "sheet_name": "Hero",
-            "character_id": "",
-            "dungeon_id": "d1",
-            "inventory": {"inventory": []},
-            "stats": {"name": "Hero"},
-        },
+        _link_character_payload(
+            entity_id="e2",
+            sheet_id="sheet-1",
+            sheet_name="Hero",
+            character_id="",
+        ),
         request_id="link-duplicate-empty-character-id",
     )
 
-    result = dungeon_widget._host_controller.results[-1][1]
+    result = host.results[-1][1]
     assert result["ok"] is True
     entity_state = next(
         item
@@ -2289,68 +2099,31 @@ def test_host_link_character_sync_allows_duplicate_active_assignment_for_same_pl
 def test_host_link_character_entity_rejects_duplicate_link_for_different_player(
     dungeon_widget,
 ):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            return None
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-2",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_sheet_name": "Hero",
-                        "linked_character_id": "character-1",
-                        "linked_inventory": {"inventory": []},
-                        "pos": [0.0, 0.0],
-                    },
-                    {
-                        "type": "entity",
-                        "entity_id": "e2",
-                        "owner_player_id": "player-1",
-                        "pos": [1.0, 1.0],
-                    },
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    _set_assigned_players_dungeon(dungeon_widget, "d1")
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-2",
+            linked_sheet_id="sheet-1",
+            linked_sheet_name="Hero",
+            linked_character_id="character-1",
+            linked_inventory={"inventory": []},
+        ),
+        _entity_state("e2", "player-1", pos=(1.0, 1.0)),
+    )
 
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
-        {
-            "entity_id": "e2",
-            "sheet_id": "sheet-1",
-            "sheet_name": "Hero",
-            "character_id": "",
-            "dungeon_id": "d1",
-            "inventory": {"inventory": []},
-            "stats": {"name": "Hero"},
-        },
+        _link_character_payload(
+            entity_id="e2",
+            sheet_id="sheet-1",
+            sheet_name="Hero",
+            character_id="",
+        ),
         request_id="link-duplicate-different-owner",
     )
 
-    result = dungeon_widget._host_controller.results[-1][1]
+    result = host.results[-1][1]
     assert result["ok"] is False
     assert "already actively assigned" in result["message"]
     entity_state = next(
@@ -4471,8 +4244,29 @@ def test_player_link_character_sends_host_sync_command(monkeypatch, dungeon_widg
 
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._players_dungeon_id = "players-dungeon-id"
     dungeon_widget._active_dungeon_id = "players-dungeon-id"
     dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._dungeons = [
+        {
+            "id": "players-dungeon-id",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-existing-1",
+                        "owner_player_id": "player-local",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-sheet-1",
+                        "linked_inventory": {"inventory": []},
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+        }
+    ]
     dungeon_widget.inspector.set_entity(entity)
 
     dungeon_widget._on_link_character_requested()
@@ -4486,6 +4280,8 @@ def test_player_link_character_sends_host_sync_command(monkeypatch, dungeon_widg
     assert payload["dungeon_id"] == "players-dungeon-id"
     assert isinstance(payload["character_id"], str) and payload["character_id"]
     assert isinstance(request_id, str) and request_id
+    assert str(entity.data(ROLE_LINKED_SHEET_ID) or "") == ""
+    assert str(entity.data(ROLE_LINKED_CHARACTER_ID) or "") == ""
 
 
 def test_join_snapshot_prompts_resolution_instead_of_auto_overwrite_push(monkeypatch, dungeon_widget, tmp_path):

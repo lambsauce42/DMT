@@ -1,5 +1,6 @@
 import os
 import sys
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,8 @@ from dungeon_applet import (
     ONLINE_MODE_PLAYER,
     ToolType,
 )
-from dungeon_constants import ROLE_KIND, ROLE_OWNER_PLAYER_ID
+from dungeon_constants import ROLE_ENTITY_ID, ROLE_KIND, ROLE_LINKED_CHARACTER_ID, ROLE_OWNER_PLAYER_ID
+from dungeon_items import EntityItem
 from item_file_format import build_item_document, load_item_document, write_item_document
 
 
@@ -115,6 +117,61 @@ def test_host_sync_character_inventory_rejects_invalid_archive_payload(dungeon_w
     result = dungeon_widget._host_controller.results[-1][1]
     assert result["ok"] is False
     assert "archive payload is invalid" in str(result.get("message") or "").lower()
+
+
+def test_host_sync_character_inventory_rejects_mismatched_content_hash(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {"inventory": []},
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_sync_character_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "character_id": "character-1",
+            "inventory": {"inventory": [{"item_id": "item-1", "quantity": 1}]},
+            "stats": {"name": "Hero"},
+            "content_hash": hashlib.sha256(b"wrong").hexdigest(),
+        },
+        request_id="mismatched-hash-sync",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert "claimed content hash" in str(result.get("message") or "").lower()
 
 
 def test_conflicting_known_item_definition_enters_review_before_sync(
@@ -452,6 +509,16 @@ def test_host_link_character_sync_triggers_managed_cleanup(dungeon_widget, monke
                         "type": "entity",
                         "entity_id": "entity-1",
                         "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_sheet_name": "Hero",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {"inventory": []},
+                        "pos": [0.0, 0.0],
+                    },
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-2",
+                        "owner_player_id": "player-1",
                         "pos": [0.0, 0.0],
                     }
                 ],
@@ -466,7 +533,7 @@ def test_host_link_character_sync_triggers_managed_cleanup(dungeon_widget, monke
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
         {
-            "entity_id": "entity-1",
+            "entity_id": "entity-2",
             "sheet_id": "sheet-1",
             "sheet_name": "Hero",
             "character_id": "character-1",
@@ -478,6 +545,31 @@ def test_host_link_character_sync_triggers_managed_cleanup(dungeon_widget, monke
     )
 
     assert cleanup_calls == [True]
+
+
+def test_delete_linked_entity_triggers_managed_cleanup_and_undo_recovery(dungeon_widget, monkeypatch):
+    cleanup_calls = []
+
+    def _record_cleanup(active_character_ids):
+        cleanup_calls.append(set(active_character_ids))
+        return 0
+
+    monkeypatch.setattr("player_sheets.cleanup_managed_linked_entries", _record_cleanup)
+
+    entity = EntityItem(QPointF(20.0, 20.0))
+    entity.setData(ROLE_ENTITY_ID, "entity-delete")
+    entity.setData(ROLE_LINKED_CHARACTER_ID, "character-delete")
+    dungeon_widget.canvas.scene().addItem(entity)
+    entity.setSelected(True)
+
+    dungeon_widget.canvas.delete_selected_items()
+
+    assert cleanup_calls
+    assert cleanup_calls[-1] == set()
+
+    dungeon_widget.canvas.undo()
+
+    assert cleanup_calls[-1] == {"character-delete"}
 
 
 def test_host_link_conflict_response_cache_replays_without_time_expiry(dungeon_widget, monkeypatch):
