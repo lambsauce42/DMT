@@ -19,7 +19,7 @@ from dungeon_applet import (
     ToolType,
 )
 from dungeon_constants import ROLE_KIND, ROLE_OWNER_PLAYER_ID
-from item_file_format import build_item_document, write_item_document
+from item_file_format import build_item_document, load_item_document, write_item_document
 
 
 pytestmark = pytest.mark.tier2
@@ -147,7 +147,7 @@ def test_conflicting_known_item_definition_enters_review_before_sync(
         entries = kwargs.get("entries") or []
         review_calls.append([dict(entry) for entry in entries if isinstance(entry, dict)])
         return {
-            "action": "import",
+            "action": "use_authority",
             "selected_item_ids": [str(entry.get("item_id") or "") for entry in entries],
             "signature": "reviewed",
         }
@@ -157,6 +157,8 @@ def test_conflicting_known_item_definition_enters_review_before_sync(
     dungeon_widget._host_controller = _HostStub()
     dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
     dungeon_widget._broadcast_snapshot_if_host = lambda: None
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._active_dungeon_id = "d1"
     dungeon_widget._dungeons = [
         {
             "id": "d1",
@@ -187,7 +189,7 @@ def test_conflicting_known_item_definition_enters_review_before_sync(
             "sheet_id": "sheet-1",
             "character_id": "character-1",
             "inventory": {
-                "inventory": ["item_x"],
+                "inventory": [{"item_id": "item_x", "quantity": 1}],
                 "item_documents": {
                     "item_x": {
                         "format": "dmtitem.v2",
@@ -207,6 +209,109 @@ def test_conflicting_known_item_definition_enters_review_before_sync(
     assert result["ok"] is True
     linked_inventory = dungeon_widget._dungeons[0]["state"]["items"][0]["linked_inventory"]
     assert linked_inventory["item_documents"]["item_x"]["payload"]["title"] == "DM Sword"
+
+
+def test_conflicting_known_item_definition_can_explicitly_overwrite_dm_authority(
+    dungeon_widget, monkeypatch, tmp_path
+):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: tmp_path)
+
+    existing_item_path = tmp_path / "existing_item.dmtitem"
+    write_item_document(
+        existing_item_path,
+        build_item_document(
+            {"item_id": "item_x", "title": "DM Sword", "rarity": "common"},
+            None,
+        ),
+    )
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_review_unknown_linked_items",
+        lambda **kwargs: {
+            "action": "import",
+            "selected_item_ids": [
+                str(entry.get("item_id") or "")
+                for entry in (kwargs.get("entries") or [])
+                if isinstance(entry, dict)
+            ],
+            "signature": "overwrite-dm",
+        },
+    )
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._broadcast_snapshot_if_host = lambda: None
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {
+                            "inventory": [{"item_id": "item_x", "quantity": 1}],
+                            "item_documents": {
+                                "item_x": build_item_document(
+                                    {"item_id": "item_x", "title": "DM Sword", "rarity": "common"},
+                                    None,
+                                )
+                            },
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_sync_character_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "character_id": "character-1",
+            "inventory": {
+                "inventory": [{"item_id": "item_x", "quantity": 1}],
+                "item_documents": {
+                    "item_x": {
+                        "format": "dmtitem.v2",
+                        "payload": {"item_id": "item_x", "title": "Player Sword", "rarity": "rare"},
+                    }
+                },
+            },
+            "stats": {"name": "Hero"},
+        },
+        request_id="review-conflict-overwrite",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is True
+    linked_inventory = dungeon_widget._dungeons[0]["state"]["items"][0]["linked_inventory"]
+    assert linked_inventory["item_documents"]["item_x"]["payload"]["title"] == "Player Sword"
+    saved_document = load_item_document(existing_item_path)
+    assert isinstance(saved_document, dict)
+    assert saved_document["payload"]["title"] == "Player Sword"
 
 
 def test_player_mode_collection_autosave_is_suspended(dungeon_widget, tmp_path):
@@ -302,3 +407,199 @@ def test_player_eraser_only_deletes_local_player_strokes(dungeon_widget):
 
     eraser_state._erase_at(QPointF(25.0, 20.0))
     assert own_stroke.scene() is None
+
+
+def test_host_link_character_sync_triggers_managed_cleanup(dungeon_widget, monkeypatch):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    cleanup_calls = []
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_cleanup_unlinked_managed_character_artifacts",
+        lambda: cleanup_calls.append(True),
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_unknown_linked_items_for_host",
+        lambda **kwargs: ("ok", dict(kwargs.get("inventory_payload") or {}), ""),
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_canonicalize_linked_inventory_payload",
+        lambda inventory_payload, **kwargs: (dict(inventory_payload), []),
+    )
+    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: None)
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "players-dungeon"
+    dungeon_widget._active_dungeon_id = "players-dungeon"
+    dungeon_widget._dungeons = [
+        {
+            "id": "players-dungeon",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        {
+            "entity_id": "entity-1",
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": "character-1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+            "dungeon_id": "players-dungeon",
+        },
+        request_id="req-link-cleanup",
+    )
+
+    assert cleanup_calls == [True]
+
+
+def test_host_link_conflict_response_cache_replays_without_time_expiry(dungeon_widget, monkeypatch):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._cache_host_link_conflict_response(
+        "player-1::conflict-1",
+        "sig-1",
+        ok=False,
+        message="DM denied overwrite request.",
+        data={"action": "resolve_linked_character_conflict"},
+    )
+    monkeypatch.setattr("dungeon_applet.time.monotonic", lambda: 10_000.0)
+
+    replayed = dungeon_widget._replay_host_link_conflict_response(
+        "player-1",
+        "player-1::conflict-1",
+        "sig-1",
+        request_id="req-cache-replay",
+    )
+
+    assert replayed is True
+    assert dungeon_widget._host_controller.results[-1][1]["request_id"] == "req-cache-replay"
+    assert dungeon_widget._host_controller.results[-1][1]["message"] == "DM denied overwrite request."
+
+
+def test_host_add_loot_from_inventory_uses_authoritative_item_document(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_sheet_name": "Hero",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {
+                            "inventory": [{"item_id": "item_a", "quantity": 1}],
+                            "item_documents": {
+                                "item_a": build_item_document(
+                                    {"item_id": "item_a", "title": "DM Sword", "rarity": "common"},
+                                    None,
+                                )
+                            },
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_add_loot_from_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "items": [
+                {
+                    "item_id": "item_a",
+                    "title": "DM Sword",
+                    "path": "C:/fake/player-copy.dmtitem",
+                    "source": "backpack",
+                    "source_index": 0,
+                    "item_document": build_item_document(
+                        {"item_id": "item_a", "title": "Forged Sword", "rarity": "legendary"},
+                        None,
+                    ),
+                }
+            ],
+        },
+        request_id="req-authority-loot",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is True
+    assert len(dungeon_widget._session_loot_pool) == 1
+    item_document = dungeon_widget._session_loot_pool[0].get("item_document")
+    assert isinstance(item_document, dict)
+    assert item_document["payload"]["title"] == "DM Sword"
+
+
+def test_linked_item_lookup_does_not_trust_arbitrary_filesystem_paths(dungeon_widget, tmp_path):
+    rogue_item_path = tmp_path / "rogue_item.dmtitem"
+    write_item_document(
+        rogue_item_path,
+        build_item_document(
+            {"item_id": "rogue-item", "title": "Rogue Draft", "rarity": "rare"},
+            None,
+        ),
+    )
+
+    resolved = dungeon_widget._linked_item_document_by_id(str(rogue_item_path))
+
+    assert resolved is None

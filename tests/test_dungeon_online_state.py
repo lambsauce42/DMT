@@ -54,6 +54,18 @@ def dungeon_widget(qtbot):
     return widget
 
 
+def _set_assigned_players_dungeon(dungeon_widget, dungeon_id: str = "d1") -> None:
+    dungeon_widget._players_dungeon_id = dungeon_id
+    dungeon_widget._active_dungeon_id = dungeon_id
+
+
+def _load_assigned_players_dungeon_state(dungeon_widget, dungeon_id: str = "d1") -> None:
+    _set_assigned_players_dungeon(dungeon_widget, dungeon_id)
+    dungeon = dungeon_widget._find_dungeon(dungeon_id)
+    if isinstance(dungeon, dict):
+        dungeon_widget._load_dungeon_state(dungeon.get("state") or dungeon_widget._blank_dungeon_state())
+
+
 def test_entity_owner_and_network_id_round_trip(dungeon_widget):
     scene = dungeon_widget.canvas.scene()
     entity = EntityItem(QPointF(10, 10))
@@ -1693,12 +1705,35 @@ def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
             None,
         ),
     )
+    def _review_unknown_items(**kwargs):
+        entries = [entry for entry in (kwargs.get("entries") or []) if isinstance(entry, dict)]
+        conflicting = [
+            str(entry.get("item_id") or "")
+            for entry in entries
+            if bool(entry.get("conflicts_with_authority"))
+        ]
+        if conflicting:
+            return {
+                "action": "use_authority",
+                "selected_item_ids": conflicting,
+                "signature": "canonicalize-to-authority",
+            }
+        return {
+            "action": "import",
+            "selected_item_ids": [
+                str(entry.get("item_id") or "")
+                for entry in entries
+                if str(entry.get("item_id") or "")
+            ],
+            "signature": "import-unknown-after-canonicalization",
+        }
+
+    monkeypatch.setattr(dungeon_widget, "_review_unknown_linked_items", _review_unknown_items)
 
     dungeon_widget._host_controller = _HostStub()
     dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
     dungeon_widget._broadcast_snapshot_if_host = lambda: None
-    dungeon_widget._active_dungeon_id = "d1"
-    dungeon_widget._players_dungeon_id = "d1"
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
     dungeon_widget._dungeons = [
         {
             "id": "d1",
@@ -2067,7 +2102,7 @@ def test_host_link_character_sync_allows_claim_for_player_owned_entity(
     dungeon_widget._session_loot_pool = [
         {"entry_id": "loot-1", "type": "item", "item_id": "item_a", "title": "Item A"}
     ]
-
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
         {
@@ -2151,6 +2186,7 @@ def test_host_link_character_sync_rejects_overwriting_existing_authoritative_lin
             "dirty": False,
         }
     ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
 
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
@@ -2223,6 +2259,7 @@ def test_host_link_character_sync_allows_duplicate_active_assignment_for_same_pl
             "dirty": False,
         }
     ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
 
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
@@ -2297,6 +2334,7 @@ def test_host_link_character_entity_rejects_duplicate_link_for_different_player(
             "dirty": False,
         }
     ]
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
 
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
@@ -2366,6 +2404,7 @@ def test_host_authoritative_conflict_reports_authoritative_character_id(dungeon_
             "dirty": False,
         }
     ]
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
 
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
@@ -2512,6 +2551,16 @@ def test_host_add_loot_from_inventory_transfers_items_and_syncs_inventory(dungeo
                             "inventory": ["item_a", "item_b"],
                             "inventory_notes": "",
                             "equipment": {},
+                            "item_documents": {
+                                "item_a": build_item_document(
+                                    {"item_id": "item_a", "title": "Item A"},
+                                    None,
+                                ),
+                                "item_b": build_item_document(
+                                    {"item_id": "item_b", "title": "Item B"},
+                                    None,
+                                ),
+                            },
                             "gold": 0,
                             "silver": 0,
                             "copper": 0,
@@ -2526,6 +2575,7 @@ def test_host_add_loot_from_inventory_transfers_items_and_syncs_inventory(dungeo
             "dirty": False,
         }
     ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
     dungeon_widget._session_loot_pool = []
 
     dungeon_widget._handle_host_add_loot_from_inventory(
@@ -2552,6 +2602,7 @@ def test_host_add_loot_from_inventory_transfers_items_and_syncs_inventory(dungeo
     ]
     assert len(dungeon_widget._session_loot_pool) == 1
     assert dungeon_widget._session_loot_pool[0]["item_id"] == "item_a"
+    assert dungeon_widget._session_loot_pool[0]["item_document"]["payload"]["title"] == "Item A"
     linked_inventory = dungeon_widget._dungeons[0]["state"]["items"][0]["linked_inventory"]
     assert linked_inventory["inventory"] == [
         {"item_id": "item_b", "normalized_item_name": "item_b", "quantity": 1}
@@ -2591,6 +2642,16 @@ def test_host_add_loot_from_equipment_clears_slot_and_adds_loot_entry(dungeon_wi
                             "inventory": ["item_a"],
                             "inventory_notes": "",
                             "equipment": {"head": "item_b", "neck": None},
+                            "item_documents": {
+                                "item_a": build_item_document(
+                                    {"item_id": "item_a", "title": "Item A"},
+                                    None,
+                                ),
+                                "item_b": build_item_document(
+                                    {"item_id": "item_b", "title": "Head Item"},
+                                    None,
+                                ),
+                            },
                             "gold": 0,
                             "silver": 0,
                             "copper": 0,
@@ -2605,6 +2666,7 @@ def test_host_add_loot_from_equipment_clears_slot_and_adds_loot_entry(dungeon_wi
             "dirty": False,
         }
     ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
     dungeon_widget._session_loot_pool = []
 
     dungeon_widget._handle_host_add_loot_from_inventory(
@@ -2633,6 +2695,7 @@ def test_host_add_loot_from_equipment_clears_slot_and_adds_loot_entry(dungeon_wi
     assert inventory_payload["equipment"]["head"] is None
     assert len(dungeon_widget._session_loot_pool) == 1
     assert dungeon_widget._session_loot_pool[0]["item_id"] == "item_b"
+    assert dungeon_widget._session_loot_pool[0]["item_document"]["payload"]["title"] == "Head Item"
     linked_inventory = dungeon_widget._dungeons[0]["state"]["items"][0]["linked_inventory"]
     assert linked_inventory["equipment"]["head"] is None
 
@@ -2676,6 +2739,7 @@ def test_host_add_loot_from_inventory_rejects_missing_inventory_item(dungeon_wid
             "dirty": False,
         }
     ]
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
     dungeon_widget._session_loot_pool = []
 
     dungeon_widget._handle_host_add_loot_from_inventory(
@@ -2732,6 +2796,7 @@ def test_host_claim_loot_reserves_entries_until_finalize(dungeon_widget):
             "dirty": False,
         }
     ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
     dungeon_widget._session_loot_pool = [
         {"entry_id": "loot-1", "type": "item", "item_id": "item_a", "title": "Item A"},
         {"entry_id": "loot-2", "type": "note", "note": "Test note", "title": "Test note"},
@@ -2805,6 +2870,7 @@ def test_host_claim_loot_finalize_failure_keeps_entries(dungeon_widget):
             "dirty": False,
         }
     ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
     dungeon_widget._session_loot_pool = [
         {"entry_id": "loot-1", "type": "item", "item_id": "item_a", "title": "Item A"},
     ]
@@ -2825,6 +2891,76 @@ def test_host_claim_loot_finalize_failure_keeps_entries(dungeon_widget):
     assert finalize_result["ok"] is False
     assert len(dungeon_widget._session_loot_pool) == 1
     assert len(dungeon_widget._host_controller.snapshots) >= 2
+
+
+def test_host_claim_loot_finalize_replays_success_for_duplicate_requests(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
+    dungeon_widget._session_loot_pool = [
+        {"entry_id": "loot-1", "type": "item", "item_id": "item_a", "title": "Item A"},
+    ]
+
+    dungeon_widget._handle_host_claim_loot(
+        "player-1",
+        {"entry_ids": ["loot-1"], "sheet_id": "sheet-1"},
+        request_id="claim-idempotent",
+    )
+    claim_result = dungeon_widget._host_controller.results[-1][1]
+    claim_id = str(claim_result["data"]["claim_id"])
+
+    dungeon_widget._handle_host_finalize_loot_claim(
+        "player-1",
+        {"claim_id": claim_id, "applied": True},
+        request_id="finalize-first",
+    )
+    first_finalize = dungeon_widget._host_controller.results[-1][1]
+    assert first_finalize["ok"] is True
+
+    dungeon_widget._handle_host_finalize_loot_claim(
+        "player-1",
+        {"claim_id": claim_id, "applied": True},
+        request_id="finalize-second",
+    )
+    second_finalize = dungeon_widget._host_controller.results[-1][1]
+    assert second_finalize["ok"] is True
+    assert second_finalize["message"] == "Claim committed"
+    assert second_finalize["data"]["action"] == "claim_loot_finalize"
 
 
 def test_host_claim_loot_rejects_partial_selection_when_any_entry_missing(dungeon_widget):
@@ -2865,6 +3001,7 @@ def test_host_claim_loot_rejects_partial_selection_when_any_entry_missing(dungeo
             "dirty": False,
         }
     ]
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
     dungeon_widget._session_loot_pool = [
         {"entry_id": "loot-1", "type": "item", "item_id": "item-a", "title": "Item A"},
     ]
@@ -3335,6 +3472,7 @@ def test_loot_pool_displays_items_before_notes_with_icons(dungeon_widget, tmp_pa
             "",
         ),
     )
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
     dungeon_widget._session_loot_pool = [
         {"entry_id": "n-1", "type": "note", "title": "Remember trap", "note": "Remember trap"},
         {
@@ -4152,6 +4290,7 @@ def test_player_toolbar_loot_badge_visible_when_pool_has_entries(dungeon_widget,
     dungeon_widget.show()
     qtbot.wait(20)
     dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
     dungeon_widget._session_loot_pool = [
         {"entry_id": "loot-1", "type": "item", "item_id": "item_a", "title": "Item A"}
     ]
@@ -4626,6 +4765,7 @@ def test_host_link_character_sync_rejects_non_owner(dungeon_widget):
             "dirty": False,
         }
     ]
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
 
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
@@ -4823,7 +4963,7 @@ def test_host_can_ignore_player_overwrite_requests_for_current_session(dungeon_w
             "dirty": False,
         }
     ]
-
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
     dungeon_widget._handle_host_resolve_linked_character_conflict(
         "player-1",
         {
@@ -4874,7 +5014,7 @@ def test_host_conflict_resolution_missing_entity_returns_error_without_crash(dun
             "dirty": False,
         }
     ]
-
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
     dungeon_widget._handle_host_resolve_linked_character_conflict(
         "player-1",
         {
@@ -4974,7 +5114,7 @@ def test_host_duplicate_overwrite_requests_are_throttled(monkeypatch, dungeon_wi
             "dirty": False,
         }
     ]
-
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
     payload = {
         "mode": "overwrite_dm",
         "conflict_key": "d1::e1::character-1",

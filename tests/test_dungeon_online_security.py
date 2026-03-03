@@ -288,6 +288,149 @@ def test_player_state_update_rejects_non_players_dungeon(dungeon_widget):
     assert "assigned players dungeon" in result["message"]
 
 
+def test_player_ping_rejects_non_players_dungeon(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.pings = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_ping(self, **kwargs):
+            self.pings.append(dict(kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "players-dungeon"
+    dungeon_widget._active_dungeon_id = "dm-dungeon"
+
+    dungeon_widget._on_host_command_received(
+        "player-1",
+        {
+            "action": "ping",
+            "request_id": "req-ping-offstage",
+            "payload": {"x": 1.0, "y": 2.0, "dungeon_id": "dm-dungeon"},
+        },
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert "assigned players dungeon" in str(result.get("message") or "")
+    assert dungeon_widget._host_controller.pings == []
+
+
+def test_player_sync_character_inventory_rejects_linked_character_outside_players_dungeon(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def kick_player(self, player_id, message=""):
+            return True
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "players-dungeon"
+    dungeon_widget._active_dungeon_id = "dm-dungeon"
+    dungeon_widget._dungeons = [
+        {"id": "players-dungeon", "name": "Players", "state": {"items": [], "fog": {"path": []}}},
+        {
+            "id": "dm-dungeon",
+            "name": "DM",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {"inventory": []},
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+        },
+    ]
+
+    dungeon_widget._handle_host_sync_character_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "character_id": "character-1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+        },
+        request_id="req-offstage-sync",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert "assigned players dungeon" in str(result.get("message") or "")
+
+
+def test_player_link_character_entity_rejects_non_players_dungeon(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "players-dungeon"
+    dungeon_widget._active_dungeon_id = "dm-dungeon"
+    dungeon_widget._dungeons = [
+        {"id": "players-dungeon", "name": "Players", "state": {"items": [], "fog": {"path": []}}},
+        {
+            "id": "dm-dungeon",
+            "name": "DM",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+        },
+    ]
+
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        {
+            "entity_id": "entity-1",
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+            "dungeon_id": "dm-dungeon",
+        },
+        request_id="req-offstage-link",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert "assigned players dungeon" in str(result.get("message") or "")
+
+
 def test_player_cannot_update_dm_entity_initiative_rows(dungeon_widget, monkeypatch):
     class _HostStub:
         def __init__(self):
@@ -639,6 +782,63 @@ def test_player_upload_icon_cannot_claim_unowned_entity(dungeon_widget):
     assert result["ok"] is False
     assert "owner" in str(result.get("message") or "").lower()
     assert players["state"]["items"][0].get("owner_player_id") == ""
+    assert host.assets == []
+
+
+def test_player_upload_icon_rejects_non_players_dungeon(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.assets = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_icon_asset(self, **kwargs):
+            self.assets.append(dict(kwargs))
+
+        def stop(self):
+            return None
+
+    host = _HostStub()
+    dungeon_widget._host_controller = host
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "players-dungeon"
+    dungeon_widget._active_dungeon_id = "dm-dungeon"
+    dungeon_widget._dungeons = [
+        {"id": "players-dungeon", "name": "Players", "state": {"items": [], "fog": {"path": []}}},
+        {
+            "id": "dm-dungeon",
+            "name": "DM",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "icon_path": "",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+        },
+    ]
+
+    dungeon_widget._handle_uploaded_icon(
+        "player-1",
+        {
+            "entity_id": "entity-1",
+            "filename": "token.png",
+            "content_b64": base64.b64encode(b"player-icon").decode("ascii"),
+            "dungeon_id": "dm-dungeon",
+        },
+        request_id="req-upload-offstage",
+    )
+
+    result = host.results[-1][1]
+    assert result["ok"] is False
+    assert "assigned players dungeon" in str(result.get("message") or "")
     assert host.assets == []
 
 
