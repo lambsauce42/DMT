@@ -8526,6 +8526,31 @@ class DungeonAppletWidget(QWidget):
                 request_id=request_id,
             )
             return
+        if not character_id:
+            for other_dungeon in self._dungeons:
+                state = other_dungeon.get("state")
+                if not isinstance(state, dict):
+                    continue
+                items = state.get("items")
+                if not isinstance(items, list):
+                    continue
+                for other_item in items:
+                    if not isinstance(other_item, dict):
+                        continue
+                    if other_item.get("type") != "entity":
+                        continue
+                    if str(other_item.get("entity_id") or "").strip() == entity_id:
+                        continue
+                    if str(other_item.get("owner_player_id") or "").strip() != player_id:
+                        continue
+                    if str(other_item.get("linked_sheet_id") or "").strip() != sheet_id:
+                        continue
+                    character_id = str(other_item.get("linked_character_id") or "").strip()
+                    if character_id:
+                        break
+                if character_id:
+                    break
+
         duplicate_link_found = False
         for other_dungeon in self._dungeons:
             state = other_dungeon.get("state")
@@ -8543,6 +8568,8 @@ class DungeonAppletWidget(QWidget):
                     continue
                 other_owner = str(other_item.get("owner_player_id") or "").strip()
                 if not other_owner:
+                    continue
+                if other_owner == player_id:
                     continue
                 if character_id:
                     if str(other_item.get("linked_character_id") or "").strip() != character_id:

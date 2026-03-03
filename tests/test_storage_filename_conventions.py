@@ -11,7 +11,11 @@ if SRC not in sys.path:
 
 from dmt_package import read_dmt_package_info
 import npc_database
-from navigation_storage import navigation_objects_dir, save_navigation_world_data
+from navigation_storage import (
+    load_navigation_world_data,
+    navigation_objects_dir,
+    save_navigation_world_data,
+)
 from npc_database import NPCEntry, npc_file_path
 from maps_applet import map_file_path
 from session_creator import Session, SessionManager, session_file_path
@@ -47,7 +51,7 @@ def test_save_npc_uses_name_based_filename_and_internal_object_id(
     assert info.get("object_id") == "npc_internal_123"
 
 
-def test_navigation_save_uses_names_for_package_filenames(tmp_path: Path) -> None:
+def test_navigation_save_uses_object_ids_for_package_filenames(tmp_path: Path) -> None:
     world_data = [
         {
             "id": "world_internal",
@@ -73,9 +77,9 @@ def test_navigation_save_uses_names_for_package_filenames(tmp_path: Path) -> Non
     save_navigation_world_data(world_data, base_dir=tmp_path)
 
     root = navigation_objects_dir(base_dir=tmp_path)
-    world_path = root / "worlds" / "World Prime.dmtworld"
-    campaign_path = root / "campaigns" / "Campaign Alpha.dmtcampaign"
-    group_path = root / "groups" / "Group One.dmtgroup"
+    world_path = root / "worlds" / "world_internal.dmtworld"
+    campaign_path = root / "campaigns" / "campaign_internal.dmtcampaign"
+    group_path = root / "groups" / "group_internal.dmtgroup"
 
     assert world_path.exists()
     assert campaign_path.exists()
@@ -83,6 +87,58 @@ def test_navigation_save_uses_names_for_package_filenames(tmp_path: Path) -> Non
     assert read_dmt_package_info(world_path).get("object_id") == "world_internal"
     assert read_dmt_package_info(campaign_path).get("object_id") == "campaign_internal"
     assert read_dmt_package_info(group_path).get("object_id") == "group_internal"
+
+
+def test_navigation_save_preserves_distinct_objects_with_duplicate_names(tmp_path: Path) -> None:
+    world_data = [
+        {
+            "id": "world_one",
+            "name": "Shared World",
+            "icon": "",
+            "campaigns": [
+                {
+                    "id": "campaign_one",
+                    "name": "Shared Campaign",
+                    "icon": "",
+                    "groups": [
+                        {
+                            "id": "group_one",
+                            "name": "Shared Group",
+                            "icon": "",
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "id": "world_two",
+            "name": "Shared World",
+            "icon": "",
+            "campaigns": [
+                {
+                    "id": "campaign_two",
+                    "name": "Shared Campaign",
+                    "icon": "",
+                    "groups": [
+                        {
+                            "id": "group_two",
+                            "name": "Shared Group",
+                            "icon": "",
+                        }
+                    ],
+                }
+            ],
+        },
+    ]
+
+    save_navigation_world_data(world_data, base_dir=tmp_path)
+    loaded = load_navigation_world_data(base_dir=tmp_path)
+
+    assert [world.get("id") for world in loaded] == ["world_one", "world_two"]
+    assert [campaign.get("id") for campaign in loaded[0]["campaigns"]] == ["campaign_one"]
+    assert [campaign.get("id") for campaign in loaded[1]["campaigns"]] == ["campaign_two"]
+    assert [group.get("id") for group in loaded[0]["campaigns"][0]["groups"]] == ["group_one"]
+    assert [group.get("id") for group in loaded[1]["campaigns"][0]["groups"]] == ["group_two"]
 
 
 def test_session_manager_saves_package_under_session_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

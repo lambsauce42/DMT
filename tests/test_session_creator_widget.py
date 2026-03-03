@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import copy
+import json
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -23,17 +24,47 @@ from session_creator import SessionCreatorWidget
 
 TEST_WORLD_DATA = [
     {
+        "id": "world_eldervale",
         "name": "Eldervale",
         "campaigns": [
-            {"name": "Ashen Crown", "groups": ["Silver Lances", "The Gilded Tide"]},
-            {"name": "Hollow Pact", "groups": ["Night Cartel", "Dawn Wardens"]},
+            {
+                "id": "campaign_ashen_crown",
+                "name": "Ashen Crown",
+                "groups": [
+                    {"id": "group_silver_lances", "name": "Silver Lances"},
+                    {"id": "group_gilded_tide", "name": "The Gilded Tide"},
+                ],
+            },
+            {
+                "id": "campaign_hollow_pact",
+                "name": "Hollow Pact",
+                "groups": [
+                    {"id": "group_night_cartel", "name": "Night Cartel"},
+                    {"id": "group_dawn_wardens", "name": "Dawn Wardens"},
+                ],
+            },
         ],
     },
     {
+        "id": "world_stormreach",
         "name": "Stormreach",
         "campaigns": [
-            {"name": "Iron Meridian", "groups": ["Cinderwatch", "Glass Harbor"]},
-            {"name": "Verdant Rift", "groups": ["Stone Hounds", "Riftwalkers"]},
+            {
+                "id": "campaign_iron_meridian",
+                "name": "Iron Meridian",
+                "groups": [
+                    {"id": "group_cinderwatch", "name": "Cinderwatch"},
+                    {"id": "group_glass_harbor", "name": "Glass Harbor"},
+                ],
+            },
+            {
+                "id": "campaign_verdant_rift",
+                "name": "Verdant Rift",
+                "groups": [
+                    {"id": "group_stone_hounds", "name": "Stone Hounds"},
+                    {"id": "group_riftwalkers", "name": "Riftwalkers"},
+                ],
+            },
         ],
     },
 ]
@@ -50,6 +81,17 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         session_creator.WORLD_DATA = self._original_world_data
+
+    @staticmethod
+    def _context_token(world_id: str = "", campaign_id: str = "", group_id: str = "") -> str:
+        payload = {}
+        if world_id:
+            payload["world_id"] = world_id
+        if campaign_id:
+            payload["campaign_id"] = campaign_id
+        if group_id:
+            payload["group_id"] = group_id
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
     def _saved_sessions_in_dir(storage_root: Path) -> list[dict]:
@@ -321,13 +363,13 @@ class SessionCreatorWidgetTests(unittest.TestCase):
                         "id": "session_eld",
                         "name": "Eldervale Session",
                         "session_date": "2026-02-05",
-                        "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
+                        "group_ids": [self._context_token("world_eldervale", "campaign_ashen_crown", "group_silver_lances")],
                     },
                     {
                         "id": "session_storm",
                         "name": "Stormreach Session",
                         "session_date": "2026-02-04",
-                        "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
+                        "group_ids": [self._context_token("world_stormreach", "campaign_iron_meridian", "group_cinderwatch")],
                     },
                 ],
             )
@@ -365,13 +407,13 @@ class SessionCreatorWidgetTests(unittest.TestCase):
                         "id": "session_eld",
                         "name": "Eldervale Session",
                         "session_date": "2026-02-05",
-                        "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
+                        "group_ids": [self._context_token("world_eldervale", "campaign_ashen_crown", "group_silver_lances")],
                     },
                     {
                         "id": "session_storm",
                         "name": "Stormreach Session",
                         "session_date": "2026-02-06",
-                        "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
+                        "group_ids": [self._context_token("world_stormreach", "campaign_iron_meridian", "group_cinderwatch")],
                     },
                 ],
             )
@@ -394,7 +436,7 @@ class SessionCreatorWidgetTests(unittest.TestCase):
                 storm_entry = next(entry for entry in payload if entry["id"] == "session_storm")
                 self.assertEqual(
                     storm_entry.get("group_ids"),
-                    ["Stormreach::Iron Meridian::Cinderwatch"],
+                    [self._context_token("world_stormreach", "campaign_iron_meridian", "group_cinderwatch")],
                 )
             finally:
                 session_creator.session_storage_path = original_path_func
@@ -409,7 +451,7 @@ class SessionCreatorWidgetTests(unittest.TestCase):
                         "id": "seed_session",
                         "name": "Seed Session",
                         "session_date": "2026-01-01",
-                        "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
+                        "group_ids": [self._context_token("world_eldervale", "campaign_ashen_crown", "group_silver_lances")],
                     }
                 ],
             )
@@ -439,7 +481,10 @@ class SessionCreatorWidgetTests(unittest.TestCase):
 
                 payload = self._saved_sessions_in_dir(Path(tmp_dir))
                 stored = next(entry for entry in payload if entry["id"] == session_id)
-                self.assertEqual(stored.get("group_ids"), ["Eldervale::Ashen Crown::Silver Lances"])
+                self.assertEqual(
+                    stored.get("group_ids"),
+                    [self._context_token("world_eldervale", "campaign_ashen_crown", "group_silver_lances")],
+                )
 
                 reopened = SessionCreatorWidget()
                 self.addCleanup(reopened.close)
@@ -459,6 +504,57 @@ class SessionCreatorWidgetTests(unittest.TestCase):
             finally:
                 session_creator.session_storage_path = original_path_func
 
+    def test_loading_session_uses_stable_context_ids_after_navigation_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage_path = Path(tmp_dir) / "sessions.dmtindex"
+            self._write_sessions_to_dir(
+                Path(tmp_dir),
+                [
+                    {
+                        "id": "renamed_context_session",
+                        "name": "Renamed Context Session",
+                        "session_date": "2026-02-07",
+                        "group_ids": [
+                            self._context_token(
+                                "world_eldervale",
+                                "campaign_ashen_crown",
+                                "group_silver_lances",
+                            )
+                        ],
+                    }
+                ],
+            )
+            original_path_func = session_creator.session_storage_path
+            original_world_data = copy.deepcopy(session_creator.WORLD_DATA)
+            session_creator.session_storage_path = lambda: storage_path
+            try:
+                renamed_world_data = copy.deepcopy(TEST_WORLD_DATA)
+                renamed_world_data[0]["name"] = "Eldervale Renamed"
+                renamed_world_data[0]["campaigns"][0]["name"] = "Ashen Crown Renamed"
+                renamed_world_data[0]["campaigns"][0]["groups"][0]["name"] = "Silver Lances Renamed"
+                session_creator.WORLD_DATA = renamed_world_data
+
+                widget = SessionCreatorWidget()
+                self.addCleanup(widget.close)
+
+                target_row = None
+                for row in range(widget.session_list.count()):
+                    item = widget.session_list.item(row)
+                    if item.data(Qt.ItemDataRole.UserRole) == "renamed_context_session":
+                        target_row = row
+                        break
+                self.assertIsNotNone(target_row)
+
+                widget.session_list.setCurrentRow(target_row)
+                widget._load_selected_session()
+
+                self.assertEqual(widget.world_combo.currentText(), "Eldervale Renamed")
+                self.assertEqual(widget.campaign_combo.currentText(), "Ashen Crown Renamed")
+                self.assertEqual(widget.group_combo.currentText(), "Silver Lances Renamed")
+            finally:
+                session_creator.WORLD_DATA = original_world_data
+                session_creator.session_storage_path = original_path_func
+
     def test_loading_session_applies_linked_context_restrictions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             storage_path = Path(tmp_dir) / "sessions.dmtindex"
@@ -469,19 +565,19 @@ class SessionCreatorWidgetTests(unittest.TestCase):
                         "id": "session_eld_a",
                         "name": "Eldervale A",
                         "session_date": "2026-02-05",
-                        "group_ids": ["Eldervale::Ashen Crown::Silver Lances"],
+                        "group_ids": [self._context_token("world_eldervale", "campaign_ashen_crown", "group_silver_lances")],
                     },
                     {
                         "id": "session_eld_b",
                         "name": "Eldervale B",
                         "session_date": "2026-02-04",
-                        "group_ids": ["Eldervale::Ashen Crown::The Gilded Tide"],
+                        "group_ids": [self._context_token("world_eldervale", "campaign_ashen_crown", "group_gilded_tide")],
                     },
                     {
                         "id": "session_storm",
                         "name": "Stormreach",
                         "session_date": "2026-02-03",
-                        "group_ids": ["Stormreach::Iron Meridian::Cinderwatch"],
+                        "group_ids": [self._context_token("world_stormreach", "campaign_iron_meridian", "group_cinderwatch")],
                     },
                 ],
             )

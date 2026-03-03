@@ -119,17 +119,22 @@ class TestSavePaths(unittest.TestCase):
             self.assertFalse(loot_cache.exists())
 
     @patch("save_paths.default_dnd_save_dir")
-    def test_clear_all_online_runtime_caches_removes_root_cache_dir(self, mock_base):
+    def test_clear_all_online_runtime_caches_preserves_unrelated_cache_dirs(self, mock_base):
         with tempfile.TemporaryDirectory() as td:
             mock_base.return_value = td
             root_cache = Path(td) / "cache"
             logs_cache = root_cache / "logs"
+            unrelated_cache = root_cache / "item_icons"
             logs_cache.mkdir(parents=True, exist_ok=True)
+            unrelated_cache.mkdir(parents=True, exist_ok=True)
             (logs_cache / "online_debug.log").write_text("debug", encoding="utf-8")
+            (unrelated_cache / "cached.png").write_bytes(_PNG_1X1_BYTES)
 
             save_paths.clear_all_online_runtime_caches()
 
-            self.assertFalse(root_cache.exists())
+            self.assertTrue(root_cache.exists())
+            self.assertTrue(logs_cache.exists())
+            self.assertTrue(unrelated_cache.exists())
 
     def test_collection_icon_assets_dir_is_related_to_collection_file(self):
         path = Path("My Collection.json")

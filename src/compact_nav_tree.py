@@ -758,6 +758,60 @@ class CompactNavTree(QWidget):
             if isinstance(group, dict) and group.get("name") == group_ref:
                 return idx
         return None
+
+    def _normalized_name_key(self, value: object) -> str:
+        return str(value or "").strip().casefold()
+
+    def _world_name_exists(self, name: object, *, ignore_index: Optional[int] = None) -> bool:
+        target = self._normalized_name_key(name)
+        if not target:
+            return False
+        for idx, world in enumerate(self._data):
+            if ignore_index is not None and idx == ignore_index:
+                continue
+            if self._normalized_name_key(world.get("name")) == target:
+                return True
+        return False
+
+    def _campaign_name_exists(
+        self,
+        world: dict,
+        name: object,
+        *,
+        ignore_index: Optional[int] = None,
+    ) -> bool:
+        target = self._normalized_name_key(name)
+        if not target:
+            return False
+        campaigns = world.get("campaigns", [])
+        if not isinstance(campaigns, list):
+            return False
+        for idx, campaign in enumerate(campaigns):
+            if ignore_index is not None and idx == ignore_index:
+                continue
+            if isinstance(campaign, dict) and self._normalized_name_key(campaign.get("name")) == target:
+                return True
+        return False
+
+    def _group_name_exists(
+        self,
+        campaign: dict,
+        name: object,
+        *,
+        ignore_index: Optional[int] = None,
+    ) -> bool:
+        target = self._normalized_name_key(name)
+        if not target:
+            return False
+        groups = campaign.get("groups", [])
+        if not isinstance(groups, list):
+            return False
+        for idx, group in enumerate(groups):
+            if ignore_index is not None and idx == ignore_index:
+                continue
+            if isinstance(group, dict) and self._normalized_name_key(group.get("name")) == target:
+                return True
+        return False
     
     # ----------------------------------------------------------------
     # World operations
@@ -769,6 +823,9 @@ class CompactNavTree(QWidget):
             "New World", "World name:", "", self._default_world_icon
         )
         if not name:
+            return
+        if self._world_name_exists(name):
+            QMessageBox.warning(self, "Name Conflict", "A world with that name already exists.")
             return
         self._data.append({
             "name": name,
@@ -789,6 +846,9 @@ class CompactNavTree(QWidget):
             "Edit World", "New world name:", old_name, world.get("icon")
         )
         if not new_name:
+            return
+        if self._world_name_exists(new_name, ignore_index=world_idx):
+            QMessageBox.warning(self, "Name Conflict", "A world with that name already exists.")
             return
         world["name"] = new_name
         world["icon"] = icon or world.get("icon") or self._default_world_icon
@@ -838,6 +898,9 @@ class CompactNavTree(QWidget):
         payload = entry.get("payload", {})
         if not payload.get("name"):
             return
+        if self._world_name_exists(payload.get("name")):
+            QMessageBox.warning(self, "Name Conflict", "A world with that name already exists.")
+            return
         self._data.append(self._normalize_world(payload))
         self._trash.remove(entry)
         self._save_trash()
@@ -857,6 +920,9 @@ class CompactNavTree(QWidget):
             "New Campaign", "Campaign name:", "", self._default_campaign_icon
         )
         if not name:
+            return
+        if self._campaign_name_exists(world, name):
+            QMessageBox.warning(self, "Name Conflict", "A campaign with that name already exists.")
             return
         world["campaigns"].append({
             "name": name,
@@ -882,6 +948,9 @@ class CompactNavTree(QWidget):
             "Edit Campaign", "New campaign name:", old_name, campaign.get("icon")
         )
         if not new_name:
+            return
+        if self._campaign_name_exists(world, new_name, ignore_index=campaign_idx):
+            QMessageBox.warning(self, "Name Conflict", "A campaign with that name already exists.")
             return
         campaign["name"] = new_name
         campaign["icon"] = icon or campaign.get("icon") or self._default_campaign_icon
@@ -959,6 +1028,9 @@ class CompactNavTree(QWidget):
         payload = entry.get("payload", {})
         if not payload.get("name"):
             return
+        if self._campaign_name_exists(world, payload.get("name")):
+            QMessageBox.warning(self, "Name Conflict", "A campaign with that name already exists.")
+            return
         world["campaigns"].append(self._normalize_campaign(payload))
         self._trash.remove(entry)
         self._save_trash()
@@ -981,6 +1053,9 @@ class CompactNavTree(QWidget):
             "New Group", "Group name:", "", self._default_group_icon
         )
         if not name:
+            return
+        if self._group_name_exists(campaign, name):
+            QMessageBox.warning(self, "Name Conflict", "A group with that name already exists.")
             return
         campaign["groups"].append({
             "name": name,
@@ -1007,6 +1082,9 @@ class CompactNavTree(QWidget):
             "Edit Group", "New group name:", old_name, group.get("icon")
         )
         if not new_name:
+            return
+        if self._group_name_exists(campaign, new_name, ignore_index=group_idx):
+            QMessageBox.warning(self, "Name Conflict", "A group with that name already exists.")
             return
         group["name"] = new_name
         group["icon"] = icon or group.get("icon") or self._default_group_icon
@@ -1107,6 +1185,9 @@ class CompactNavTree(QWidget):
             return
         payload = entry.get("payload", {})
         if not payload.get("name"):
+            return
+        if self._group_name_exists(campaign, payload.get("name")):
+            QMessageBox.warning(self, "Name Conflict", "A group with that name already exists.")
             return
         campaign["groups"].append(self._normalize_group(payload))
         self._trash.remove(entry)

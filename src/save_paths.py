@@ -223,4 +223,3 @@ def clear_runtime_cache_root() -> None:
 def clear_all_online_runtime_caches() -> None:
     clear_all_online_icon_caches()
     clear_all_online_loot_item_caches()
-    clear_runtime_cache_root()

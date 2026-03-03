@@ -58,16 +58,16 @@ def _ensure_dirs(*, base_dir: Path | None = None) -> None:
     _groups_dir(base_dir=base_dir).mkdir(parents=True, exist_ok=True)
 
 
-def _world_file_path(world_name: str, *, base_dir: Path | None = None) -> Path:
-    return _worlds_dir(base_dir=base_dir) / f"{_safe_component(world_name, 'world')}{WORLD_EXTENSION}"
+def _world_file_path(world_id: str, *, base_dir: Path | None = None) -> Path:
+    return _worlds_dir(base_dir=base_dir) / f"{_safe_component(world_id, 'world')}{WORLD_EXTENSION}"
 
 
-def _campaign_file_path(campaign_name: str, *, base_dir: Path | None = None) -> Path:
-    return _campaigns_dir(base_dir=base_dir) / f"{_safe_component(campaign_name, 'campaign')}{CAMPAIGN_EXTENSION}"
+def _campaign_file_path(campaign_id: str, *, base_dir: Path | None = None) -> Path:
+    return _campaigns_dir(base_dir=base_dir) / f"{_safe_component(campaign_id, 'campaign')}{CAMPAIGN_EXTENSION}"
 
 
-def _group_file_path(group_name: str, *, base_dir: Path | None = None) -> Path:
-    return _groups_dir(base_dir=base_dir) / f"{_safe_component(group_name, 'group')}{GROUP_EXTENSION}"
+def _group_file_path(group_id: str, *, base_dir: Path | None = None) -> Path:
+    return _groups_dir(base_dir=base_dir) / f"{_safe_component(group_id, 'group')}{GROUP_EXTENSION}"
 
 
 def load_navigation_world_data(*, base_dir: Path | None = None) -> list[dict]:
@@ -208,7 +208,7 @@ def save_navigation_world_data(world_data: list[dict], *, base_dir: Path | None 
             continue
         world_id = str(world.get("id") or "").strip() or generate_named_object_id(world_name, "world")
         world["id"] = world_id
-        world_path = _world_file_path(world_name, base_dir=base_dir)
+        world_path = _world_file_path(world_id, base_dir=base_dir)
         expected.add(world_path.resolve())
         write_dmt_package(
             world_path,
@@ -236,7 +236,7 @@ def save_navigation_world_data(world_data: list[dict], *, base_dir: Path | None 
                 or generate_named_object_id(campaign_name, "campaign")
             )
             campaign["id"] = campaign_id
-            campaign_path = _campaign_file_path(campaign_name, base_dir=base_dir)
+            campaign_path = _campaign_file_path(campaign_id, base_dir=base_dir)
             expected.add(campaign_path.resolve())
             write_dmt_package(
                 campaign_path,
@@ -265,7 +265,7 @@ def save_navigation_world_data(world_data: list[dict], *, base_dir: Path | None 
                     or generate_named_object_id(group_name, "group")
                 )
                 group["id"] = group_id
-                group_path = _group_file_path(group_name, base_dir=base_dir)
+                group_path = _group_file_path(group_id, base_dir=base_dir)
                 expected.add(group_path.resolve())
                 write_dmt_package(
                     group_path,

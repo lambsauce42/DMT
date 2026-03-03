@@ -2175,7 +2175,7 @@ def test_host_link_character_sync_rejects_overwriting_existing_authoritative_lin
     assert entity_state["linked_character_id"] == "character-host"
 
 
-def test_host_link_character_sync_rejects_duplicate_active_assignment_without_character_id(
+def test_host_link_character_sync_allows_duplicate_active_assignment_for_same_player_without_character_id(
     dungeon_widget,
 ):
     class _HostStub:
@@ -2236,6 +2236,80 @@ def test_host_link_character_sync_rejects_duplicate_active_assignment_without_ch
             "stats": {"name": "Hero"},
         },
         request_id="link-duplicate-empty-character-id",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is True
+    entity_state = next(
+        item
+        for item in dungeon_widget._dungeons[0]["state"]["items"]
+        if item.get("entity_id") == "e2"
+    )
+    assert str(entity_state.get("linked_sheet_id") or "") == "sheet-1"
+    assert str(entity_state.get("linked_character_id") or "") == "character-1"
+
+
+def test_host_link_character_entity_rejects_duplicate_link_for_different_player(
+    dungeon_widget,
+):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            return None
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-2",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_sheet_name": "Hero",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {"inventory": []},
+                        "pos": [0.0, 0.0],
+                    },
+                    {
+                        "type": "entity",
+                        "entity_id": "e2",
+                        "owner_player_id": "player-1",
+                        "pos": [1.0, 1.0],
+                    },
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        {
+            "entity_id": "e2",
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": "",
+            "dungeon_id": "d1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+        },
+        request_id="link-duplicate-different-owner",
     )
 
     result = dungeon_widget._host_controller.results[-1][1]

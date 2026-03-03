@@ -67,12 +67,8 @@ from models import Session, SessionAttachment, SessionLogEntry
 from save_paths import default_dnd_save_dir
 from navigation_repository import load_navigation_data
 from player_sheets import (
-    list_worlds,
-    list_campaigns,
-    list_groups,
-    resolve_selection,
+    ANY_LABEL,
     _combo_optional_value,
-    _populate_combo,
 )
 from maps_applet import MapViewPanel
 from session_text_link_controller import SessionTextLinkController
@@ -658,67 +654,234 @@ class SessionCreatorWidget(QWidget):
         group = _combo_optional_value(self.group_combo) if hasattr(self, "group_combo") else ""
         return world, campaign, group
 
-    def _context_token(self, world: str, campaign: str, group: str) -> Optional[str]:
-        if not (world or campaign or group):
-            return None
-        return f"{world}::{campaign}::{group}"
+    def _normalize_context_id(self, value: object) -> str:
+        return str(value or "").strip()
 
-    def _session_context(self, session: Session) -> tuple[str, str, str]:
+    def _combo_selected_id(self, combo: QComboBox) -> str:
+        if _combo_optional_value(combo) is None:
+            return ""
+        return self._normalize_context_id(combo.currentData(Qt.ItemDataRole.UserRole))
+
+    def _current_context_ids(self) -> tuple[str, str, str]:
+        if not all(hasattr(self, name) for name in ("world_combo", "campaign_combo", "group_combo")):
+            return "", "", ""
+        return (
+            self._combo_selected_id(self.world_combo),
+            self._combo_selected_id(self.campaign_combo),
+            self._combo_selected_id(self.group_combo),
+        )
+
+    def _context_token(self, world_id: str, campaign_id: str, group_id: str) -> Optional[str]:
+        payload = {}
+        if world_id:
+            payload["world_id"] = world_id
+        if campaign_id:
+            payload["campaign_id"] = campaign_id
+        if group_id:
+            payload["group_id"] = group_id
+        if not payload:
+            return None
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _session_context_ids(self, session: Session) -> tuple[str, str, str]:
         if not session.group_ids:
             return "", "", ""
-        raw = str(session.group_ids[0])
-        if "::" not in raw:
+        raw = str(session.group_ids[0] or "").strip()
+        if not raw:
             return "", "", ""
-        parts = raw.split("::", 2)
-        while len(parts) < 3:
-            parts.append("")
-        return str(parts[0]), str(parts[1]), str(parts[2])
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return "", "", ""
+        if not isinstance(payload, dict):
+            return "", "", ""
+        return (
+            self._normalize_context_id(payload.get("world_id")),
+            self._normalize_context_id(payload.get("campaign_id")),
+            self._normalize_context_id(payload.get("group_id")),
+        )
 
     def _session_matches_context(
-        self, session: Session, world: str, campaign: str, group: str
+        self, session: Session, world_id: str, campaign_id: str, group_id: str
     ) -> bool:
-        s_world, s_campaign, s_group = self._session_context(session)
-        if world and s_world != world:
+        s_world_id, s_campaign_id, s_group_id = self._session_context_ids(session)
+        if world_id and s_world_id != world_id:
             return False
-        if campaign and s_campaign != campaign:
+        if campaign_id and s_campaign_id != campaign_id:
             return False
-        if group and s_group != group:
+        if group_id and s_group_id != group_id:
             return False
         return True
 
-    def _world_options(self) -> List[str]:
-        options = list(list_worlds(self._world_data))
-        for session in self.manager.sessions:
-            world, _, _ = self._session_context(session)
-            if world and world not in options:
-                options.append(world)
+    def _finalize_context_rows(self, rows: list[dict[str, str]]) -> list[tuple[str, str]]:
+        counts: dict[str, int] = {}
+        for row in rows:
+            label = str(row.get("label") or "")
+            counts[label] = counts.get(label, 0) + 1
+
+        used_labels: set[str] = set()
+        options: list[tuple[str, str]] = []
+        for row in rows:
+            label = str(row.get("label") or "")
+            value = self._normalize_context_id(row.get("value"))
+            context = str(row.get("context") or "").strip()
+            if counts.get(label, 0) > 1 and context:
+                label = f"{label} ({context})"
+            if label in used_labels:
+                suffix = value[-6:] if value else "missing"
+                label = f"{label} [{suffix}]"
+            used_labels.add(label)
+            options.append((label, value))
         return options
 
-    def _campaign_options(self, world: Optional[str] = None) -> List[str]:
-        options = list(list_campaigns(self._world_data, world))
-        for session in self.manager.sessions:
-            s_world, campaign, _ = self._session_context(session)
-            if not campaign:
-                continue
-            if world and s_world != world:
-                continue
-            if campaign not in options:
-                options.append(campaign)
-        return options
+    def _append_missing_context_row(
+        self,
+        rows: list[dict[str, str]],
+        seen_ids: set[str],
+        value: str,
+    ) -> None:
+        clean_value = self._normalize_context_id(value)
+        if not clean_value or clean_value in seen_ids:
+            return
+        rows.append(
+            {
+                "label": f"[Missing] {clean_value}",
+                "value": clean_value,
+                "context": "",
+            }
+        )
+        seen_ids.add(clean_value)
 
-    def _group_options(self, world: Optional[str] = None, campaign: Optional[str] = None) -> List[str]:
-        options = list(list_groups(self._world_data, world, campaign))
+    def _world_options(self) -> list[tuple[str, str]]:
+        rows: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        for world in self._world_data:
+            if not isinstance(world, dict):
+                continue
+            world_id = self._normalize_context_id(world.get("id"))
+            name = str(world.get("name") or "").strip()
+            if not world_id or not name:
+                continue
+            rows.append({"label": name, "value": world_id, "context": world_id[-6:]})
+            seen_ids.add(world_id)
         for session in self.manager.sessions:
-            s_world, s_campaign, group = self._session_context(session)
-            if not group:
+            world_id, _, _ = self._session_context_ids(session)
+            self._append_missing_context_row(rows, seen_ids, world_id)
+        return self._finalize_context_rows(rows)
+
+    def _campaign_options(self, world_id: Optional[str] = None) -> list[tuple[str, str]]:
+        rows: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        selected_world_id = self._normalize_context_id(world_id)
+        for world in self._world_data:
+            if not isinstance(world, dict):
                 continue
-            if world and s_world != world:
+            current_world_id = self._normalize_context_id(world.get("id"))
+            if selected_world_id and current_world_id != selected_world_id:
                 continue
-            if campaign and s_campaign != campaign:
+            world_name = str(world.get("name") or "").strip()
+            campaigns = world.get("campaigns", [])
+            if not isinstance(campaigns, list):
                 continue
-            if group not in options:
-                options.append(group)
-        return options
+            for campaign in campaigns:
+                if not isinstance(campaign, dict):
+                    continue
+                campaign_id = self._normalize_context_id(campaign.get("id"))
+                campaign_name = str(campaign.get("name") or "").strip()
+                if not campaign_id or not campaign_name:
+                    continue
+                rows.append(
+                    {
+                        "label": campaign_name,
+                        "value": campaign_id,
+                        "context": world_name,
+                    }
+                )
+                seen_ids.add(campaign_id)
+        for session in self.manager.sessions:
+            session_world_id, campaign_id, _ = self._session_context_ids(session)
+            if selected_world_id and session_world_id != selected_world_id:
+                continue
+            self._append_missing_context_row(rows, seen_ids, campaign_id)
+        return self._finalize_context_rows(rows)
+
+    def _group_options(
+        self,
+        world_id: Optional[str] = None,
+        campaign_id: Optional[str] = None,
+    ) -> list[tuple[str, str]]:
+        rows: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        selected_world_id = self._normalize_context_id(world_id)
+        selected_campaign_id = self._normalize_context_id(campaign_id)
+        for world in self._world_data:
+            if not isinstance(world, dict):
+                continue
+            current_world_id = self._normalize_context_id(world.get("id"))
+            if selected_world_id and current_world_id != selected_world_id:
+                continue
+            world_name = str(world.get("name") or "").strip()
+            campaigns = world.get("campaigns", [])
+            if not isinstance(campaigns, list):
+                continue
+            for campaign in campaigns:
+                if not isinstance(campaign, dict):
+                    continue
+                current_campaign_id = self._normalize_context_id(campaign.get("id"))
+                if selected_campaign_id and current_campaign_id != selected_campaign_id:
+                    continue
+                campaign_name = str(campaign.get("name") or "").strip()
+                groups = campaign.get("groups", [])
+                if not isinstance(groups, list):
+                    continue
+                for group in groups:
+                    if not isinstance(group, dict):
+                        continue
+                    group_id = self._normalize_context_id(group.get("id"))
+                    group_name = str(group.get("name") or "").strip()
+                    if not group_id or not group_name:
+                        continue
+                    rows.append(
+                        {
+                            "label": group_name,
+                            "value": group_id,
+                            "context": f"{campaign_name} / {world_name}".strip(" /"),
+                        }
+                    )
+                    seen_ids.add(group_id)
+        for session in self.manager.sessions:
+            session_world_id, session_campaign_id, group_id = self._session_context_ids(session)
+            if selected_world_id and session_world_id != selected_world_id:
+                continue
+            if selected_campaign_id and session_campaign_id != selected_campaign_id:
+                continue
+            self._append_missing_context_row(rows, seen_ids, group_id)
+        return self._finalize_context_rows(rows)
+
+    def _set_context_combo_value(self, combo: QComboBox, value: Optional[str]) -> None:
+        target = self._normalize_context_id(value)
+        if not target:
+            combo.setCurrentIndex(0)
+            return
+        for index in range(combo.count()):
+            if self._normalize_context_id(combo.itemData(index, Qt.ItemDataRole.UserRole)) == target:
+                combo.setCurrentIndex(index)
+                return
+        combo.setCurrentIndex(0)
+
+    def _populate_context_combo(
+        self,
+        combo: QComboBox,
+        items: list[tuple[str, str]],
+        current_value: Optional[str] = None,
+    ) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(ANY_LABEL, None)
+        for label, value in items:
+            combo.addItem(label, value)
+        self._set_context_combo_value(combo, current_value)
+        combo.blockSignals(False)
 
     def _init_ui(self) -> None:
         layout = QHBoxLayout(self)
@@ -1066,7 +1229,7 @@ class SessionCreatorWidget(QWidget):
         self._set_file_controls_enabled(False)
 
         # Initialize Combo Boxes
-        _populate_combo(self.world_combo, self._world_options())
+        self._populate_context_combo(self.world_combo, self._world_options())
         self._on_world_changed() # Trigger cascade
         self._init_text_link_controllers()
 
@@ -1348,8 +1511,8 @@ class SessionCreatorWidget(QWidget):
         self._current_session.plan_text = self.plan_editor.toPlainText()
         self._current_session.plan_html = _normalize_session_link_html(self.plan_editor.toHtml())
 
-        w, c, g = self._current_context_restrictions()
-        token = self._context_token(w, c, g)
+        world_id, campaign_id, group_id = self._current_context_ids()
+        token = self._context_token(world_id, campaign_id, group_id)
         self._current_session.group_ids = [token] if token else []
 
     def _save_current_session(self) -> None:
@@ -1380,14 +1543,14 @@ class SessionCreatorWidget(QWidget):
         self, *, load_selection: bool = True, preserve_current_session: bool = False
     ) -> None:
         current_id = self._current_session.id if self._current_session else None
-        world, campaign, group = self._current_context_restrictions()
+        world_id, campaign_id, group_id = self._current_context_ids()
         self.session_list.blockSignals(True)
         self.session_list.clear()
 
         target_row = None
         visible_row_index = -1
         for session in sorted(self.manager.sessions, key=lambda s: s.session_date, reverse=True):
-            if not self._session_matches_context(session, world, campaign, group):
+            if not self._session_matches_context(session, world_id, campaign_id, group_id):
                 continue
             visible_row_index += 1
             item = QListWidgetItem(session.name)
@@ -1463,8 +1626,8 @@ class SessionCreatorWidget(QWidget):
             session_date=datetime.now().strftime("%Y-%m-%d"),
         )
         # Pre-fill linked context if selected.
-        w, c, g = self._current_context_restrictions()
-        token = self._context_token(w, c, g)
+        world_id, campaign_id, group_id = self._current_context_ids()
+        token = self._context_token(world_id, campaign_id, group_id)
         session.group_ids = [token] if token else []
 
         self.manager.add_session(session)
@@ -1580,8 +1743,8 @@ class SessionCreatorWidget(QWidget):
 
         if apply_context:
             # Loading a session should apply its linked context as active restrictions.
-            w, c, g = self._session_context(session)
-            self._set_context(w, c, g)
+            world_id, campaign_id, group_id = self._session_context_ids(session)
+            self._set_context(world_id, campaign_id, group_id)
             self._refresh_session_list(load_selection=False)
 
     def _load_selected_session(self) -> None:
@@ -1598,23 +1761,33 @@ class SessionCreatorWidget(QWidget):
         if self._current_session:
             self._load_session_to_ui(self._current_session, apply_context=apply_context)
 
-    def _set_context(self, world: str, campaign: str, group: str) -> None:
-        _populate_combo(self.world_combo, self._world_options(), world or None)
-        _populate_combo(self.campaign_combo, self._campaign_options(world or None), campaign or None)
-        _populate_combo(self.group_combo, self._group_options(world or None, campaign or None), group or None)
+    def _set_context(self, world_id: str, campaign_id: str, group_id: str) -> None:
+        self._populate_context_combo(self.world_combo, self._world_options(), world_id or None)
+        selected_world_id = self._combo_selected_id(self.world_combo)
+        self._populate_context_combo(
+            self.campaign_combo,
+            self._campaign_options(selected_world_id),
+            campaign_id or None,
+        )
+        selected_campaign_id = self._combo_selected_id(self.campaign_combo)
+        self._populate_context_combo(
+            self.group_combo,
+            self._group_options(selected_world_id, selected_campaign_id),
+            group_id or None,
+        )
         self._sync_reference_tabs()
 
     def _on_world_changed(self) -> None:
-        w = _combo_optional_value(self.world_combo)
-        campaigns = self._campaign_options(w)
-        _populate_combo(self.campaign_combo, campaigns)
+        world_id = self._combo_selected_id(self.world_combo)
+        campaigns = self._campaign_options(world_id)
+        self._populate_context_combo(self.campaign_combo, campaigns)
         self._on_campaign_changed()
 
     def _on_campaign_changed(self) -> None:
-        w = _combo_optional_value(self.world_combo)
-        c = _combo_optional_value(self.campaign_combo)
-        groups = self._group_options(w, c)
-        _populate_combo(self.group_combo, groups)
+        world_id = self._combo_selected_id(self.world_combo)
+        campaign_id = self._combo_selected_id(self.campaign_combo)
+        groups = self._group_options(world_id, campaign_id)
+        self._populate_context_combo(self.group_combo, groups)
         self._on_group_changed()
 
     def _on_group_changed(self) -> None:
@@ -1631,31 +1804,30 @@ class SessionCreatorWidget(QWidget):
         latest = _navigation_world_data()
         if latest == self._world_data:
             return
-        world = _combo_optional_value(self.world_combo)
-        campaign = _combo_optional_value(self.campaign_combo)
-        group = _combo_optional_value(self.group_combo)
+        world_id, campaign_id, group_id = self._current_context_ids()
         self._world_data = latest
         for combo in (self.world_combo, self.campaign_combo, self.group_combo):
             combo.blockSignals(True)
         try:
-            _populate_combo(self.world_combo, self._world_options(), world or None)
-            selected_world = _combo_optional_value(self.world_combo)
-            selected_campaign = self._campaign_options(selected_world)
-            _populate_combo(self.campaign_combo, selected_campaign, campaign or None)
-            selected_campaign_value = _combo_optional_value(self.campaign_combo)
-            _populate_combo(
+            self._populate_context_combo(self.world_combo, self._world_options(), world_id or None)
+            selected_world_id = self._combo_selected_id(self.world_combo)
+            self._populate_context_combo(
+                self.campaign_combo,
+                self._campaign_options(selected_world_id),
+                campaign_id or None,
+            )
+            selected_campaign_id = self._combo_selected_id(self.campaign_combo)
+            self._populate_context_combo(
                 self.group_combo,
-                self._group_options(selected_world, selected_campaign_value),
-                group or None,
+                self._group_options(selected_world_id, selected_campaign_id),
+                group_id or None,
             )
         finally:
             for combo in (self.world_combo, self.campaign_combo, self.group_combo):
                 combo.blockSignals(False)
-        current_world = _combo_optional_value(self.world_combo)
-        current_campaign = _combo_optional_value(self.campaign_combo)
-        current_group = _combo_optional_value(self.group_combo)
+        current_ids = self._current_context_ids()
         self._sync_reference_tabs()
-        if (current_world, current_campaign, current_group) != (world, campaign, group):
+        if current_ids != (world_id, campaign_id, group_id):
             self._refresh_session_list(preserve_current_session=True)
 
     def _init_text_link_controllers(self) -> None:

@@ -2502,11 +2502,11 @@ def list_worlds(world_data: list[dict]) -> List[str]:
 
 def list_campaigns(world_data: list[dict], world: Optional[str] = None) -> List[str]:
     if world:
+        campaigns: List[str] = []
         for world_entry in world_data:
             if not isinstance(world_entry, dict):
                 continue
             if world_entry.get("name") == world:
-                campaigns: List[str] = []
                 for campaign in world_entry.get("campaigns", []):
                     if isinstance(campaign, dict):
                         name = str(campaign.get("name") or "").strip()
@@ -2514,8 +2514,7 @@ def list_campaigns(world_data: list[dict], world: Optional[str] = None) -> List[
                         name = str(campaign or "").strip()
                     if name:
                         campaigns.append(name)
-                return campaigns
-        return []
+        return _unique_in_order(campaigns)
 
     campaigns: List[str] = []
     for world_entry in world_data:

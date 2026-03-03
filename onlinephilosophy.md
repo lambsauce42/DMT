@@ -14,7 +14,7 @@ The DM approves authority, the collection stores authority, and players continuo
 
 ## Character ownership
 
-1. A unique linked character may be actively assigned to at most one player-owned entity at a time.
+1. A linked character may be actively assigned to multiple entities only when every player-owned instance belongs to the same player; unowned instances are also allowed.
 2. A player can only update the character linked to an entity they currently own.
 3. The DM can create the initial collection-backed character state by linking an unlinked entity.
 4. After that, the player continuously updates that same collection-backed character state while they control it.

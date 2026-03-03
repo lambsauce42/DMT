@@ -13,6 +13,7 @@ from player_sheets import (
     normalize_tags,
     entry_to_dict,
     entry_from_dict,
+    list_campaigns,
     PlayerSheetEntry,
     EQUIPMENT_SLOTS_MISC,
 )
@@ -78,6 +79,14 @@ class TestPlayerSheetsUtils(unittest.TestCase):
         for slot_id, _ in EQUIPMENT_SLOTS_MISC:
             self.assertIn(slot_id, entry.equipment)
             self.assertIsNone(entry.equipment[slot_id])
+
+    def test_list_campaigns_aggregates_all_matching_duplicate_world_names(self):
+        world_data = [
+            {"name": "Dup", "campaigns": [{"name": "Camp One"}]},
+            {"name": "Dup", "campaigns": [{"name": "Camp Two"}]},
+        ]
+
+        self.assertEqual(list_campaigns(world_data, "Dup"), ["Camp One", "Camp Two"])
 
 if __name__ == "__main__":
     unittest.main()

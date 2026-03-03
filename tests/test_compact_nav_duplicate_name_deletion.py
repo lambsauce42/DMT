@@ -78,3 +78,54 @@ class CompactNavDuplicateDeletionTests(unittest.TestCase):
         self.assertEqual(len(widget._data[0]["campaigns"][0]["groups"]), 1)
         self.assertEqual(len(widget._trash), 1)
 
+    def test_add_world_rejects_duplicate_name(self) -> None:
+        widget = self._build_widget([{"name": "Dup", "campaigns": []}])
+        self.addCleanup(widget.close)
+
+        with patch.object(widget, "_prompt_name_icon", return_value=("Dup", None)):
+            with patch.object(compact_nav_tree.QMessageBox, "warning") as warning:
+                widget._add_world()
+
+        self.assertEqual(len(widget._data), 1)
+        warning.assert_called_once()
+
+    def test_add_campaign_rejects_duplicate_name(self) -> None:
+        widget = self._build_widget(
+            [
+                {
+                    "name": "World",
+                    "campaigns": [{"name": "Dup", "groups": []}],
+                }
+            ]
+        )
+        self.addCleanup(widget.close)
+
+        with patch.object(widget, "_prompt_name_icon", return_value=("Dup", None)):
+            with patch.object(compact_nav_tree.QMessageBox, "warning") as warning:
+                widget._add_campaign(0)
+
+        self.assertEqual(len(widget._data[0]["campaigns"]), 1)
+        warning.assert_called_once()
+
+    def test_add_group_rejects_duplicate_name(self) -> None:
+        widget = self._build_widget(
+            [
+                {
+                    "name": "World",
+                    "campaigns": [
+                        {
+                            "name": "Campaign",
+                            "groups": [{"name": "Dup"}],
+                        }
+                    ],
+                }
+            ]
+        )
+        self.addCleanup(widget.close)
+
+        with patch.object(widget, "_prompt_name_icon", return_value=("Dup", None)):
+            with patch.object(compact_nav_tree.QMessageBox, "warning") as warning:
+                widget._add_group(0, 0)
+
+        self.assertEqual(len(widget._data[0]["campaigns"][0]["groups"]), 1)
+        warning.assert_called_once()
