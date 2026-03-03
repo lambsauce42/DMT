@@ -70,3 +70,24 @@ def test_event_filter_ignores_deleted_loot_pool_list(dungeon_widget, qtbot):
     )
 
     assert isinstance(result, bool)
+
+
+def test_refresh_dungeon_list_handles_reentrant_refresh_request(dungeon_widget, monkeypatch):
+    original_render_state_preview = dungeon_widget._render_state_preview
+    refresh_requested = {"value": False}
+
+    def _render_state_preview_with_reentry(state, size):
+        if not refresh_requested["value"]:
+            refresh_requested["value"] = True
+            dungeon_widget._refresh_dungeon_list(preserve_selection=True)
+        return original_render_state_preview(state, size)
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_render_state_preview",
+        _render_state_preview_with_reentry,
+    )
+
+    dungeon_widget._refresh_dungeon_list(preserve_selection=True)
+
+    assert dungeon_widget._dungeon_list.count() == len(dungeon_widget._dungeons)

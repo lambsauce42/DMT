@@ -20,6 +20,10 @@ Put logging and any other debug artifacts in debug folder.
 ## Test Gating (Important)
 
 - Do **not** add new tests by default.
+- Do **not** run tests by default.
+- Run tests only when they are necessary for the change (bug risk, behavior change, contract changes, or explicit request).
+- If tests are needed, run only the smallest relevant subset that actually touches the code paths/files modified by your change.
+- Do not run broad/unrelated test suites "just in case".
 - Add a new test only when at least one of these is true:
   - The bug/regression is high-impact or persistent.
   - Behavior/logic changed in a risky way that could realistically break again.
@@ -42,9 +46,9 @@ Put logging and any other debug artifacts in debug folder.
 - `tier0`: fast logic/unit checks.
 - `tier1`: standard feature/widget integration checks.
 - `tier2`: heavy/slow/full-flow checks (online flows, long UI interactions, large integration scenarios).
-- Run selection:
+- Run selection (only when tests are needed):
   - Small local logic change: `pytest --tier-max=0`
-  - Normal bugfix/feature change: `pytest --tier-max=1` (default)
+  - Normal bugfix/feature change: `pytest --tier-max=1`
   - Cross-cutting/risky UI+network+persistence change: `pytest --tier-max=2`
 - Explicit subset when needed: `pytest --tiers 0,2`
 - New test files must be tiered explicitly (`@pytest.mark.tier0|tier1|tier2`) or registered in `tests/conftest.py`.

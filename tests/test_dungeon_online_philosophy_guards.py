@@ -1,6 +1,10 @@
 import os
 import sys
 import hashlib
+import base64
+import io
+import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -32,6 +36,18 @@ def dungeon_widget(qtbot):
     widget = DungeonAppletWidget()
     qtbot.addWidget(widget)
     return widget
+
+
+def _valid_archive_b64() -> str:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("sheet.pdf", b"%PDF-1.4\n%test\n")
+        archive.writestr("inventory.json", json.dumps({"inventory": []}))
+        archive.writestr(
+            "info.json",
+            json.dumps({"archive_version": 2, "updated_at": "2026-03-03T00:00:00+00:00"}),
+        )
+    return base64.b64encode(payload.getvalue()).decode("ascii")
 
 
 def test_player_inventory_save_does_not_forward_while_link_conflict_pending(
@@ -695,3 +711,166 @@ def test_linked_item_lookup_does_not_trust_arbitrary_filesystem_paths(dungeon_wi
     resolved = dungeon_widget._linked_item_document_by_id(str(rogue_item_path))
 
     assert resolved is None
+
+
+def test_player_snapshot_redacts_other_players_linked_character_payload(dungeon_widget):
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._active_dungeon_id = "d2"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-a",
+                        "owner_player_id": "player-a",
+                        "linked_sheet_id": "sheet-a",
+                        "linked_sheet_name": "Alpha",
+                        "linked_character_id": "character-a",
+                        "linked_save_revision": 3,
+                        "linked_last_saved_at": "2026-03-03T00:00:00+00:00",
+                        "linked_content_hash": "hash-a",
+                        "linked_sheet_archive_b64": "ARCHIVE_A",
+                        "linked_inventory": {"inventory": [{"item_id": "item-a", "quantity": 1}]},
+                        "pos": [0.0, 0.0],
+                    },
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-b",
+                        "owner_player_id": "player-b",
+                        "linked_sheet_id": "sheet-b",
+                        "linked_sheet_name": "Bravo",
+                        "linked_character_id": "character-b",
+                        "linked_save_revision": 4,
+                        "linked_last_saved_at": "2026-03-03T00:00:01+00:00",
+                        "linked_content_hash": "hash-b",
+                        "linked_sheet_archive_b64": "ARCHIVE_B",
+                        "linked_inventory": {"inventory": [{"item_id": "item-b", "quantity": 1}]},
+                        "pos": [1.0, 1.0],
+                    },
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        },
+        {
+            "id": "d2",
+            "name": "DM",
+            "state": {"items": [], "fog": {"path": []}},
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        },
+    ]
+
+    snapshot = dungeon_widget._build_online_snapshot(for_player_id="player-b")
+
+    dungeons = snapshot.get("dungeons") or []
+    assert len(dungeons) == 1
+    items = dungeons[0]["state"]["items"]
+    entity_a = next(entry for entry in items if entry.get("entity_id") == "entity-a")
+    entity_b = next(entry for entry in items if entry.get("entity_id") == "entity-b")
+    assert entity_a.get("linked_character_id") == ""
+    assert entity_a.get("linked_sheet_archive_b64") == ""
+    assert entity_a.get("linked_inventory") == {
+        "inventory": [],
+        "inventory_notes": "",
+        "equipment": {},
+        "gold": 0,
+        "silver": 0,
+        "copper": 0,
+        "item_documents": {},
+    }
+    assert entity_b.get("linked_character_id") == "character-b"
+    assert entity_b.get("linked_sheet_archive_b64") == "ARCHIVE_B"
+
+
+def test_host_sync_character_inventory_requires_archive_payload(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {"inventory": []},
+                        "linked_sheet_archive_b64": "",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_sync_character_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "character_id": "character-1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+            "archive_b64": "",
+        },
+        request_id="missing-archive-sync",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert "archive payload is required" in str(result.get("message") or "").lower()
+
+
+def test_start_online_host_clears_unknown_item_review_cache(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self._players = {}
+
+        @property
+        def players(self):
+            return dict(self._players)
+
+        def stop(self):
+            return None
+
+        def start(self, _port):
+            return True, ""
+
+    class _ClientStub:
+        def disconnect(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._host_unknown_item_review_cache["player-1::character-1::sig"] = {"action": "blocked"}
+    dungeon_widget._broadcast_snapshot_if_host = lambda: None
+
+    started = dungeon_widget.start_online_host(0)
+
+    assert started is True
+    assert dungeon_widget._host_unknown_item_review_cache == {}
