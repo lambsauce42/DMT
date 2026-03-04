@@ -21,7 +21,8 @@ class OnlineSessionClient(QObject):
     log_line = Signal(str)
     connected_to_server = Signal()
     disconnected_from_server = Signal()
-    hello_ack = Signal(str)
+    hello_ack = Signal(str, bool)
+    socket_error = Signal(str)
     message_received = Signal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -116,7 +117,9 @@ class OnlineSessionClient(QObject):
         self.log_line.emit("[INFO] Disconnected from host")
 
     def _on_error(self, _err) -> None:
-        self.log_line.emit(f"[ERROR] Socket error: {self._socket.errorString()}")
+        reason = str(self._socket.errorString() or "").strip() or "Unknown socket error"
+        self.log_line.emit(f"[ERROR] Socket error: {reason}")
+        self.socket_error.emit(reason)
 
     def _on_ready_read(self) -> None:
         try:
@@ -131,10 +134,11 @@ class OnlineSessionClient(QObject):
             if msg_type == "hello_ack":
                 player_id = str(message.get("player_id", ""))
                 self._player_id = player_id or None
+                resumed = bool(message.get("resumed", False))
                 session_token = str(message.get("session_token", "")).strip()
                 if session_token:
                     self._session_token = session_token
                 if self._player_id:
-                    self.hello_ack.emit(self._player_id)
+                    self.hello_ack.emit(self._player_id, resumed)
                 continue
             self.message_received.emit(message)

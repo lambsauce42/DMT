@@ -35,7 +35,7 @@ class _IdentityState:
 
 class OnlineSessionServer(QObject):
     log_line = Signal(str)
-    player_connected = Signal(str, str)
+    player_connected = Signal(str, str, bool)
     player_disconnected = Signal(str, str)
     message_received = Signal(str, dict)
 
@@ -233,7 +233,7 @@ class OnlineSessionServer(QObject):
             existing_id = self._token_to_identity.get(resume_token)
             if existing_id:
                 token_identity = self._identities.get(existing_id)
-                if token_identity is not None and token_identity.normalized_name == normalized:
+                if token_identity is not None:
                     identity = token_identity
                     resumed = True
 
@@ -244,7 +244,6 @@ class OnlineSessionServer(QObject):
                 if (
                     persistent_identity is not None
                     and (not persistent_identity.connected)
-                    and persistent_identity.normalized_name == normalized
                 ):
                     identity = persistent_identity
                     resumed = True
@@ -286,6 +285,12 @@ class OnlineSessionServer(QObject):
             self._name_to_identity[normalized] = player_id
             self._token_to_identity[session_token] = player_id
         else:
+            previous_normalized_name = str(identity.normalized_name or "").strip()
+            if previous_normalized_name and previous_normalized_name != normalized:
+                if self._names_lower.get(previous_normalized_name) == identity.player_id:
+                    self._names_lower.pop(previous_normalized_name, None)
+                if self._name_to_identity.get(previous_normalized_name) == identity.player_id:
+                    self._name_to_identity.pop(previous_normalized_name, None)
             identity.name = name
             identity.normalized_name = normalized
             identity.last_seen_monotonic = time.monotonic()
@@ -322,7 +327,7 @@ class OnlineSessionServer(QObject):
                 "resumed": bool(resumed),
             },
         )
-        self.player_connected.emit(identity.player_id, identity.name)
+        self.player_connected.emit(identity.player_id, identity.name, bool(resumed))
         if resumed:
             self.log_line.emit(f"[INFO] Reconnected player '{identity.name}' ({identity.player_id})")
         else:

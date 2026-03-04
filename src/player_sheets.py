@@ -4673,6 +4673,9 @@ class PlayerSheetsWidget(QWidget):
                 target_entry = entry
                 break
         if target_entry is None:
+            self._manager.entries = load_entries_from_storage()
+            self._apply_filters()
+            self._select_entry_by_sheet_id(target_sheet)
             return
         _apply_inventory_payload_to_entry(target_entry, inventory_payload)
         if self._current_entry is target_entry:

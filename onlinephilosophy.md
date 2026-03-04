@@ -1,91 +1,98 @@
 # Dungeon Online Philosophy
 
-Date: 2026-03-01
+Date: 2026-03-04
 
 ## Core rule
 
-The DM approves authority, the collection stores authority, and players continuously propose updates to that authority while they control the linked entity.
+The assigned player is authoritative for their linked character during active control.  
+The DM-hosted collection stores the canonical session state.  
+Character data in the collection is updated if and only if the assigned player makes character changes.
 
 ## Authority
 
-1. The DM is the sole authority for what a linked character and its items mean during online play.
-2. Players may propose continuous updates to the character they currently control.
-3. Those updates only become authoritative when they are valid under the DM-hosted rules.
+1. Character state authority belongs to the player currently assigned to that entity.
+2. While that player is connected and assigned, the DM does not overwrite that player's linked character state.
+3. The DM controls assignment and session orchestration, not live character-content authority.
+4. Item-library authority for DM local storage remains with the DM (import or dismiss decisions).
+5. Lootpool unknown-item acceptance remains a DM decision.
 
-## Character ownership
+## Character linking and assignment
 
-1. A linked character may be actively assigned to multiple entities only when every player-owned instance belongs to the same player; unowned instances are also allowed.
-2. A player can only update the character linked to an entity they currently own.
-3. The DM can create the initial collection-backed character state by linking an unlinked entity.
-4. After that, the player continuously updates that same collection-backed character state while they control it.
-5. The DM may still explicitly overwrite or relink when intended.
+1. A player can only link and sync for entities currently assigned to that player.
+2. If an assigned entity already has a linked character and the player already has a local character, the player may overwrite the entity-linked character immediately. No DM approval popup.
+3. If an assigned entity has a linked character and the player has no local copy, the player receives an identical managed local copy automatically.
+4. After link/receive, all player edits sync directly to the session character state (atomic update).
+5. If the DM tries to assign the same character from outdated DM-local data while the owning player is connected, that action is a no-op.
+6. A connected owning player's character is never overwritten by DM-local character data.
 
 ## Persistence
 
-1. The collection-linked character is the canonical persisted online state.
-2. The collection must store enough data for restart and handoff:
+1. The DM collection-linked character package is the canonical persisted online state.
+2. The collection stores enough data for restart and handoff:
    - full playable character package
-   - authoritative item documents for all items in play
+   - in-play item documents known to session authority
    - revision/content metadata
-3. The DM library is the source of truth for accepting item definitions, but accepted authoritative items must also be stored in the collection package.
-4. The DM's personal local files must not be silently overwritten as a side effect of normal player sync.
+3. The collection-backed character package is rewritten only when the assigned player commits character changes.
+4. No silent overwrite of unrelated personal local files (DM or player).
 
-## Item policy
+## Character item policy
 
-1. It must be impossible for an authoritative in-play character to depend on an item the DM has not approved.
-2. If a player proposes items the DM library does not know, or items that conflict with DM-local definitions, sync enters a blocked review state.
-3. The DM gets one deduplicated review prompt with inspectable items.
-4. For each unresolved item, the DM can:
-   - accept/import it into authority
-   - remove it from the incoming character update
-   - reject the whole update by kicking the player
-5. "Remove item" means it is discarded from the proposed incoming state, not silently merged or guessed.
-6. If the DM accepts an item, that accepted definition becomes authoritative for the session and is persisted into the collection-backed character package.
-7. If the DM already has a definition for the same `item_id`, the DM version wins unless the DM explicitly chooses otherwise.
+1. Player-owned character sync is not blocked by DM-library unknown items.
+2. Unknown-to-DM items present in active characters are detectable and reviewable by the DM.
+3. DM review options for such items:
+   - copy/import item definitions into DM local storage
+   - dismiss (do not copy into DM local storage)
+4. Dismiss means "not copied to DM local storage now"; it does not retroactively block current owner's active character.
+5. On player handoff/takeover, item transfer is filtered:
+   - items present in the character and known in DM storage transfer to the new player copy
+   - items not known in DM storage are dropped during takeover
+
+## Lootpool item policy
+
+1. Players can submit items to lootpool.
+2. If the DM already knows an item definition, submission is auto-accepted.
+3. If item definitions are unknown to the DM, the DM must explicitly accept or reject those entries.
+4. Rejected lootpool entries are not transferred out of the source character and are treated as never submitted.
+5. Other players viewing lootpool may encounter unknown items:
+   - they can opt to create local copies
+   - if they decline, items are shown as temporary text entries and remain claimable through existing text-item flow
 
 ## Sync behavior
 
-1. Character updates must be atomic.
-2. If an update contains unresolved item conflicts, none of that character update is committed as authoritative until resolution is complete.
-3. No partial authoritative save of a conflicted character.
-4. Once resolved, the whole approved update commits together.
+1. Character updates are atomic.
+2. No DM approval popup is required for normal assigned-player character edits.
+3. If nothing materially changed, no collection rewrite is performed.
+4. Reconnect always pulls latest host collection-backed state before further sync.
 
 ## Prompt behavior
 
 1. No prompt spam.
-2. Conflict prompts must be deduplicated by player, character, and content fingerprint or revision.
-3. If nothing materially changed, the DM is not asked again.
-4. While unresolved, further sync for that character stays blocked or coalesced behind the existing prompt.
+2. Approval prompts are limited to explicit DM decision points (unknown item import/reject decisions).
+3. Repeated unchanged unresolved decisions must be deduplicated.
 
 ## Disconnect and recovery
 
-1. Stale client updates must never replay after reconnect and overwrite newer host state.
-2. After reconnect, the player pulls fresh authoritative state from the host.
-3. If the host saves the collection and restarts, reassignment and handoff must use the saved collection-backed character package.
-4. Player B should receive the latest host-approved version of player A's character, including approved item definitions.
-
-## Session continuity
-
-1. Continuing a trusted session on another day should stay simple.
-2. A host restart should preserve collection-backed character authority, active player assignments, and normal session flow without forcing large-scale manual reassignment.
-3. Safety checks should block only the conflicting part of recovery, not create unnecessary re-setup work for unchanged session state.
+1. Stale client updates must never overwrite newer host state after reconnect.
+2. Collection-backed character state survives host save/restart and is used for resume and handoff.
+3. Handoff always starts from latest collection-backed character state, then applies takeover item filter rules.
 
 ## Handoff
 
-1. When player A leaves, the character remains as collection-backed authoritative state on the host.
-2. When the DM assigns that entity to player B, player B pulls the hosted package.
-3. If player B lacks local copies, they may create local working copies from host authority.
-4. Local creation or update on the player side may require consent, but it must not change host authority.
+1. When player A leaves, the latest collection-backed character state remains on host.
+2. When player B is assigned that entity, player B receives a local managed copy.
+3. Transfer to player B includes only items currently in that character that the DM also knows in local item storage.
+4. Items in that character that the DM does not know are removed during takeover transfer.
 
 ## Cleanup
 
 1. Managed linked-character files and managed linked-item caches should exist only for characters actively linked in the current collection.
-2. If a sheet or item cache is no longer referenced by any linked entity in the collection, it should be removed.
-3. Cleanup must apply only to managed collection-backed artifacts, not unrelated personal user files.
+2. If a managed sheet or managed item cache is no longer referenced by any linked entity in the collection, it should be removed.
+3. Cleanup applies only to managed collection-backed artifacts, never unrelated personal files.
 
 ## Safety invariants
 
-1. Nothing becomes authoritative unless the DM knows and approves it.
-2. Nothing silently overwrites local personal data.
-3. Nothing in active play depends on unknown item definitions.
-4. Restart, reconnect, and player handoff all resolve back to the same host-approved character state.
+1. Assigned-player character authority is respected during active ownership.
+2. DM-local outdated character data cannot silently overwrite an actively owned player character.
+3. Collection remains the canonical persisted session state.
+4. Unknown items can exist in active play, but cross-player takeover transfer includes only DM-known items.
+5. Restart, reconnect, and handoff resolve through collection-backed state with deterministic takeover filtering.

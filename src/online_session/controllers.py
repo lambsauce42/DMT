@@ -33,6 +33,7 @@ class HostSessionController(QObject):
         self.server.player_connected.connect(self._on_player_connected)
         self.server.player_disconnected.connect(self._on_player_disconnected)
         self.server.message_received.connect(self._on_server_message)
+        self._pending_kick_messages: Dict[str, str] = {}
 
     @property
     def players(self) -> Dict[str, str]:
@@ -69,7 +70,21 @@ class HostSessionController(QObject):
         self.server.send_to_player(player_id, payload)
 
     def kick_player(self, player_id: str, *, message: str) -> bool:
-        return bool(self.server.disconnect_player(player_id, message=message))
+        clean_player_id = str(player_id or "").strip()
+        player_name = self.players.get(clean_player_id, "")
+        if not player_name:
+            return False
+        reason = str(message or "Removed from host.").strip() or "Removed from host."
+        self._pending_kick_messages[clean_player_id] = reason
+        self.broadcast_chat(
+            actor_name="System",
+            text=f"{player_name} was kicked: {reason}",
+            system=True,
+        )
+        ok = bool(self.server.disconnect_player(clean_player_id, message=reason))
+        if not ok:
+            self._pending_kick_messages.pop(clean_player_id, None)
+        return ok
 
     def broadcast_chat(self, *, actor_name: str, text: str, system: bool = False) -> None:
         packet = {
@@ -124,15 +139,20 @@ class HostSessionController(QObject):
             }
         )
 
-    def _on_player_connected(self, player_id: str, name: str) -> None:
+    def _on_player_connected(self, player_id: str, name: str, resumed: bool) -> None:
         self.players_changed.emit(self.players)
-        self.broadcast_chat(actor_name="System", text=f"{name} joined", system=True)
+        self.broadcast_chat(
+            actor_name="System",
+            text=f"{name} reconnected" if resumed else f"{name} joined",
+            system=True,
+        )
         self._broadcast_presence()
         self.snapshot_requested.emit(player_id)
 
     def _on_player_disconnected(self, player_id: str, name: str) -> None:
         self.players_changed.emit(self.players)
-        self.broadcast_chat(actor_name="System", text=f"{name} left", system=True)
+        if self._pending_kick_messages.pop(str(player_id or "").strip(), None) is None:
+            self.broadcast_chat(actor_name="System", text=f"{name} disconnected", system=True)
         self._broadcast_presence()
 
     def _on_server_message(self, player_id: str, message: dict) -> None:
@@ -174,6 +194,7 @@ class ClientSessionController(QObject):
         self.client.connected_to_server.connect(self._on_connected)
         self.client.disconnected_from_server.connect(self._on_disconnected)
         self.client.hello_ack.connect(self._on_hello_ack)
+        self.client.socket_error.connect(self._on_socket_error)
         self.client.message_received.connect(self._on_message)
 
         self._players: Dict[str, str] = {}
@@ -184,6 +205,8 @@ class ClientSessionController(QObject):
         self._manual_disconnect = False
         self._reconnect_attempt = 0
         self._terminal_disconnect_message = ""
+        self._session_established = False
+        self._last_transport_error = ""
 
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setSingleShot(False)
@@ -218,6 +241,8 @@ class ClientSessionController(QObject):
         self._connect_persistent_player_id = str(persistent_player_id or "").strip()
         self._manual_disconnect = False
         self._terminal_disconnect_message = ""
+        self._session_established = False
+        self._last_transport_error = ""
         self._reconnect_timer.stop()
         self.client.connect_to_host(
             host,
@@ -229,6 +254,8 @@ class ClientSessionController(QObject):
     def disconnect(self) -> None:
         self._manual_disconnect = True
         self._terminal_disconnect_message = ""
+        self._session_established = False
+        self._last_transport_error = ""
         self._reconnect_timer.stop()
         self._heartbeat_timer.stop()
         self._heartbeat_timeout_timer.stop()
@@ -262,24 +289,57 @@ class ClientSessionController(QObject):
     def _on_connected(self) -> None:
         self._reconnect_attempt = 0
         self._terminal_disconnect_message = ""
+        self._last_transport_error = ""
         self._heartbeat_timer.start()
         self._reset_heartbeat_timeout()
         self.connected.emit()
 
     def _on_disconnected(self) -> None:
+        had_session = bool(self._session_established)
+        self._session_established = False
         self._heartbeat_timer.stop()
         self._heartbeat_timeout_timer.stop()
+        if not self._manual_disconnect and not had_session:
+            if not self._terminal_disconnect_message:
+                if self._last_transport_error:
+                    self._terminal_disconnect_message = (
+                        f"Unable to connect to host. {self._last_transport_error}"
+                    )
+                else:
+                    self._terminal_disconnect_message = "Unable to connect to host."
+            self._manual_disconnect = True
         if self._players:
             self._players = {}
             self.players_changed.emit(self.players)
         self.disconnected.emit()
         if not self._manual_disconnect:
             self._schedule_reconnect()
+        self._last_transport_error = ""
 
-    def _on_hello_ack(self, player_id: str) -> None:
-        self.log_line.emit(f"[INFO] Joined as {player_id}")
+    def _on_hello_ack(self, player_id: str, resumed: bool) -> None:
+        self._session_established = True
+        self.log_line.emit(
+            f"[INFO] {'Reconnected' if resumed else 'Joined'} as {player_id}"
+        )
         self._reset_heartbeat_timeout()
         self.request_snapshot()
+
+    def _on_socket_error(self, reason: str) -> None:
+        self._last_transport_error = str(reason or "").strip()
+
+    @staticmethod
+    def _friendly_join_error_message(reason: str) -> str:
+        clean_reason = str(reason or "").strip()
+        normalized = clean_reason.casefold()
+        if normalized == "name already in use":
+            return "Player name already in use. Choose a different name and reconnect."
+        if normalized == "persistent id already in use":
+            return "This player is already connected. Disconnect the other session or wait for it to close, then reconnect."
+        if normalized == "hello required":
+            return "Host rejected the connection during handshake."
+        if normalized == "name required":
+            return "Player name is required."
+        return clean_reason or "Host rejected the connection."
 
     def _on_message(self, message: dict) -> None:
         self._reset_heartbeat_timeout()
@@ -327,7 +387,11 @@ class ClientSessionController(QObject):
             self.ping_received.emit(x, y, dungeon_id)
             return
         if msg_type == "error":
-            self.log_line.emit(f"[ERROR] {message.get('message', 'unknown error')}")
+            reason = str(message.get("message", "")).strip() or "unknown error"
+            self.log_line.emit(f"[ERROR] {reason}")
+            if not self._session_established:
+                self._terminal_disconnect_message = self._friendly_join_error_message(reason)
+                self._manual_disconnect = True
             return
         if msg_type == "kicked":
             reason = str(message.get("message", "")).strip() or "Removed from host."

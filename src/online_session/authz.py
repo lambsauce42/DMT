@@ -16,6 +16,7 @@ _ALLOWED_PLAYER_ACTIONS = {
     "add_loot_from_inventory",
     "initiative_update",
     "link_character_entity",
+    "unlink_character_entity",
     "resolve_linked_character_conflict",
 }
 

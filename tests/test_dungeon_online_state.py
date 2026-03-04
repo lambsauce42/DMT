@@ -1,9 +1,11 @@
 import base64
+import io
 import json
 import math
 import os
 import sys
 import types
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -183,6 +185,18 @@ def _link_character_payload(
         payload["character_id"] = character_id
     payload.update(extra)
     return payload
+
+
+def _valid_archive_b64() -> str:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("sheet.pdf", b"%PDF-1.4\n%test\n")
+        archive.writestr("inventory.json", json.dumps({"inventory": []}))
+        archive.writestr(
+            "info.json",
+            json.dumps({"archive_version": 2, "updated_at": "2026-03-04T00:00:00+00:00"}),
+        )
+    return base64.b64encode(payload.getvalue()).decode("ascii")
 
 
 def test_entity_owner_and_network_id_round_trip(dungeon_widget):
@@ -2094,7 +2108,7 @@ def test_host_sync_character_inventory_rejects_unowned_character_target(
     assert "not linked to one of your owned entities" in str(result["message"]).lower()
 
 
-def test_host_link_character_sync_rejects_initial_authority_claim_from_player(
+def test_host_link_character_sync_allows_initial_authority_claim_from_player(
     dungeon_widget,
 ):
     host = _configure_online_host(
@@ -2108,17 +2122,54 @@ def test_host_link_character_sync_rejects_initial_authority_claim_from_player(
             entity_id="e1",
             sheet_id="sheet-1",
             sheet_name="test",
+            character_id="character-1",
             inventory={"inventory": []},
             stats={"name": "test", "ac": 17, "hp_max": 23, "hp_current": 14},
+            archive_b64=_valid_archive_b64(),
         ),
         request_id="link-1",
     )
     link_result = host.results[-1][1]
-    assert link_result["ok"] is False
-    assert "initial authoritative character link" in str(link_result["message"]).lower()
+    assert link_result["ok"] is True
+    assert link_result["data"]["action"] == "link_character_entity"
+    entity_state = dungeon_widget._dungeons[0]["state"]["items"][0]
+    assert str(entity_state.get("linked_sheet_id") or "") == "sheet-1"
+    assert str(entity_state.get("linked_character_id") or "") == "character-1"
+
+
+def test_host_unlink_character_entity_clears_existing_link(dungeon_widget):
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            label="Entity",
+            linked_sheet_id="sheet-1",
+            linked_sheet_name="Hero",
+            linked_character_id="character-1",
+            linked_save_revision=3,
+            linked_inventory={"inventory": [{"item_id": "item-1", "quantity": 1}]},
+        ),
+        load_state=True,
+    )
+
+    dungeon_widget._handle_host_unlink_character_entity(
+        "player-1",
+        {
+            "entity_id": "e1",
+            "dungeon_id": "d1",
+        },
+        request_id="unlink-1",
+    )
+
+    result = host.results[-1][1]
+    assert result["ok"] is True
+    assert result["data"]["action"] == "unlink_character_entity"
     entity_state = dungeon_widget._dungeons[0]["state"]["items"][0]
     assert str(entity_state.get("linked_sheet_id") or "") == ""
+    assert str(entity_state.get("linked_sheet_name") or "") == ""
     assert str(entity_state.get("linked_character_id") or "") == ""
+    assert int(entity_state.get("linked_save_revision") or 0) == 0
 
 
 def test_host_link_character_sync_rejects_overwriting_existing_authoritative_link(dungeon_widget):

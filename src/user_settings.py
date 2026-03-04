@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from save_paths import dnd_saves_dir
+from save_paths import dnd_saves_dir, selected_debug_save_profile
 
 APP_SETTINGS_FILE_NAME = "app_settings.json"
 LEGACY_DUNGEON_PROFILE_FILE_NAME = "dungeon_profile.json"
@@ -51,6 +51,12 @@ def _generate_local_player_id() -> str:
     return f"player_{stamp}_{uuid.uuid4().hex}{uuid.uuid4().hex}"
 
 
+def _generate_debug_local_player_id(profile: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    clean_profile = str(profile or "").strip().lower() or "debug"
+    return f"{clean_profile}_player_{stamp}_{uuid.uuid4().hex}{uuid.uuid4().hex}"
+
+
 def _legacy_dungeon_profile_player_id() -> str:
     path = dnd_saves_dir() / "settings" / LEGACY_DUNGEON_PROFILE_FILE_NAME
     if not path.exists():
@@ -67,7 +73,15 @@ def _legacy_dungeon_profile_player_id() -> str:
 
 def get_or_create_local_player_id() -> str:
     settings = load_app_settings()
+    active_debug_profile = str(selected_debug_save_profile() or "").strip()
     existing = str(settings.get(LOCAL_PLAYER_ID_KEY) or "").strip()
+    if active_debug_profile:
+        expected_prefix = f"{active_debug_profile.lower()}_player_"
+        if existing.startswith(expected_prefix):
+            return existing
+        player_id = _generate_debug_local_player_id(active_debug_profile)
+        save_app_settings({LOCAL_PLAYER_ID_KEY: player_id})
+        return player_id
     if existing:
         return existing
     seeded = _legacy_dungeon_profile_player_id()

@@ -70,6 +70,7 @@ def test_player_undo_redo_not_allowed():
         "add_loot_from_inventory",
         "initiative_update",
         "link_character_entity",
+        "unlink_character_entity",
     ],
 )
 def test_player_new_online_actions_allowed(action):

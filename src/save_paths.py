@@ -8,6 +8,10 @@ from pathlib import Path
 DEFAULT_SAVE_DIR_PARTS = ("Documents", "DMT")
 DEFAULT_SAVE_DIR_FALLBACK_PARTS = ("documents", "DMT")
 LEGACY_NESTED_DND_DIR_NAME = "DMT_saves"
+DEBUG_SAVE_PROFILE_ENV = "DMT_SAVE_PROFILE"
+DEBUG_SAVE_PROFILES = ("DEBUG1", "DEBUG2")
+_RESET_DEBUG_SAVE_DIRS: set[Path] = set()
+_WARNED_INVALID_DEBUG_PROFILES: set[str] = set()
 
 
 def _in_test_env() -> bool:
@@ -16,6 +20,54 @@ def _in_test_env() -> bool:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return True
     return "pytest" in sys.modules
+
+
+def _default_user_dnd_save_dir() -> Path:
+    home = os.path.expanduser("~")
+    primary = Path(home).joinpath(*DEFAULT_SAVE_DIR_PARTS)
+    fallback = Path(home).joinpath(*DEFAULT_SAVE_DIR_FALLBACK_PARTS)
+
+    if os.path.exists(os.path.join(home, DEFAULT_SAVE_DIR_PARTS[0])):
+        return primary
+    return fallback
+
+
+def _selected_debug_save_profile() -> str:
+    raw = str(os.environ.get(DEBUG_SAVE_PROFILE_ENV) or "").strip().upper()
+    if not raw:
+        return ""
+    if raw in DEBUG_SAVE_PROFILES:
+        return raw
+    if raw not in _WARNED_INVALID_DEBUG_PROFILES:
+        print(
+            f"Ignoring invalid {DEBUG_SAVE_PROFILE_ENV}={raw!r}. "
+            f"Expected one of: {', '.join(DEBUG_SAVE_PROFILES)}."
+        )
+        _WARNED_INVALID_DEBUG_PROFILES.add(raw)
+    return ""
+
+
+def selected_debug_save_profile() -> str:
+    return _selected_debug_save_profile()
+
+
+def _debug_save_dir_for_profile(profile: str) -> Path:
+    base_dir = _default_user_dnd_save_dir()
+    return base_dir.parent / f"{profile}_{base_dir.name}"
+
+
+def _reset_debug_save_dir_once(path: Path) -> None:
+    marker = path.resolve()
+    if marker in _RESET_DEBUG_SAVE_DIRS:
+        return
+    _RESET_DEBUG_SAVE_DIRS.add(marker)
+    try:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+        path.mkdir(parents=True, exist_ok=True)
+        print(f"Reset DMT debug save directory: {path}")
+    except Exception as exc:
+        print(f"Failed to reset DMT debug save directory {path}: {exc}")
 
 
 
@@ -27,14 +79,14 @@ def default_dnd_save_dir() -> str:
         if override:
             return str(Path(override))
         return str(Path.cwd() / "tests" / "test_saves" / "DMT")
-    
-    home = os.path.expanduser("~")
-    primary = Path(home).joinpath(*DEFAULT_SAVE_DIR_PARTS)
-    fallback = Path(home).joinpath(*DEFAULT_SAVE_DIR_FALLBACK_PARTS)
-    
-    if os.path.exists(os.path.join(home, DEFAULT_SAVE_DIR_PARTS[0])):
-        return str(primary)
-    return str(fallback)
+
+    profile = _selected_debug_save_profile()
+    if profile:
+        debug_dir = _debug_save_dir_for_profile(profile)
+        _reset_debug_save_dir_once(debug_dir)
+        return str(debug_dir)
+
+    return str(_default_user_dnd_save_dir())
 
 
 def _legacy_nested_dnd_dir(base_dir: Path) -> Path:
