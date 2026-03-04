@@ -1184,6 +1184,111 @@ def test_loot_pool_resolve_item_path_materializes_item_document(dungeon_widget, 
     assert str(loaded.get("icon_path") or "").strip()
 
 
+def test_unknown_item_prompt_rows_show_icons_and_hover_preview(dungeon_widget, monkeypatch):
+    icon = QPixmap(10, 10)
+    icon.fill(QColor("#ffffff"))
+    preview_calls = []
+    icon_null_states: list[bool] = []
+
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(dungeon_widget, "_loot_pool_icon_for_entry", lambda _entry: QPixmap(icon))
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_show_loot_pool_preview_for_item",
+        lambda row, _pos: preview_calls.append(str(row.text() if row is not None else "")),
+    )
+
+    def _exec_with_checks(dialog):
+        list_widget = dialog.findChild(QListWidget)
+        assert list_widget is not None
+        for idx in range(list_widget.count()):
+            icon_null_states.append(list_widget.item(idx).icon().isNull())
+        if list_widget.count() > 0:
+            list_widget.itemEntered.emit(list_widget.item(0))
+        for button in dialog.findChildren(QPushButton):
+            if button.text() == "Accept":
+                button.click()
+                break
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", _exec_with_checks, raising=False)
+    accepted = dungeon_widget._prompt_unknown_items_with_preview(
+        title="Unknown Loot Items",
+        heading="Unknown items",
+        details="Review unknown item definitions.",
+        entries=[
+            {
+                "item_id": "item_deadbeefcafebabe",
+                "title": "item_deadbeefcafebabe",
+                "item_document": build_item_document(
+                    {"item_id": "item_deadbeefcafebabe", "title": "Ancient Relic"},
+                    None,
+                ),
+            }
+        ],
+        accept_label="Accept",
+        reject_label="Reject",
+        default_accept=False,
+    )
+
+    assert accepted is True
+    assert icon_null_states == [False]
+    assert preview_calls
+
+
+def test_unknown_item_review_rows_show_icons_and_hover_preview(dungeon_widget, monkeypatch):
+    icon = QPixmap(10, 10)
+    icon.fill(QColor("#ffffff"))
+    preview_calls = []
+    icon_null_states: list[bool] = []
+
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(dungeon_widget, "_loot_pool_icon_for_entry", lambda _entry: QPixmap(icon))
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_show_loot_pool_preview_for_item",
+        lambda row, _pos: preview_calls.append(str(row.text() if row is not None else "")),
+    )
+
+    def _exec_with_checks(dialog):
+        list_widget = dialog.findChild(QListWidget)
+        assert list_widget is not None
+        for idx in range(list_widget.count()):
+            icon_null_states.append(list_widget.item(idx).icon().isNull())
+        if list_widget.count() > 0:
+            list_widget.itemEntered.emit(list_widget.item(0))
+            list_widget.item(0).setSelected(True)
+        for button in dialog.findChildren(QPushButton):
+            if button.text() == "Import Selected":
+                button.click()
+                break
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", _exec_with_checks, raising=False)
+    decision = dungeon_widget._review_unknown_linked_items(
+        player_id="player-1",
+        character_id="character-1",
+        sheet_name="Hero",
+        entries=[
+            {
+                "item_id": "item_0123456789abcdef",
+                "title": "item_0123456789abcdef",
+                "path": "",
+                "item_document": build_item_document(
+                    {"item_id": "item_0123456789abcdef", "title": "Mystery Blade"},
+                    None,
+                ),
+                "conflicts_with_authority": False,
+            }
+        ],
+    )
+
+    assert decision["action"] == "import"
+    assert decision["selected_item_ids"] == ["item_0123456789abcdef"]
+    assert icon_null_states == [False]
+    assert preview_calls
+
+
 def test_host_start_failure_reverts_to_local_mode(dungeon_widget, monkeypatch):
     class _HostFailStub:
         def __init__(self):
@@ -1281,6 +1386,58 @@ def test_joining_player_session_stops_existing_host_controller(dungeon_widget):
         "Mira",
         dungeon_widget._persistent_local_player_id,
     )
+
+
+def test_retry_join_with_different_player_name_retries_with_prompt_value(
+    dungeon_widget, monkeypatch
+):
+    join_calls = []
+    dungeon_widget._host_ip = "127.0.0.1"
+    dungeon_widget._host_port = 9010
+    dungeon_widget._local_player_name = "Mira"
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(
+        "dungeon_applet.QInputDialog.getText",
+        lambda *_args, **_kwargs: ("Mira-2", True),
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "join_online_session",
+        lambda host, port, name: join_calls.append((host, port, name)),
+    )
+
+    retried = dungeon_widget._retry_join_with_different_player_name(
+        "Player name already in use. Choose a different name and reconnect."
+    )
+
+    assert retried is True
+    assert join_calls == [("127.0.0.1", 9010, "Mira-2")]
+
+
+def test_client_disconnect_name_taken_uses_retry_path(dungeon_widget, monkeypatch):
+    class _ClientStub:
+        def consume_terminal_disconnect_message(self):
+            return "Player name already in use. Choose a different name and reconnect."
+
+        def disconnect(self):
+            return None
+
+    retry_reasons = []
+    dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = False
+    dungeon_widget._awaiting_player_snapshot = False
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_retry_join_with_different_player_name",
+        lambda reason: retry_reasons.append(reason) or True,
+    )
+
+    dungeon_widget._on_client_disconnected()
+
+    assert retry_reasons
+    assert "already in use" in retry_reasons[0].lower()
+    assert dungeon_widget._online_mode == ONLINE_MODE_PLAYER
 
 
 def test_clear_online_runtime_cache_uses_shared_runtime_cleanup(dungeon_widget, monkeypatch):
@@ -1901,6 +2058,7 @@ def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
                 },
             },
             stats={"name": "Hero", "hp_max": 12, "hp_current": 10, "ac": 15},
+            archive_b64=_valid_archive_b64(),
         ),
         request_id="sync-2",
     )
@@ -1958,7 +2116,8 @@ def test_host_sync_character_inventory_can_remove_unapproved_unknown_items(
                         "payload": {"item_id": "item_unknown", "title": "Unknown Blade"},
                     }
                 },
-            }
+            },
+            archive_b64=_valid_archive_b64(),
         ),
         request_id="sync-remove-1",
     )
@@ -2056,7 +2215,8 @@ def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
                         "payload": {"item_id": "item_unknown", "title": "Unknown Blade"},
                     }
                 },
-            }
+            },
+            archive_b64=_valid_archive_b64(),
         ),
         request_id="sync-kick-1",
     )

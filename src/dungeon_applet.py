@@ -234,6 +234,69 @@ def _inventory_payload_item_documents(payload: dict | None) -> dict[str, dict]:
     return documents
 
 
+def _looks_generated_item_label(raw: object) -> bool:
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    compact = re.sub(r"[^a-z0-9]", "", text.casefold())
+    if not compact:
+        return False
+    if len(compact) >= 20 and re.fullmatch(r"[a-f0-9]+", compact):
+        return True
+    if re.fullmatch(r"item[0-9a-f]{8,}", compact):
+        return True
+    if re.fullmatch(r"[a-z]{1,8}[0-9]{10,}", compact):
+        return True
+    return False
+
+
+def _humanize_item_token(raw: object) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    stem = Path(text).stem
+    token = stem or text
+    token = re.sub(r"[_\-]+", " ", token).strip()
+    token = " ".join(token.split())
+    if not token:
+        return ""
+    lower = token.casefold()
+    if lower.startswith("item "):
+        suffix = token[5:].strip()
+        if not suffix or suffix.isdigit() or _looks_generated_item_label(suffix):
+            return "Unknown Item"
+        token = suffix
+    if _looks_generated_item_label(token):
+        return "Unknown Item"
+    words = token.split(" ")
+    return " ".join(
+        word if any(ch.isupper() for ch in word[1:]) else word.capitalize()
+        for word in words
+    ).strip()
+
+
+def _resolve_human_item_title(
+    item_id: object,
+    *,
+    title: object = "",
+    name: object = "",
+    normalized_name: object = "",
+    fallback: str = "Item",
+) -> str:
+    explicit_candidates = [str(title or "").strip(), str(name or "").strip()]
+    for candidate in explicit_candidates:
+        if candidate and not _looks_generated_item_label(candidate):
+            return candidate
+    for candidate in (
+        explicit_candidates
+        + [str(normalized_name or "").strip(), str(item_id or "").strip()]
+    ):
+        humanized = _humanize_item_token(candidate)
+        if humanized:
+            return humanized
+    return str(fallback or "Item").strip() or "Item"
+
+
 def _validate_online_icon_payload(raw: bytes) -> tuple[bool, str]:
     if not raw:
         return False, "Icon payload is empty"
@@ -5366,12 +5429,29 @@ class DungeonAppletWidget(QWidget):
             item_document = None
         elif not isinstance(item_document.get("payload"), dict):
             item_document = None
+        payload_data = item_document.get("payload") if isinstance(item_document, dict) else {}
+        if not item_id and isinstance(payload_data, dict):
+            item_id = item_id_from_payload(payload_data)
+        if not path and item_id:
+            path = item_id
         if entry_type == "note":
             title = note or title or "Note"
         else:
             entry_type = "item"
-            if not title:
-                title = item_id or "Item"
+            payload_title = str(payload_data.get("title") or "").strip() if isinstance(payload_data, dict) else ""
+            payload_name = str(payload_data.get("name") or "").strip() if isinstance(payload_data, dict) else ""
+            payload_normalized_name = (
+                str(payload_data.get("normalized_item_name") or "").strip()
+                if isinstance(payload_data, dict)
+                else ""
+            )
+            title = _resolve_human_item_title(
+                item_id,
+                title=title or payload_title,
+                name=payload_name,
+                normalized_name=payload_normalized_name,
+                fallback="Item",
+            )
         entry = {
             "entry_id": entry_id,
             "type": entry_type,
@@ -5835,6 +5915,71 @@ class DungeonAppletWidget(QWidget):
         self._loot_pool_item_cache[key] = item
         return item
 
+    def _fallback_loot_icon_pixmap(self, *, size: int = 28) -> QPixmap:
+        icon_size = max(16, int(size))
+        pixmap = QPixmap(icon_size, icon_size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(0.5, 0.5, float(icon_size - 1), float(icon_size - 1))
+        painter.setPen(QPen(QColor("#4b5563"), 1))
+        painter.setBrush(QColor("#111827"))
+        painter.drawRoundedRect(rect, 5.0, 5.0)
+        painter.setPen(QColor("#e5e7eb"))
+        font = QFont(painter.font())
+        font.setBold(True)
+        font.setPointSize(max(8, int(icon_size * 0.45)))
+        painter.setFont(font)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "?")
+        painter.end()
+        return pixmap
+
+    def _fallback_loot_preview_pixmap(self, entry: dict) -> QPixmap:
+        width = 322
+        height = 136
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        pixmap = QPixmap(int(round(width * dpr)), int(round(height * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        title = _resolve_human_item_title(
+            entry.get("item_id"),
+            title=entry.get("title"),
+            fallback="Unknown Item",
+        )
+        subtitle = str(entry.get("item_id") or "").strip()
+        if _looks_generated_item_label(subtitle):
+            subtitle = ""
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        outer = QRectF(0.5, 0.5, float(width - 1), float(height - 1))
+        painter.setPen(QPen(QColor("#4b5563"), 1))
+        painter.setBrush(QColor("#111827"))
+        painter.drawRoundedRect(outer, 10.0, 10.0)
+        painter.setPen(QColor("#e5e7eb"))
+        title_font = QFont(painter.font())
+        title_font.setBold(True)
+        title_font.setPointSize(11)
+        painter.setFont(title_font)
+        title_rect = QRectF(16.0, 16.0, float(width - 32), 44.0)
+        painter.drawText(
+            title_rect,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            title,
+        )
+        if subtitle:
+            painter.setPen(QColor("#9ca3af"))
+            subtitle_font = QFont(painter.font())
+            subtitle_font.setPointSize(9)
+            painter.setFont(subtitle_font)
+            subtitle_rect = QRectF(16.0, 70.0, float(width - 32), 44.0)
+            painter.drawText(
+                subtitle_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                subtitle,
+            )
+        painter.end()
+        return pixmap
+
     def _loot_pool_icon_for_entry(self, entry: dict) -> QPixmap | None:
         key = self._loot_pool_item_cache_key(entry)
         cached = self._loot_pool_icon_cache.get(key)
@@ -5843,33 +5988,38 @@ class DungeonAppletWidget(QWidget):
         try:
             from player_sheets import _inventory_icon_pixmap, _missing_inventory_icon_pixmap
         except Exception:
-            return None
+            fallback = self._fallback_loot_icon_pixmap()
+            self._loot_pool_icon_cache[key] = fallback
+            return fallback
         item = self._loot_pool_item_for_entry(entry)
         pixmap = _inventory_icon_pixmap(item) if item is not None else _missing_inventory_icon_pixmap()
+        if not isinstance(pixmap, QPixmap) or pixmap.isNull():
+            pixmap = self._fallback_loot_icon_pixmap()
         self._loot_pool_icon_cache[key] = pixmap
         return pixmap
 
     def _loot_pool_preview_for_entry(self, entry: dict) -> QPixmap | None:
         item = self._loot_pool_item_for_entry(entry)
-        if item is None:
-            return None
         dpr = max(1.0, float(self.devicePixelRatioF()))
         key = f"{self._loot_pool_item_cache_key(entry)}|{int(round(dpr * 100))}"
         cached = self._loot_pool_preview_cache.get(key)
         if cached is not None:
             return cached
-        try:
-            from player_sheets import _render_item_preview_pixmap
-        except Exception:
-            return None
-        pixmap = _render_item_preview_pixmap(
-            item,
-            max_width=322,
-            max_height=460,
-            dpr=dpr,
-        )
+        pixmap: QPixmap | None = None
+        if item is not None:
+            try:
+                from player_sheets import _render_item_preview_pixmap
+            except Exception:
+                _render_item_preview_pixmap = None  # type: ignore[assignment]
+            if _render_item_preview_pixmap is not None:
+                pixmap = _render_item_preview_pixmap(
+                    item,
+                    max_width=322,
+                    max_height=460,
+                    dpr=dpr,
+                )
         if pixmap is None or pixmap.isNull():
-            return None
+            pixmap = self._fallback_loot_preview_pixmap(entry)
         self._loot_pool_preview_cache[key] = pixmap
         return pixmap
 
@@ -6032,7 +6182,7 @@ class DungeonAppletWidget(QWidget):
             if not item_id:
                 continue
             quantity = _inventory_entry_quantity(value)
-            title = Path(item_id).stem or item_id
+            title = _resolve_human_item_title(item_id, fallback="Unknown Item")
             resolved_path = loot_item_path_for_id(item_id) if loot_item_path_for_id is not None else None
             path = str(resolved_path) if resolved_path is not None else str(item_id)
             item_document = None
@@ -6041,9 +6191,13 @@ class DungeonAppletWidget(QWidget):
                 item_document = self._loot_pool_item_document_from_path(candidate_path)
                 payload = load_item_payload(candidate_path)
                 if isinstance(payload, dict):
-                    parsed_title = str(payload.get("title") or payload.get("name") or "").strip()
-                    if parsed_title:
-                        title = parsed_title
+                    title = _resolve_human_item_title(
+                        item_id,
+                        title=payload.get("title"),
+                        name=payload.get("name"),
+                        normalized_name=payload.get("normalized_item_name"),
+                        fallback=title,
+                    )
             for unit_index in range(quantity):
                 rows.append(
                     {
@@ -6063,7 +6217,7 @@ class DungeonAppletWidget(QWidget):
                 item_id = _inventory_entry_item_id(value)
                 if not slot_id or not item_id:
                     continue
-                title = Path(item_id).stem or item_id
+                title = _resolve_human_item_title(item_id, fallback="Unknown Item")
                 resolved_path = loot_item_path_for_id(item_id) if loot_item_path_for_id is not None else None
                 path = str(resolved_path) if resolved_path is not None else str(item_id)
                 item_document = None
@@ -6072,9 +6226,13 @@ class DungeonAppletWidget(QWidget):
                     item_document = self._loot_pool_item_document_from_path(candidate_path)
                     payload = load_item_payload(candidate_path)
                     if isinstance(payload, dict):
-                        parsed_title = str(payload.get("title") or payload.get("name") or "").strip()
-                        if parsed_title:
-                            title = parsed_title
+                        title = _resolve_human_item_title(
+                            item_id,
+                            title=payload.get("title"),
+                            name=payload.get("name"),
+                            normalized_name=payload.get("normalized_item_name"),
+                            fallback=title,
+                        )
                 slot_label = str(EQUIPMENT_SLOT_LABELS.get(slot_id) or "").strip()
                 if not slot_label:
                     slot_label = slot_id.replace("_", " ").title()
@@ -7786,6 +7944,50 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode == ONLINE_MODE_PLAYER:
             self._append_server_log("[INFO] Connected to host")
 
+    @staticmethod
+    def _is_name_taken_join_error(message: str) -> bool:
+        normalized = str(message or "").strip().casefold()
+        return (
+            "name already in use" in normalized
+            or "choose a different name" in normalized
+            or "player name already in use" in normalized
+        )
+
+    def _retry_join_with_different_player_name(self, reason: str) -> bool:
+        if _in_test_env():
+            return False
+        if not self._is_name_taken_join_error(reason):
+            return False
+        host_ip = str(self._host_ip or "").strip()
+        try:
+            host_port = int(self._host_port or 0)
+        except (TypeError, ValueError):
+            host_port = 0
+        if not host_ip or host_port <= 0:
+            return False
+        current_name = str(self._local_player_name or "").strip() or "Player"
+        prompt = "Player name is already taken. Enter a different name to retry:"
+        for _attempt in range(5):
+            typed, ok = QInputDialog.getText(
+                self,
+                "Player Name In Use",
+                prompt,
+                text=current_name,
+            )
+            if not ok:
+                return False
+            next_name = str(typed or "").strip()
+            if not next_name:
+                prompt = "Player name cannot be empty. Enter a different name:"
+                continue
+            if next_name.casefold() == current_name.casefold():
+                prompt = "That name is already in use. Enter a different player name:"
+                continue
+            self._append_server_log(f"[INFO] Retrying join as '{next_name}'.")
+            self.join_online_session(host_ip, host_port, next_name)
+            return True
+        return False
+
     def _on_client_disconnected(self) -> None:
         if self._suppress_client_disconnect_handler:
             self._suppress_client_disconnect_handler = False
@@ -7825,6 +8027,8 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
         if terminal_disconnect_message:
+            if self._retry_join_with_different_player_name(terminal_disconnect_message):
+                return
             self._pending_player_state_update = None
             self._pending_player_state_update_request_id = ""
             self._approved_host_inventory_sync_characters.clear()
@@ -8546,6 +8750,21 @@ class DungeonAppletWidget(QWidget):
         self._refresh_dungeon_list(preserve_selection=True)
         return True
 
+    def _remove_player_from_host_session(self, player_id: str, *, reason: str) -> None:
+        if self._host_controller is None:
+            return
+        disconnect_player = getattr(self._host_controller, "disconnect_player", None)
+        if callable(disconnect_player):
+            disconnect_player(player_id, message=str(reason or "Removed from host."))
+            return
+        kick_player = getattr(self._host_controller, "kick_player", None)
+        if callable(kick_player):
+            kick_player(player_id, message=str(reason or "Removed from host."))
+            return
+        self._append_server_log(
+            f"[WARN] Unable to remove player '{player_id}': no disconnect helper on host controller."
+        )
+
     def _handle_host_sync_character_inventory(
         self,
         player_id: str,
@@ -8709,7 +8928,46 @@ class DungeonAppletWidget(QWidget):
                 )
                 return
 
-        authoritative_payload = normalize_inventory_payload(inventory_payload)
+        existing_inventory = {}
+        sheet_name_for_review = sheet_id
+        if linked_entries:
+            _first_linked_dungeon, first_linked_item = linked_entries[0]
+            if isinstance(first_linked_item, dict):
+                existing_inventory = normalize_inventory_payload(
+                    first_linked_item.get("linked_inventory") or {}
+                )
+                sheet_name_for_review = (
+                    str(first_linked_item.get("linked_sheet_name") or sheet_id).strip()
+                    or sheet_id
+                )
+        unknown_status, resolved_payload, unknown_status_note = self._resolve_unknown_linked_items_for_host(
+            player_id=player_id,
+            character_id=character_id,
+            sheet_name=sheet_name_for_review,
+            inventory_payload=inventory_payload,
+            existing_inventory=existing_inventory,
+        )
+        if unknown_status == "kick":
+            reason = unknown_status_note or "DM rejected unknown linked items and removed the player."
+            self._remove_player_from_host_session(player_id, reason=reason)
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=reason,
+                request_id=request_id,
+                data=dict(claim_result_data) if isinstance(claim_result_data, dict) else None,
+            )
+            return
+        if unknown_status != "ok":
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=unknown_status_note or "Linked item review is unresolved.",
+                request_id=request_id,
+                data=dict(claim_result_data) if isinstance(claim_result_data, dict) else None,
+            )
+            return
+        authoritative_payload = normalize_inventory_payload(resolved_payload)
         updated = self._apply_inventory_sync_to_linked_entities(
             owner_player_id=player_id,
             character_id=character_id,
@@ -8720,6 +8978,8 @@ class DungeonAppletWidget(QWidget):
             stats=stats_payload,
             archive_b64=archive_b64,
         )
+        if unknown_status_note:
+            self._append_server_log(f"[INFO] {unknown_status_note}")
         self._host_controller.send_command_result(
             player_id,
             ok=True,
@@ -8910,6 +9170,34 @@ class DungeonAppletWidget(QWidget):
                 data={"action": "link_character_entity"},
             )
             return
+        unknown_status, resolved_payload, unknown_status_note = self._resolve_unknown_linked_items_for_host(
+            player_id=player_id,
+            character_id=resolved_character_id,
+            sheet_name=sheet_name,
+            inventory_payload=normalized_inventory,
+            existing_inventory=normalize_inventory_payload(item_data.get("linked_inventory") or {}),
+        )
+        if unknown_status == "kick":
+            reason = unknown_status_note or "DM rejected unknown linked items and removed the player."
+            self._remove_player_from_host_session(player_id, reason=reason)
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=reason,
+                request_id=request_id,
+                data={"action": "link_character_entity"},
+            )
+            return
+        if unknown_status != "ok":
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=unknown_status_note or "Linked item review is unresolved.",
+                request_id=request_id,
+                data={"action": "link_character_entity"},
+            )
+            return
+        normalized_inventory = normalize_inventory_payload(resolved_payload)
         label, max_hp, hp, ac, abilities = self._normalized_linked_stats(stats, fallback_name=sheet_name)
         item_data["linked_sheet_id"] = sheet_id
         item_data["linked_sheet_name"] = sheet_name
@@ -8972,6 +9260,8 @@ class DungeonAppletWidget(QWidget):
             request_id=request_id,
             data=success_data,
         )
+        if unknown_status_note:
+            self._append_server_log(f"[INFO] {unknown_status_note}")
         self._review_active_unknown_linked_items_for_dm(
             player_id=player_id,
             character_id=resolved_character_id,
@@ -9585,9 +9875,21 @@ class DungeonAppletWidget(QWidget):
             item_id = str(item.get("item_id") or "").strip()
             if not item_id:
                 continue
+            item_document = item.get("item_document")
+            item_payload_data = item_document.get("payload") if isinstance(item_document, dict) else {}
             item_payload = {
                 "item_id": item_id,
-                "title": str(item.get("title") or item_id or "Item"),
+                "title": _resolve_human_item_title(
+                    item_id,
+                    title=item.get("title"),
+                    name=item_payload_data.get("name") if isinstance(item_payload_data, dict) else "",
+                    normalized_name=(
+                        item_payload_data.get("normalized_item_name")
+                        if isinstance(item_payload_data, dict)
+                        else ""
+                    ),
+                    fallback="Item",
+                ),
                 "path": str(item.get("path") or item_id),
                 "source": str(item.get("source") or "backpack"),
             }
@@ -9596,7 +9898,6 @@ class DungeonAppletWidget(QWidget):
             source_index = item.get("source_index")
             if isinstance(source_index, int):
                 item_payload["source_index"] = int(source_index)
-            item_document = item.get("item_document")
             if (
                 isinstance(item_document, dict)
                 and str(item_document.get("format") or "").strip().lower() == ITEM_FILE_FORMAT
@@ -9657,7 +9958,11 @@ class DungeonAppletWidget(QWidget):
                 unknown_entries_for_import.append(
                     {
                         "item_id": item_id,
-                        "title": str(item.get("title") or item_id).strip() or item_id,
+                        "title": _resolve_human_item_title(
+                            item_id,
+                            title=item.get("title"),
+                            fallback="Unknown Item",
+                        ),
                         "item_document": (
                             dict(candidate_document)
                             if (
@@ -9743,18 +10048,33 @@ class DungeonAppletWidget(QWidget):
         added_entries: list[dict] = []
         for item in parsed_items:
             item_id = str(item.get("item_id") or "").strip()
+            incoming_document = item.get("item_document") or linked_inventory_documents.get(item_id)
+            incoming_payload = (
+                incoming_document.get("payload")
+                if isinstance(incoming_document, dict)
+                else {}
+            )
             entry_payload = {
                 "entry_id": uuid.uuid4().hex,
                 "type": "item",
                 "item_id": item_id,
-                "title": str(item.get("title") or item_id or "Item"),
+                "title": _resolve_human_item_title(
+                    item_id,
+                    title=item.get("title"),
+                    name=incoming_payload.get("name") if isinstance(incoming_payload, dict) else "",
+                    normalized_name=(
+                        incoming_payload.get("normalized_item_name")
+                        if isinstance(incoming_payload, dict)
+                        else ""
+                    ),
+                    fallback="Item",
+                ),
                 "path": item_id,
             }
             item_document = authoritative_item_documents.get(item_id)
             if isinstance(item_document, dict):
                 entry_payload["item_document"] = dict(item_document)
             else:
-                incoming_document = item.get("item_document") or linked_inventory_documents.get(item_id)
                 if (
                     isinstance(incoming_document, dict)
                     and str(incoming_document.get("format") or "").strip().lower() == ITEM_FILE_FORMAT
@@ -10857,17 +11177,28 @@ class DungeonAppletWidget(QWidget):
             if not isinstance(entry, dict):
                 continue
             item_id = str(entry.get("item_id") or "").strip()
+            item_document = entry.get("item_document")
+            if not item_id and isinstance(item_document, dict):
+                payload = item_document.get("payload")
+                if isinstance(payload, dict):
+                    item_id = item_id_from_payload(payload)
             if not item_id:
                 continue
-            title = str(entry.get("title") or item_id).strip() or item_id
+            payload = item_document.get("payload") if isinstance(item_document, dict) else {}
+            title = _resolve_human_item_title(
+                item_id,
+                title=entry.get("title"),
+                name=payload.get("name") if isinstance(payload, dict) else "",
+                normalized_name=payload.get("normalized_item_name") if isinstance(payload, dict) else "",
+                fallback="Unknown Item",
+            )
             preview_payload = {
                 "entry_id": f"preview_{uuid.uuid4().hex}",
                 "type": "item",
                 "item_id": item_id,
                 "title": title,
-                "path": item_id,
+                "path": str(entry.get("path") or item_id),
             }
-            item_document = entry.get("item_document")
             if (
                 isinstance(item_document, dict)
                 and str(item_document.get("format") or "").strip().lower() == ITEM_FILE_FORMAT
@@ -10971,10 +11302,12 @@ class DungeonAppletWidget(QWidget):
                 continue
             incoming_document = incoming_documents.get(item_id)
             payload = incoming_document.get("payload") if isinstance(incoming_document, dict) else {}
-            title = (
-                str(payload.get("title") or payload.get("name") or item_id).strip()
-                if isinstance(payload, dict)
-                else item_id
+            title = _resolve_human_item_title(
+                item_id,
+                title=payload.get("title") if isinstance(payload, dict) else "",
+                name=payload.get("name") if isinstance(payload, dict) else "",
+                normalized_name=payload.get("normalized_item_name") if isinstance(payload, dict) else "",
+                fallback="Unknown Item",
             )
             unresolved_entries.append(
                 {
@@ -11071,10 +11404,12 @@ class DungeonAppletWidget(QWidget):
                 and not item_document_matches(authoritative_document, incoming_document)
             ):
                 payload = incoming_document.get("payload") if isinstance(incoming_document, dict) else {}
-                title = (
-                    str(payload.get("title") or payload.get("name") or item_id).strip()
-                    if isinstance(payload, dict)
-                    else item_id
+                title = _resolve_human_item_title(
+                    item_id,
+                    title=payload.get("title") if isinstance(payload, dict) else "",
+                    name=payload.get("name") if isinstance(payload, dict) else "",
+                    normalized_name=payload.get("normalized_item_name") if isinstance(payload, dict) else "",
+                    fallback="Unknown Item",
                 )
                 unresolved.append(
                     {
@@ -11090,10 +11425,12 @@ class DungeonAppletWidget(QWidget):
             if authoritative_document is not None:
                 continue
             payload = incoming_document.get("payload") if isinstance(incoming_document, dict) else {}
-            title = (
-                str(payload.get("title") or payload.get("name") or item_id).strip()
-                if isinstance(payload, dict)
-                else item_id
+            title = _resolve_human_item_title(
+                item_id,
+                title=payload.get("title") if isinstance(payload, dict) else "",
+                name=payload.get("name") if isinstance(payload, dict) else "",
+                normalized_name=payload.get("normalized_item_name") if isinstance(payload, dict) else "",
+                fallback="Unknown Item",
             )
             unresolved.append(
                 {
@@ -11253,10 +11590,22 @@ class DungeonAppletWidget(QWidget):
         layout.addWidget(list_widget, 1)
 
         for entry in entries:
-            row = QListWidgetItem(str(entry.get("title") or entry.get("item_id") or "Item"))
-            row.setData(Qt.ItemDataRole.UserRole, str(entry.get("item_id") or ""))
-            row.setData(Qt.ItemDataRole.UserRole + 1, dict(entry))
-            icon_pixmap = self._loot_pool_icon_for_entry(entry)
+            row_payload = self._sanitize_loot_pool_entry(
+                {
+                    "entry_id": str(entry.get("entry_id") or uuid.uuid4().hex),
+                    "type": "item",
+                    "item_id": str(entry.get("item_id") or ""),
+                    "title": str(entry.get("title") or ""),
+                    "path": str(entry.get("path") or entry.get("item_id") or ""),
+                    "item_document": entry.get("item_document"),
+                }
+            )
+            row_entry = dict(entry)
+            row_entry.update(row_payload)
+            row = QListWidgetItem(str(row_entry.get("title") or row_entry.get("item_id") or "Item"))
+            row.setData(Qt.ItemDataRole.UserRole, str(row_entry.get("item_id") or ""))
+            row.setData(Qt.ItemDataRole.UserRole + 1, row_entry)
+            icon_pixmap = self._loot_pool_icon_for_entry(row_entry)
             if isinstance(icon_pixmap, QPixmap) and not icon_pixmap.isNull():
                 row.setIcon(QIcon(icon_pixmap))
             list_widget.addItem(row)
@@ -11575,10 +11924,12 @@ class DungeonAppletWidget(QWidget):
                 continue
             incoming_document = incoming_documents.get(item_id)
             payload = incoming_document.get("payload") if isinstance(incoming_document, dict) else {}
-            title = (
-                str(payload.get("title") or payload.get("name") or item_id).strip()
-                if isinstance(payload, dict)
-                else item_id
+            title = _resolve_human_item_title(
+                item_id,
+                title=payload.get("title") if isinstance(payload, dict) else "",
+                name=payload.get("name") if isinstance(payload, dict) else "",
+                normalized_name=payload.get("normalized_item_name") if isinstance(payload, dict) else "",
+                fallback="Unknown Item",
             )
             unknown_entries.append(
                 {
