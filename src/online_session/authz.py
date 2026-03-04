@@ -17,7 +17,6 @@ _ALLOWED_PLAYER_ACTIONS = {
     "initiative_update",
     "link_character_entity",
     "unlink_character_entity",
-    "resolve_linked_character_conflict",
 }
 
 

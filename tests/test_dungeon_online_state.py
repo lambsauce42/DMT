@@ -2624,6 +2624,95 @@ def test_host_add_loot_from_equipment_clears_slot_and_adds_loot_entry(dungeon_wi
     assert linked_inventory["equipment"]["head"] is None
 
 
+def test_host_add_loot_from_inventory_persists_unknown_items_to_dm_storage(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def stop(self):
+            return None
+
+    unknown_document = build_item_document(
+        {"item_id": "item_unknown", "title": "Unknown Item"},
+        None,
+    )
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_inventory": {
+                            "inventory": ["item_unknown"],
+                            "inventory_notes": "",
+                            "equipment": {},
+                            "item_documents": {
+                                "item_unknown": unknown_document,
+                            },
+                            "gold": 0,
+                            "silver": 0,
+                            "copper": 0,
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
+    dungeon_widget._session_loot_pool = []
+
+    dungeon_widget._handle_host_add_loot_from_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "items": [
+                {
+                    "item_id": "item_unknown",
+                    "title": "Unknown Item",
+                    "path": "item_unknown",
+                }
+            ],
+        },
+        request_id="add-unknown-1",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is True
+    assert len(dungeon_widget._session_loot_pool) == 1
+    loot_document = dungeon_widget._session_loot_pool[0].get("item_document")
+    assert isinstance(loot_document, dict)
+    assert loot_document["payload"]["item_id"] == "item_unknown"
+
+    from save_paths import items_dir
+
+    stored_item_id_found = False
+    for item_path in Path(items_dir()).rglob("*.dmtitem"):
+        payload = load_item_payload(item_path)
+        if isinstance(payload, dict) and str(payload.get("item_id") or "").strip() == "item_unknown":
+            stored_item_id_found = True
+            break
+    assert stored_item_id_found
+
+
 def test_host_add_loot_from_inventory_rejects_missing_inventory_item(dungeon_widget):
     class _HostStub:
         def __init__(self):
@@ -3149,6 +3238,90 @@ def test_sync_local_sheet_inventory_creates_missing_character_entry(monkeypatch,
         {"item_id": "item_z", "normalized_item_name": "item_z", "quantity": 1}
     ]
     assert calls["kwargs"]["emit_event"] is True
+
+
+def test_sync_local_sheet_inventory_converts_unknown_items_to_notes_on_player_reject(
+    monkeypatch,
+    dungeon_widget,
+):
+    calls = {}
+
+    def _apply_remote_inventory(character_id, sheet_name, inventory_payload, **kwargs):
+        calls["character_id"] = character_id
+        calls["sheet_name"] = sheet_name
+        calls["inventory_payload"] = dict(inventory_payload)
+        calls["kwargs"] = dict(kwargs)
+        return True, "Inventory synchronized.", dict(inventory_payload)
+
+    fake_module = types.SimpleNamespace(
+        apply_remote_character_package_for_character_id=_apply_remote_inventory,
+        character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
+    )
+    monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+    monkeypatch.setattr(dungeon_widget, "_linked_item_document_by_id", lambda _item_id: None)
+    monkeypatch.setattr(dungeon_widget, "_prompt_unknown_items_with_preview", lambda **_kwargs: False)
+
+    ok, message = dungeon_widget._sync_local_sheet_inventory_from_host(
+        "sheet-1",
+        {
+            "inventory": [{"item_id": "item_unknown", "quantity": 2}],
+            "equipment": {"head": {"item_id": "item_helm", "quantity": 1}},
+            "item_documents": {
+                "item_unknown": build_item_document({"item_id": "item_unknown", "title": "Unknown Blade"}, None),
+                "item_helm": build_item_document({"item_id": "item_helm", "title": "Unknown Helm"}, None),
+            },
+        },
+        sheet_name="Hero Name",
+        refresh_entities=False,
+    )
+
+    assert ok is True
+    assert "synchronized" in message.lower()
+    synced_inventory = calls["inventory_payload"]
+    assert synced_inventory["inventory"] == []
+    assert synced_inventory["equipment"]["head"] is None
+    notes_text = str(synced_inventory.get("inventory_notes") or "")
+    assert "unknown blade" in notes_text.lower()
+    assert "unknown helm" in notes_text.lower()
+
+
+def test_build_collection_payload_strips_linked_inventory_item_documents(monkeypatch, dungeon_widget):
+    monkeypatch.setattr(dungeon_widget, "_save_active_dungeon_state", lambda: None)
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "pos": [0.0, 0.0],
+                        "icon_path": "",
+                        "linked_inventory": {
+                            "inventory": [{"item_id": "item_1", "quantity": 1}],
+                            "item_documents": {
+                                "item_1": build_item_document(
+                                    {"item_id": "item_1", "title": "Blade"},
+                                    None,
+                                )
+                            },
+                        },
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    payload, _assets = dungeon_widget._build_collection_payload()
+    linked_inventory = payload["dungeons"][0]["state"]["items"][0]["linked_inventory"]
+    assert linked_inventory["inventory"] == [
+        {"item_id": "item_1", "normalized_item_name": "item_1", "quantity": 1}
+    ]
+    assert linked_inventory["item_documents"] == {}
 
 
 def test_external_character_inventory_save_refreshes_linked_sync_metadata(dungeon_widget, monkeypatch):
