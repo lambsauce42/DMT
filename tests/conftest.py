@@ -133,6 +133,7 @@ _KNOWN_TEST_FILES = frozenset(
         "test_session_creator_id_uniqueness.py",
         "test_session_creator_lifecycle.py",
         "test_session_creator_slash_links.py",
+        "test_session_transcript.py",
         "test_session_creator_widget.py",
         "test_session_file_pool_layout.py",
         "test_session_file_pool_limits.py",

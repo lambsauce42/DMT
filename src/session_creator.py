@@ -73,6 +73,12 @@ from player_sheets import (
 from maps_applet import MapViewPanel
 from session_text_link_controller import SessionTextLinkController
 from session_text_links import LinkSuggestion, ParsedSessionLink, load_link_suggestions
+from session_transcript import (
+    RecapSessionPanel,
+    TranscriptSessionController,
+    TranscriptSessionPanel,
+    delete_session_transcript_state,
+)
 from ui.widgets import TerminalWidget
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
 from user_settings import is_session_autosave_enabled
@@ -595,6 +601,7 @@ class SessionCreatorWidget(QWidget):
         self._files_last_expanded_width = 320
         self._text_link_controllers: list[SessionTextLinkController] = []
         self._session_autosave_enabled = is_session_autosave_enabled()
+        self._transcript_controller = TranscriptSessionController(self)
 
         self._world_data = _navigation_world_data()
 
@@ -636,6 +643,10 @@ class SessionCreatorWidget(QWidget):
                 controller.deleteLater()
             except Exception:
                 pass
+        try:
+            self._transcript_controller.close()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def showEvent(self, event) -> None:
@@ -1087,8 +1098,10 @@ class SessionCreatorWidget(QWidget):
 
         self.ref_tabs.addTab(plan_tab, "Plan")
         self.ref_tabs.addTab(self._build_files_tab(), "Files")
-        self.ref_tabs.addTab(self._build_placeholder_reference_tab("Transcript"), "Transcript")
-        self.ref_tabs.addTab(self._build_placeholder_reference_tab("Recap"), "Recap")
+        self.transcript_panel = TranscriptSessionPanel(self._transcript_controller, self)
+        self.recap_panel = RecapSessionPanel(self._transcript_controller, self)
+        self.ref_tabs.addTab(self.transcript_panel, "Transcript")
+        self.ref_tabs.addTab(self.recap_panel, "Recap")
         self.ref_tabs.currentChanged.connect(self._on_reference_tab_changed)
         
         ref_layout.addWidget(self.ref_tabs)
@@ -1647,6 +1660,15 @@ class SessionCreatorWidget(QWidget):
         res = QMessageBox.question(self, "Delete Session", f"Are you sure you want to delete '{item.text()}'?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if res == QMessageBox.StandardButton.Yes:
+            if self._current_session and self._current_session.id == session_id:
+                try:
+                    self._transcript_controller.bind_session(None)
+                except Exception as exc:
+                    print(f"[WARN] Failed to halt transcript controller for session {session_id}: {exc}", file=sys.stderr)
+            try:
+                delete_session_transcript_state(str(session_id or ""))
+            except Exception as exc:
+                print(f"[WARN] Failed to delete transcript state for session {session_id}: {exc}", file=sys.stderr)
             self.manager.delete_session(session_id)
             if self._current_session and self._current_session.id == session_id:
                 self._current_session = None
@@ -1726,11 +1748,13 @@ class SessionCreatorWidget(QWidget):
         self._set_file_controls_enabled(False)
         self._refresh_file_table()
         self._show_empty_file_preview("No file selected.")
+        self._transcript_controller.bind_session(None)
 
     def _load_session_to_ui(self, session: Session, *, apply_context: bool) -> None:
         self._set_current_session_dirty(False)
         self._set_plan_controls_enabled(True)
         self._set_file_controls_enabled(True)
+        self._transcript_controller.bind_session(session.id, session.name)
         self.scratchpad.blockSignals(True)
         self.scratchpad.setHtml(_normalize_session_link_html(session.notes))
         self.scratchpad.blockSignals(False)

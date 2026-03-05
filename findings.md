@@ -101,5 +101,61 @@
 - Why this is wrong:
   - Creates avoidable stale state and weakens correlation reliability over long sessions.
 
+### 8) [HIGH] Collection save strips authoritative linked item documents, so restart/handoff can silently lose session item definitions
+- Area: Collection persistence + player-side linked-character package apply
+- Files:
+  - `src/dungeon_applet.py:15916`
+  - `src/dungeon_applet.py:15919`
+  - `src/player_sheets.py:2278`
+  - `src/player_sheets.py:2294`
+- What happens:
+  - `_build_collection_payload(...)` rewrites every linked entity inventory with `item_documents = {}` before saving the collection.
+  - After reload/restart, the host snapshot carries that stripped `linked_inventory`.
+  - On the player side, `apply_remote_character_package_for_character_id(...)` loads the archive bytes and then immediately reapplies the stripped inventory payload, so the restored local managed copy ends up with no item documents.
+- Why this is wrong:
+  - `onlinephilosophy.md` requires the collection-backed state to persist the playable character package and the in-play item documents known to session authority.
+  - A restart/handoff path can therefore erase authoritative item definitions from the managed local copy, so the post-reconnect character is no longer identical to the host-authoritative package.
+- Reproduction (runtime check run during this investigation):
+  - Applied a valid archive containing `item_unknown` plus a stripped host inventory payload.
+  - Result: sync succeeded, but the stored local inventory ended with `"item_documents": {}`.
+
+### 9) [HIGH] Managed linked-character cleanup is scoped to one widget, but deletes global data used by other open collections/sessions
+- Area: Managed linked artifact lifecycle / multi-workspace interaction
+- Files:
+  - `src/dungeon_applet.py:11732`
+  - `src/dungeon_applet.py:13330`
+  - `src/dungeon_applet.py:16201`
+  - `src/player_sheets.py:2007`
+- What happens:
+  - `_cleanup_unlinked_managed_character_artifacts()` computes active character ids from only the current widget/collection.
+  - It then calls global `cleanup_managed_linked_entries(active_character_ids)`, which deletes every managed linked entry not in that local set.
+  - Snapshot receipt, collection load, save, unlink, and delete flows all trigger this cleanup.
+- Why this is wrong:
+  - Managed linked storage lives in the shared Player Sheets cache, not per widget.
+  - In a normal multi-tab or multi-window workflow, one open collection can delete another still-active online session’s managed linked character files.
+  - That breaks reconnect/handoff expectations and violates the cleanup invariant that only artifacts no longer referenced by the relevant active session state should be removed.
+- Reproduction (runtime check run during this investigation):
+  - Created managed entries for `char-a` and `char-b`, then instantiated two widgets referencing one character each.
+  - Calling cleanup from widget A left `char-a` intact and deleted `char-b`.
+
+### 10) [MEDIUM] Rejecting local import of unknown synced items is not deduplicated and re-prompts on every identical snapshot
+- Area: Player local sync / unknown-item prompt behavior
+- Files:
+  - `src/dungeon_applet.py:12710`
+  - `src/dungeon_applet.py:12748`
+  - `src/dungeon_applet.py:13026`
+  - `src/dungeon_applet.py:13045`
+- What happens:
+  - `_prepare_incoming_host_inventory_for_local_sync(...)` asks the player whether to copy unknown items locally or convert them to notes.
+  - If the player chooses convert-to-notes, no decision cache is stored.
+  - `_sync_local_sheet_inventory_from_host(...)` compares future snapshots against the original host payload fingerprint, not the converted local payload fingerprint, so the same unchanged host snapshot re-enters the same prompt path.
+- Why this is wrong:
+  - `onlinephilosophy.md` explicitly calls for prompt deduplication on repeated unchanged decisions.
+  - A player who already resolved the prompt by choosing note conversion still gets prompted again on the next identical host snapshot.
+- Reproduction (runtime check run during this investigation):
+  - Forced the local prompt to choose note conversion and called `_sync_local_sheet_inventory_from_host(...)` twice with the same host payload.
+  - Prompt count increased from `1` to `2` across identical syncs.
+
 ## Codex Pass Findings Added (2026-03-05)
 - This pass’s validated findings are entries **#1, #2, #3, and #4** above.
+- This pass also added new entries **#8, #9, and #10** above.

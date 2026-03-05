@@ -58,6 +58,7 @@ from PySide6.QtCore import (
     QRectF,
     QPoint,
     QPointF,
+    QObject,
     Signal,
     QSize,
     QEvent,
@@ -306,6 +307,42 @@ def _validate_online_icon_payload(raw: bytes) -> tuple[bool, str]:
     if image.isNull():
         return False, "Invalid icon image"
     return True, ""
+
+
+class _LootPreviewListEventFilter(QObject):
+    def __init__(
+        self,
+        list_widget: QListWidget,
+        *,
+        show_preview: Callable[[QListWidgetItem, QPoint], None],
+        hide_preview: Callable[[], None],
+    ) -> None:
+        super().__init__(list_widget)
+        self._list_widget = list_widget
+        self._show_preview = show_preview
+        self._hide_preview = hide_preview
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is not self._list_widget.viewport():
+            return False
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseMove and isinstance(event, QMouseEvent):
+            pos = event.position().toPoint()
+            item = self._list_widget.itemAt(pos)
+            if item is None:
+                self._hide_preview()
+            else:
+                global_pos = self._list_widget.viewport().mapToGlobal(pos)
+                self._show_preview(item, global_pos)
+        elif event_type in (
+            QEvent.Type.Leave,
+            QEvent.Type.Hide,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonDblClick,
+            QEvent.Type.Wheel,
+        ):
+            self._hide_preview()
+        return False
 
 
 def _in_test_env() -> bool:
@@ -5954,7 +5991,7 @@ class DungeonAppletWidget(QWidget):
         self._loot_pool_item_cache[key] = item
         return item
 
-    def _fallback_loot_icon_pixmap(self, *, size: int = 28) -> QPixmap:
+    def _fallback_loot_icon_pixmap(self, *, size: int = 28, icon_path: str = "") -> QPixmap:
         icon_size = max(16, int(size))
         pixmap = QPixmap(icon_size, icon_size)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -5964,57 +6001,180 @@ class DungeonAppletWidget(QWidget):
         painter.setPen(QPen(QColor("#4b5563"), 1))
         painter.setBrush(QColor("#111827"))
         painter.drawRoundedRect(rect, 5.0, 5.0)
-        painter.setPen(QColor("#e5e7eb"))
-        font = QFont(painter.font())
-        font.setBold(True)
-        font.setPointSize(max(8, int(icon_size * 0.45)))
-        painter.setFont(font)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "?")
+        icon_pixmap = QPixmap(icon_path) if icon_path else QPixmap()
+        if isinstance(icon_pixmap, QPixmap) and not icon_pixmap.isNull():
+            inner_size = max(12, icon_size - 8)
+            scaled = icon_pixmap.scaled(
+                inner_size,
+                inner_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(
+                (icon_size - scaled.width()) // 2,
+                (icon_size - scaled.height()) // 2,
+                scaled,
+            )
+        else:
+            painter.setPen(QColor("#e5e7eb"))
+            font = QFont(painter.font())
+            font.setBold(True)
+            font.setPointSize(max(8, int(icon_size * 0.45)))
+            painter.setFont(font)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "?")
         painter.end()
         return pixmap
 
+    def _loot_pool_payload_for_entry(self, entry: dict) -> dict:
+        path = self._loot_pool_resolve_item_path(entry)
+        if path is not None:
+            payload = load_item_payload(path)
+            if isinstance(payload, dict):
+                return payload
+        item_document = entry.get("item_document")
+        payload = item_document.get("payload") if isinstance(item_document, dict) else {}
+        if isinstance(payload, dict):
+            return dict(payload)
+        return {}
+
     def _fallback_loot_preview_pixmap(self, entry: dict) -> QPixmap:
         width = 322
-        height = 136
+        height = 156
         dpr = max(1.0, float(self.devicePixelRatioF()))
         pixmap = QPixmap(int(round(width * dpr)), int(round(height * dpr)))
         pixmap.setDevicePixelRatio(dpr)
         pixmap.fill(Qt.GlobalColor.transparent)
+        payload = self._loot_pool_payload_for_entry(entry)
         title = _resolve_human_item_title(
             entry.get("item_id"),
-            title=entry.get("title"),
+            title=payload.get("title") or entry.get("title"),
+            name=payload.get("name") if isinstance(payload, dict) else "",
+            normalized_name=payload.get("normalized_item_name") if isinstance(payload, dict) else "",
             fallback="Unknown Item",
         )
-        subtitle = str(entry.get("item_id") or "").strip()
-        if _looks_generated_item_label(subtitle):
-            subtitle = ""
+        rarity_key = str(payload.get("rarity") or "").strip().lower()
+        accent = {
+            "common": QColor("#9ca3af"),
+            "uncommon": QColor("#22c55e"),
+            "rare": QColor("#3b82f6"),
+            "epic": QColor("#a855f7"),
+            "legendary": QColor("#f59e0b"),
+            "artifact": QColor("#14b8a6"),
+        }.get(rarity_key, QColor("#60a5fa"))
+        subtitle_parts: list[str] = []
+        if rarity_key:
+            subtitle_parts.append(rarity_key.title())
+        level_value = payload.get("level", payload.get("required_level"))
+        try:
+            level = max(1, int(level_value))
+        except (TypeError, ValueError):
+            level = 0
+        if level > 0:
+            subtitle_parts.append(f"Level {level}")
+        raw_category = payload.get("category", payload.get("categories"))
+        if isinstance(raw_category, (list, tuple, set)):
+            category_text = ", ".join(
+                str(part or "").strip().replace("_", " ").title()
+                for part in raw_category
+                if str(part or "").strip()
+            )
+        else:
+            category_text = str(raw_category or "").strip().replace("_", " ").title()
+        if category_text:
+            subtitle_parts.append(category_text)
+        subtitle = " | ".join(part for part in subtitle_parts if part)
+        description = " ".join(
+            str(payload.get("description") or payload.get("effect") or "").split()
+        )
+        item_id_text = str(entry.get("item_id") or "").strip()
+        if _looks_generated_item_label(item_id_text):
+            item_id_text = ""
+        icon_path = str(payload.get("icon_path") or payload.get("icon") or "").strip()
+        icon_pixmap = QPixmap(icon_path) if icon_path else QPixmap()
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         outer = QRectF(0.5, 0.5, float(width - 1), float(height - 1))
-        painter.setPen(QPen(QColor("#4b5563"), 1))
-        painter.setBrush(QColor("#111827"))
+        painter.setPen(QPen(QColor("#374151"), 1))
+        painter.setBrush(QColor("#0f172a"))
         painter.drawRoundedRect(outer, 10.0, 10.0)
+        painter.fillRect(QRectF(12.0, 12.0, 4.0, float(height - 24)), accent)
+
+        icon_rect = QRectF(20.0, 22.0, 72.0, 72.0)
+        painter.setPen(QPen(QColor("#475569"), 1))
+        painter.setBrush(QColor("#111827"))
+        painter.drawRoundedRect(icon_rect, 8.0, 8.0)
+        if isinstance(icon_pixmap, QPixmap) and not icon_pixmap.isNull():
+            scaled = icon_pixmap.scaled(
+                int(icon_rect.width()) - 12,
+                int(icon_rect.height()) - 12,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            draw_x = int(round(icon_rect.left() + (icon_rect.width() - scaled.width()) / 2.0))
+            draw_y = int(round(icon_rect.top() + (icon_rect.height() - scaled.height()) / 2.0))
+            painter.drawPixmap(draw_x, draw_y, scaled)
+        else:
+            fallback_icon = self._fallback_loot_icon_pixmap(size=int(icon_rect.width()) - 12)
+            draw_x = int(round(icon_rect.left() + (icon_rect.width() - fallback_icon.width()) / 2.0))
+            draw_y = int(round(icon_rect.top() + (icon_rect.height() - fallback_icon.height()) / 2.0))
+            painter.drawPixmap(draw_x, draw_y, fallback_icon)
+
+        text_left = 108.0
+        text_width = float(width) - text_left - 18.0
         painter.setPen(QColor("#e5e7eb"))
         title_font = QFont(painter.font())
         title_font.setBold(True)
-        title_font.setPointSize(11)
+        title_font.setPointSize(12)
         painter.setFont(title_font)
-        title_rect = QRectF(16.0, 16.0, float(width - 32), 44.0)
+        title_metrics = QFontMetrics(title_font)
+        title_rect = QRectF(text_left, 18.0, text_width, 28.0)
         painter.drawText(
             title_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            title,
+            title_metrics.elidedText(title, Qt.TextElideMode.ElideRight, int(title_rect.width())),
         )
         if subtitle:
-            painter.setPen(QColor("#9ca3af"))
+            painter.setPen(QColor("#93c5fd"))
             subtitle_font = QFont(painter.font())
             subtitle_font.setPointSize(9)
             painter.setFont(subtitle_font)
-            subtitle_rect = QRectF(16.0, 70.0, float(width - 32), 44.0)
+            subtitle_metrics = QFontMetrics(subtitle_font)
+            subtitle_rect = QRectF(text_left, 48.0, text_width, 18.0)
             painter.drawText(
                 subtitle_rect,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-                subtitle,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                subtitle_metrics.elidedText(
+                    subtitle,
+                    Qt.TextElideMode.ElideRight,
+                    int(subtitle_rect.width()),
+                ),
+            )
+        if description:
+            painter.setPen(QColor("#cbd5e1"))
+            body_font = QFont(painter.font())
+            body_font.setPointSize(9)
+            painter.setFont(body_font)
+            description_rect = QRectF(text_left, 72.0, text_width, 44.0)
+            painter.drawText(
+                description_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+                description,
+            )
+        if item_id_text:
+            painter.setPen(QColor("#64748b"))
+            id_font = QFont(painter.font())
+            id_font.setPointSize(8)
+            painter.setFont(id_font)
+            id_metrics = QFontMetrics(id_font)
+            id_rect = QRectF(20.0, 126.0, float(width - 40), 16.0)
+            painter.drawText(
+                id_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                id_metrics.elidedText(
+                    item_id_text,
+                    Qt.TextElideMode.ElideMiddle,
+                    int(id_rect.width()),
+                ),
             )
         painter.end()
         return pixmap
@@ -6031,7 +6191,16 @@ class DungeonAppletWidget(QWidget):
             self._loot_pool_icon_cache[key] = fallback
             return fallback
         item = self._loot_pool_item_for_entry(entry)
-        pixmap = _inventory_icon_pixmap(item) if item is not None else _missing_inventory_icon_pixmap()
+        if item is not None:
+            pixmap = _inventory_icon_pixmap(item)
+        else:
+            payload = self._loot_pool_payload_for_entry(entry)
+            icon_path = str(payload.get("icon_path") or payload.get("icon") or "").strip()
+            pixmap = (
+                self._fallback_loot_icon_pixmap(icon_path=icon_path)
+                if icon_path
+                else _missing_inventory_icon_pixmap()
+            )
         if not isinstance(pixmap, QPixmap) or pixmap.isNull():
             pixmap = self._fallback_loot_icon_pixmap()
         self._loot_pool_icon_cache[key] = pixmap
@@ -6082,6 +6251,24 @@ class DungeonAppletWidget(QWidget):
         tooltip = getattr(self, "_loot_pool_preview_tooltip", None)
         if tooltip is not None:
             tooltip.hide_preview()
+
+    def _install_loot_preview_tracking(self, list_widget: QListWidget) -> None:
+        viewport = list_widget.viewport()
+        list_widget.setMouseTracking(True)
+        viewport.setMouseTracking(True)
+        existing_filter = getattr(list_widget, "_loot_preview_filter", None)
+        if isinstance(existing_filter, QObject):
+            try:
+                viewport.removeEventFilter(existing_filter)
+            except RuntimeError:
+                pass
+        preview_filter = _LootPreviewListEventFilter(
+            list_widget,
+            show_preview=self._show_loot_pool_preview_for_item,
+            hide_preview=self._hide_loot_pool_preview,
+        )
+        viewport.installEventFilter(preview_filter)
+        setattr(list_widget, "_loot_preview_filter", preview_filter)
 
     def _update_loot_pool_badge(self) -> None:
         has_entries = bool(self._session_loot_pool)
@@ -10481,13 +10668,13 @@ class DungeonAppletWidget(QWidget):
                     message="DM rejected unknown loot item definitions. No items were transferred.",
                 )
                 return
-            imported_count, import_messages = self._import_linked_item_documents_to_dm_library(
+            _persisted_item_ids, unresolved_item_ids, import_messages = self._persist_item_documents_to_local_library(
                 unknown_entries_for_import,
                 overwrite_existing=True,
             )
             if import_messages:
                 self._append_server_log(f"[WARN] {' '.join(import_messages)}")
-            if imported_count < len(unknown_entries_for_import):
+            if unresolved_item_ids:
                 _send_loot_transfer_result(
                     ok=False,
                     message="Unable to persist unknown loot item definitions into DM storage.",
@@ -11704,6 +11891,7 @@ class DungeonAppletWidget(QWidget):
         list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         list_widget.setMouseTracking(True)
         list_widget.viewport().setMouseTracking(True)
+        self._install_loot_preview_tracking(list_widget)
         layout.addWidget(list_widget, 1)
 
         for preview_entry in preview_entries:
@@ -11805,14 +11993,20 @@ class DungeonAppletWidget(QWidget):
             )
             action = "import" if accepted else "dismiss"
         if action == "import":
-            imported_count, import_messages = self._import_linked_item_documents_to_dm_library(
+            persisted_item_ids, unresolved_item_ids, import_messages = self._persist_item_documents_to_local_library(
                 unresolved_entries,
                 overwrite_existing=True,
             )
             if import_messages:
                 self._append_server_log(f"[WARN] {' '.join(import_messages)}")
+            if unresolved_item_ids:
+                self._append_server_log(
+                    "[WARN] Unknown linked item definitions were not persisted into DM storage. "
+                    "The review prompt will reappear until persistence succeeds or is dismissed."
+                )
+                return
             self._append_server_log(
-                f"[INFO] Imported {imported_count} unknown linked item definition(s) into DM storage."
+                f"[INFO] Imported {len(persisted_item_ids)} unknown linked item definition(s) into DM storage."
             )
         else:
             self._append_server_log(
@@ -11992,6 +12186,45 @@ class DungeonAppletWidget(QWidget):
                 messages.append(f"Failed to import '{item_id}': {exc}")
         return imported, messages
 
+    def _persist_item_documents_to_local_library(
+        self,
+        entries: list[dict],
+        *,
+        overwrite_existing: bool = False,
+    ) -> tuple[list[str], list[str], list[str]]:
+        requested_item_ids: list[str] = []
+        seen_item_ids: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            item_id = str(entry.get("item_id") or "").strip()
+            if not item_id or item_id in seen_item_ids:
+                continue
+            seen_item_ids.add(item_id)
+            requested_item_ids.append(item_id)
+
+        _imported_count, messages = self._import_linked_item_documents_to_dm_library(
+            entries,
+            overwrite_existing=overwrite_existing,
+        )
+        persisted_item_ids: list[str] = []
+        unresolved_item_ids: list[str] = []
+        for item_id in requested_item_ids:
+            if self._linked_item_document_by_id(item_id) is not None:
+                persisted_item_ids.append(item_id)
+            else:
+                unresolved_item_ids.append(item_id)
+        if unresolved_item_ids:
+            preview = ", ".join(unresolved_item_ids[:3])
+            suffix = "..." if len(unresolved_item_ids) > 3 else ""
+            messages = list(messages)
+            messages.append(
+                "Unable to verify persistence for "
+                f"{len(unresolved_item_ids)} item definition(s) in the local item library: "
+                f"{preview}{suffix}"
+            )
+        return persisted_item_ids, unresolved_item_ids, list(messages)
+
     def _review_unknown_linked_items(
         self,
         *,
@@ -12046,6 +12279,7 @@ class DungeonAppletWidget(QWidget):
         list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         list_widget.setMouseTracking(True)
         list_widget.viewport().setMouseTracking(True)
+        self._install_loot_preview_tracking(list_widget)
         layout.addWidget(list_widget, 1)
 
         for entry in entries:
@@ -12209,20 +12443,22 @@ class DungeonAppletWidget(QWidget):
                     for entry in unresolved_entries
                     if str(entry.get("item_id") or "").strip() in selected_item_ids
                 ]
-                imported_count, import_messages = self._import_linked_item_documents_to_dm_library(
+                persisted_item_ids, unresolved_item_ids, import_messages = self._persist_item_documents_to_local_library(
                     selected_entries,
                     overwrite_existing=True,
                 )
                 if import_messages:
                     self._append_server_log(f"[WARN] {' '.join(import_messages)}")
-                if imported_count <= 0:
+                if unresolved_item_ids:
                     self._host_unknown_item_review_cache[review_cache_key] = {
                         "action": "blocked",
                         "selected_item_ids": sorted(selected_item_ids),
                         "signature": review_signature,
                     }
                     return "blocked", working_payload, "Linked item review is still unresolved."
-                status_note = "Imported selected linked items into the DM library."
+                status_note = (
+                    f"Imported {len(persisted_item_ids)} selected linked item(s) into the DM library."
+                )
                 continue
             self._host_unknown_item_review_cache[review_cache_key] = {
                 "action": "blocked",
@@ -12487,13 +12723,28 @@ class DungeonAppletWidget(QWidget):
         )
 
         if should_import:
-            _imported_count, import_messages = self._import_linked_item_documents_to_dm_library(
+            _persisted_item_ids, unresolved_item_ids, import_messages = self._persist_item_documents_to_local_library(
                 unknown_entries,
                 overwrite_existing=True,
             )
             if import_messages:
                 self._append_server_log(f"[WARN] {' '.join(import_messages)}")
-            return normalized, []
+            if not unresolved_item_ids:
+                return normalized, []
+            entries_to_convert = [
+                entry
+                for entry in unknown_entries
+                if str(entry.get("item_id") or "").strip() in set(unresolved_item_ids)
+            ]
+            converted_payload, notes = self._convert_unknown_inventory_items_to_notes(
+                normalized,
+                entries_to_convert,
+            )
+            self._append_server_log(
+                "[WARN] Some unknown synced items could not be copied into the local item library "
+                "and were converted into inventory notes instead."
+            )
+            return converted_payload, notes
         entries_to_convert = list(unknown_entries)
         converted_payload, notes = self._convert_unknown_inventory_items_to_notes(
             normalized,

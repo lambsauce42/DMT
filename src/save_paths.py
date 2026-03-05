@@ -150,6 +150,14 @@ def online_sessions_dir() -> Path:
     return dnd_saves_dir() / "online_sessions"
 
 
+def session_transcripts_dir() -> Path:
+    return dnd_saves_dir() / "session_transcripts"
+
+
+def session_transcript_dir(session_id: str) -> Path:
+    return session_transcripts_dir() / _safe_component(str(session_id or ""), "session")
+
+
 def online_session_dir(session_id: str) -> Path:
     safe = "".join(ch for ch in str(session_id).strip() if ch not in '<>:"/\\|?*').strip(" .")
     if not safe:

@@ -13,6 +13,10 @@ LOCAL_PLAYER_ID_KEY = "local_player_id"
 DEFAULT_APP_SETTINGS: dict[str, object] = {
     "session_autosave_enabled": False,
     LOCAL_PLAYER_ID_KEY: "",
+    "transcript_whisper_cli_path": "",
+    "transcript_whisper_model_path": "",
+    "recap_ollama_host": "http://127.0.0.1:11434",
+    "recap_ollama_model": "gpt-oss:20b",
 }
 
 

@@ -9,8 +9,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QGraphicsScene, QLabel, QLineEdit, QListWidget, QPushButton
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -1289,6 +1289,83 @@ def test_unknown_item_review_rows_show_icons_and_hover_preview(dungeon_widget, m
     assert preview_calls
 
 
+def test_unknown_item_prompt_hides_preview_when_cursor_leaves_list(dungeon_widget, monkeypatch):
+    events: list[str] = []
+
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_show_loot_pool_preview_for_item",
+        lambda _row, _pos: events.append("show"),
+    )
+    monkeypatch.setattr(dungeon_widget, "_hide_loot_pool_preview", lambda: events.append("hide"))
+
+    def _exec_with_leave(dialog):
+        list_widget = dialog.findChild(QListWidget)
+        assert list_widget is not None
+        QApplication.processEvents()
+        assert "show" in events
+        QApplication.sendEvent(list_widget.viewport(), QEvent(QEvent.Type.Leave))
+        QApplication.processEvents()
+        assert events[-1] == "hide"
+        for button in dialog.findChildren(QPushButton):
+            if button.text() == "Reject":
+                button.click()
+                break
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", _exec_with_leave, raising=False)
+    accepted = dungeon_widget._prompt_unknown_items_with_preview(
+        title="Unknown Loot Items",
+        heading="Unknown items",
+        details="Review unknown item definitions.",
+        entries=[
+            {
+                "item_id": "item_prompt_leave",
+                "title": "item_prompt_leave",
+                "item_document": build_item_document(
+                    {"item_id": "item_prompt_leave", "title": "Leave Test"},
+                    None,
+                ),
+            }
+        ],
+        accept_label="Accept",
+        reject_label="Reject",
+        default_accept=False,
+    )
+
+    assert accepted is False
+
+
+def test_unknown_item_preview_fallback_renders_embedded_icon(dungeon_widget, tmp_path):
+    icon_path = tmp_path / "unknown_preview_icon.png"
+    image = QImage(32, 32, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#ff0000"))
+    assert image.save(str(icon_path))
+
+    entry = dungeon_widget._unknown_item_preview_entries(
+        [
+            {
+                "item_id": "item_unknown_preview_icon",
+                "title": "item_unknown_preview_icon",
+                "item_document": build_item_document(
+                    {"item_id": "item_unknown_preview_icon", "title": "Broken Preview"},
+                    str(icon_path),
+                ),
+            }
+        ]
+    )[0]
+
+    assert dungeon_widget._loot_pool_item_for_entry(entry) is None
+    preview = dungeon_widget._loot_pool_preview_for_entry(entry)
+    assert preview is not None
+    assert not preview.isNull()
+    dpr = max(1.0, float(preview.devicePixelRatioF()))
+    sample = preview.toImage().pixelColor(int(round(52 * dpr)), int(round(52 * dpr)))
+    assert sample.red() > 150
+    assert sample.red() > sample.green()
+
+
 def test_host_start_failure_reverts_to_local_mode(dungeon_widget, monkeypatch):
     class _HostFailStub:
         def __init__(self):
@@ -2211,6 +2288,54 @@ def test_unknown_item_review_import_failure_is_deduplicated(dungeon_widget, monk
     assert first_status == "blocked"
     assert second_status == "blocked"
     assert len(review_calls) == 1
+
+
+def test_review_active_unknown_linked_items_for_dm_reprompts_after_failed_persistence(
+    dungeon_widget, monkeypatch
+):
+    prompt_calls: list[dict] = []
+    log_messages: list[str] = []
+
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_unknown_items_with_preview",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_import_linked_item_documents_to_dm_library",
+        lambda entries, *, overwrite_existing=False: (0, ["disk write failed"]),
+    )
+    monkeypatch.setattr(dungeon_widget, "_append_server_log", lambda message: log_messages.append(message))
+
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    inventory_payload = {
+        "inventory": [{"item_id": "item_unknown", "quantity": 1}],
+        "equipment": {},
+        "item_documents": {
+            "item_unknown": build_item_document(
+                {"item_id": "item_unknown", "title": "Unknown Blade"},
+                None,
+            )
+        },
+    }
+
+    dungeon_widget._review_active_unknown_linked_items_for_dm(
+        player_id="player-1",
+        character_id="character-1",
+        sheet_name="Hero",
+        inventory_payload=inventory_payload,
+    )
+    dungeon_widget._review_active_unknown_linked_items_for_dm(
+        player_id="player-1",
+        character_id="character-1",
+        sheet_name="Hero",
+        inventory_payload=inventory_payload,
+    )
+
+    assert len(prompt_calls) == 2
+    assert any("not persisted into DM storage" in message for message in log_messages)
 
 
 def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
@@ -3415,6 +3540,109 @@ def test_sync_local_sheet_inventory_converts_unknown_items_to_notes_on_player_re
     notes_text = str(synced_inventory.get("inventory_notes") or "")
     assert "unknown blade" in notes_text.lower()
     assert "unknown helm" in notes_text.lower()
+
+
+def test_sync_local_sheet_inventory_imports_unknown_items_to_local_storage_on_accept(
+    monkeypatch,
+    dungeon_widget,
+    tmp_path,
+):
+    calls = {}
+
+    def _apply_remote_inventory(character_id, sheet_name, inventory_payload, **kwargs):
+        calls["character_id"] = character_id
+        calls["sheet_name"] = sheet_name
+        calls["inventory_payload"] = dict(inventory_payload)
+        calls["kwargs"] = dict(kwargs)
+        return True, "Inventory synchronized.", dict(inventory_payload)
+
+    fake_module = types.SimpleNamespace(
+        apply_remote_character_package_for_character_id=_apply_remote_inventory,
+        character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
+    )
+    monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: tmp_path)
+    monkeypatch.setattr(dungeon_widget, "_prompt_unknown_items_with_preview", lambda **_kwargs: True)
+
+    ok, message = dungeon_widget._sync_local_sheet_inventory_from_host(
+        "sheet-1",
+        {
+            "inventory": [{"item_id": "item_unknown", "quantity": 2}],
+            "equipment": {},
+            "item_documents": {
+                "item_unknown": build_item_document(
+                    {
+                        "item_id": "item_unknown",
+                        "title": "Unknown Blade",
+                        "rarity": "common",
+                        "level": 1,
+                        "category": "equipment",
+                    },
+                    None,
+                ),
+            },
+        },
+        sheet_name="Hero Name",
+        refresh_entities=False,
+    )
+
+    assert ok is True
+    assert "synchronized" in message.lower()
+    assert calls["character_id"] == "character-sheet-1"
+    synced_inventory = calls["inventory_payload"]
+    assert synced_inventory["inventory"][0]["item_id"] == "item_unknown"
+
+    stored_item_ids = []
+    for item_path in tmp_path.rglob("*.dmtitem"):
+        payload = load_item_payload(item_path)
+        if isinstance(payload, dict):
+            stored_item_ids.append(str(payload.get("item_id") or ""))
+    assert "item_unknown" in stored_item_ids
+
+
+def test_takeover_filter_keeps_items_that_exist_in_dm_library(
+    monkeypatch,
+    dungeon_widget,
+    tmp_path,
+):
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: tmp_path)
+    write_item_document(
+        tmp_path / "item_unknown.dmtitem",
+        build_item_document(
+            {
+                "item_id": "item_unknown",
+                "title": "Unknown Blade",
+                "rarity": "common",
+                "level": 1,
+                "category": "equipment",
+            },
+            None,
+        ),
+    )
+
+    _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "entity-1",
+            "player-2",
+            linked_sheet_id="sheet-1",
+            linked_character_id="character-1",
+            linked_inventory={
+                "inventory": [{"item_id": "item_unknown", "quantity": 1}],
+                "equipment": {},
+                "item_documents": {},
+            },
+        ),
+        load_state=True,
+    )
+
+    entity = dungeon_widget._find_entity_by_id("entity-1")
+    assert entity is not None
+
+    dungeon_widget._apply_takeover_filter_for_entity(entity)
+
+    linked_inventory = dungeon_widget._dungeons[0]["state"]["items"][0]["linked_inventory"]
+    assert linked_inventory["inventory"][0]["item_id"] == "item_unknown"
 
 
 def test_build_collection_payload_strips_linked_inventory_item_documents(monkeypatch, dungeon_widget):
