@@ -10,7 +10,6 @@ DEFAULT_SAVE_DIR_FALLBACK_PARTS = ("documents", "DMT")
 LEGACY_NESTED_DND_DIR_NAME = "DMT_saves"
 DEBUG_SAVE_PROFILE_ENV = "DMT_SAVE_PROFILE"
 DEBUG_SAVE_PROFILES = ("DEBUG1", "DEBUG2")
-_RESET_DEBUG_SAVE_DIRS: set[Path] = set()
 _WARNED_INVALID_DEBUG_PROFILES: set[str] = set()
 
 
@@ -56,23 +55,6 @@ def _debug_save_dir_for_profile(profile: str) -> Path:
     return base_dir.parent / f"{profile}_{base_dir.name}"
 
 
-def _reset_debug_save_dir_once(path: Path) -> None:
-    marker = path.resolve()
-    if marker in _RESET_DEBUG_SAVE_DIRS:
-        return
-    _RESET_DEBUG_SAVE_DIRS.add(marker)
-    try:
-        if path.exists():
-            shutil.rmtree(path, ignore_errors=True)
-        path.mkdir(parents=True, exist_ok=True)
-        print(f"Reset DMT debug save directory: {path}")
-    except Exception as exc:
-        print(f"Failed to reset DMT debug save directory {path}: {exc}")
-
-
-
-
-
 def default_dnd_save_dir() -> str:
     if _in_test_env():
         override = str(os.environ.get("DMT_TEST_SAVE_DIR") or "").strip()
@@ -83,7 +65,10 @@ def default_dnd_save_dir() -> str:
     profile = _selected_debug_save_profile()
     if profile:
         debug_dir = _debug_save_dir_for_profile(profile)
-        _reset_debug_save_dir_once(debug_dir)
+        try:
+            debug_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            print(f"Failed to create DMT debug save directory {debug_dir}: {exc}")
         return str(debug_dir)
 
     return str(_default_user_dnd_save_dir())

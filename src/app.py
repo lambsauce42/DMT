@@ -3,8 +3,11 @@ from __future__ import annotations
 import copy
 import json
 import os
+import traceback
 import sys
 import time
+import faulthandler
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -64,7 +67,12 @@ from compact_nav_tree import CompactNavTree
 from npc_database import NPCDatabaseWidget
 from player_sheets import PlayerSheetsWidget, refresh_character_sheet_index_cache
 from session_creator import SessionCreatorWidget
-from save_paths import dungeon_collections_dir, clear_all_online_runtime_caches
+from save_paths import (
+    dungeon_collections_dir,
+    clear_all_online_runtime_caches,
+    dnd_saves_dir,
+    default_dnd_save_dir,
+)
 from tab_workspace import TabWorkspaceController, WorkspaceTabsHost
 from ui.encounter_panel import EncounterPanel
 from user_settings import (
@@ -74,6 +82,12 @@ from user_settings import (
 )
 
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
+ONLINE_LAUNCH_LOG_FILENAME = "dmt_online_launch.log"
+APP_CRASH_LOG_FILENAME = "dmt_app_crash.log"
+_CRASH_LOG_HANDLE: Optional[object] = None
+_CRASH_LOG_INSTANCE_PATH: Optional[Path] = None
+_ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
+_ORIGINAL_THREADING_EXCEPTHOOK = getattr(threading, "excepthook", None)
 
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -1358,22 +1372,84 @@ class AppletLoadingOverlay(QWidget):
 
 def build_applet_widget(parent: QWidget, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
     if str(key).startswith("online_host::"):
-        widget = DungeonAppletWidget(parent)
+        widget: Optional[DungeonAppletWidget] = None
         online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
         port = int(online_cfg.get("port", 8765))
         collection_path = str(online_cfg.get("collection_path") or "").strip()
-        started = widget.start_online_host(port, collection_path or None)
-        if not started:
-            widget.deleteLater()
+        _append_online_launch_log(
+            "online_host_launch_begin",
+            key=str(key),
+            port=int(port),
+            collection_path=collection_path,
+        )
+        try:
+            widget = DungeonAppletWidget(parent)
+            started = widget.start_online_host(port, collection_path or None)
+        except Exception as exc:
+            _append_online_launch_log(
+                "online_host_launch_exception",
+                key=str(key),
+                port=int(port),
+                collection_path=collection_path,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            if widget is not None:
+                widget.deleteLater()
             return None
+        if not started:
+            _append_online_launch_log(
+                "online_host_launch_failed",
+                key=str(key),
+                port=int(port),
+                collection_path=collection_path,
+            )
+            if widget is not None:
+                widget.deleteLater()
+            return None
+        _append_online_launch_log(
+            "online_host_launch_ok",
+            key=str(key),
+            port=int(port),
+            collection_path=collection_path,
+        )
         return widget
     if str(key).startswith("online_join::"):
-        widget = DungeonAppletWidget(parent)
+        widget: Optional[DungeonAppletWidget] = None
         online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
         host_ip = str(online_cfg.get("host_ip") or "").strip()
         port = int(online_cfg.get("port", 8765))
         player_name = str(online_cfg.get("player_name") or "Player").strip() or "Player"
-        widget.join_online_session(host_ip, port, player_name)
+        _append_online_launch_log(
+            "online_join_launch_begin",
+            key=str(key),
+            host_ip=host_ip,
+            port=int(port),
+            player_name=player_name,
+        )
+        try:
+            widget = DungeonAppletWidget(parent)
+            widget.join_online_session(host_ip, port, player_name)
+        except Exception as exc:
+            _append_online_launch_log(
+                "online_join_launch_exception",
+                key=str(key),
+                host_ip=host_ip,
+                port=int(port),
+                player_name=player_name,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            if widget is not None:
+                widget.deleteLater()
+            return None
+        _append_online_launch_log(
+            "online_join_launch_ok",
+            key=str(key),
+            host_ip=host_ip,
+            port=int(port),
+            player_name=player_name,
+        )
         return widget
     if key == "item_creator":
         return ItemCreatorWidget(parent)
@@ -1397,6 +1473,142 @@ def build_applet_widget(parent: QWidget, key: str, applet: Dict[str, object]) ->
         applet["panels"],
         parent,
     )
+
+
+def _online_launch_log_path() -> Path:
+    try:
+        return dnd_saves_dir() / "cache" / "logs" / ONLINE_LAUNCH_LOG_FILENAME
+    except Exception:
+        return Path(default_dnd_save_dir()) / "cache" / "logs" / ONLINE_LAUNCH_LOG_FILENAME
+
+
+def _instance_log_path(base_path: Path) -> Path:
+    return base_path.with_name(f"{base_path.stem}_pid{os.getpid()}{base_path.suffix}")
+
+
+def _append_json_line(path: Path, payload: dict[str, object], *, warn_prefix: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True))
+            handle.write("\n")
+    except Exception as exc:
+        print(f"[WARN] {warn_prefix}: {exc}", file=sys.stderr)
+
+
+def _append_online_launch_log(event: str, **fields: object) -> None:
+    payload: dict[str, object] = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "pid": os.getpid(),
+        "event": str(event or "unknown"),
+    }
+    for key, value in fields.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            payload[str(key)] = value
+        else:
+            payload[str(key)] = str(value)
+    shared_path = _online_launch_log_path()
+    instance_path = _instance_log_path(shared_path)
+    _append_json_line(shared_path, payload, warn_prefix="Failed to write online launch log")
+    if instance_path != shared_path:
+        _append_json_line(instance_path, payload, warn_prefix="Failed to write instance online launch log")
+
+
+def _app_crash_log_path() -> Path:
+    try:
+        return dnd_saves_dir() / "cache" / "logs" / APP_CRASH_LOG_FILENAME
+    except Exception:
+        return Path(default_dnd_save_dir()) / "cache" / "logs" / APP_CRASH_LOG_FILENAME
+
+
+def _app_crash_instance_log_path() -> Path:
+    return _instance_log_path(_app_crash_log_path())
+
+
+def _append_app_crash_log(event: str, **fields: object) -> None:
+    payload: dict[str, object] = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "pid": os.getpid(),
+        "event": str(event or "unknown"),
+        "argv": list(sys.argv),
+        "cwd": str(Path.cwd()),
+    }
+    for key, value in fields.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            payload[str(key)] = value
+        else:
+            payload[str(key)] = str(value)
+    try:
+        global _CRASH_LOG_HANDLE, _CRASH_LOG_INSTANCE_PATH
+        handle = _CRASH_LOG_HANDLE
+        if handle is None:
+            instance_path = _app_crash_instance_log_path()
+            _append_json_line(
+                instance_path,
+                payload,
+                warn_prefix="Failed to write instance app crash log",
+            )
+        else:
+            handle.write(json.dumps(payload, ensure_ascii=True))
+            handle.write("\n")
+            handle.flush()
+        shared_path = _app_crash_log_path()
+        if _CRASH_LOG_INSTANCE_PATH is None or shared_path != _CRASH_LOG_INSTANCE_PATH:
+            _append_json_line(
+                shared_path,
+                payload,
+                warn_prefix="Failed to write app crash log",
+            )
+    except Exception as exc:
+        print(f"[WARN] Failed to write app crash log: {exc}", file=sys.stderr)
+
+
+def _install_crash_logging() -> None:
+    global _CRASH_LOG_HANDLE, _CRASH_LOG_INSTANCE_PATH
+    if _CRASH_LOG_HANDLE is None:
+        _CRASH_LOG_INSTANCE_PATH = _app_crash_instance_log_path()
+        _CRASH_LOG_INSTANCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CRASH_LOG_HANDLE = _CRASH_LOG_INSTANCE_PATH.open("a", encoding="utf-8")
+    handle = _CRASH_LOG_HANDLE
+    try:
+        if not faulthandler.is_enabled():
+            faulthandler.enable(handle, all_threads=True)
+    except Exception as exc:
+        print(f"[WARN] Failed to enable faulthandler: {exc}", file=sys.stderr)
+        _append_app_crash_log(
+            "crash_logging_faulthandler_enable_failed",
+            error=str(exc),
+        )
+
+    def _sys_excepthook(exc_type, exc_value, exc_traceback):
+        _append_app_crash_log(
+            "uncaught_exception",
+            exception_type=getattr(exc_type, "__name__", str(exc_type)),
+            error=str(exc_value or ""),
+            traceback="".join(traceback.format_exception(exc_type, exc_value, exc_traceback)),
+        )
+        _ORIGINAL_SYS_EXCEPTHOOK(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = _sys_excepthook
+
+    if _ORIGINAL_THREADING_EXCEPTHOOK is not None and hasattr(threading, "excepthook"):
+        def _threading_excepthook(args):
+            _append_app_crash_log(
+                "uncaught_thread_exception",
+                thread_name=str(getattr(getattr(args, "thread", None), "name", "")),
+                exception_type=getattr(getattr(args, "exc_type", None), "__name__", str(getattr(args, "exc_type", ""))),
+                error=str(getattr(args, "exc_value", "") or ""),
+                traceback="".join(
+                    traceback.format_exception(
+                        getattr(args, "exc_type", None),
+                        getattr(args, "exc_value", None),
+                        getattr(args, "exc_traceback", None),
+                    )
+                ),
+            )
+            _ORIGINAL_THREADING_EXCEPTHOOK(args)
+
+        threading.excepthook = _threading_excepthook
 
 
 class _WorkspaceTabWindow(QMainWindow):
@@ -1441,7 +1653,21 @@ class _WorkspaceTabWindow(QMainWindow):
         spinner = self._loading_overlay._spinner
         if not spinner._timer.isActive():
             return self._build_applet_widget(key, applet)
+        if self._skip_animation_pump_for_applet(key):
+            return self._build_applet_widget(key, applet)
         return self._build_applet_widget_with_animation_pump(key, applet)
+
+    def _skip_animation_pump_for_applet(self, key: str) -> bool:
+        clean_key = str(key or "")
+        # Avoid re-entrant QApplication.processEvents() while constructing
+        # heavy online dungeon widgets; this has caused native crashes in practice.
+        if clean_key.startswith("online_host::"):
+            return True
+        if clean_key.startswith("online_join::"):
+            return True
+        if clean_key == "dungeon_creator":
+            return True
+        return False
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -1823,6 +2049,7 @@ class HomeWidget(QWidget):
             self._grid_layout.setRowStretch(row, 1)
 
     def _host_dungeon_collection(self) -> None:
+        _append_online_launch_log("home_host_prompt_opened")
         base_dir = dungeon_collections_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
         filename, _ = QFileDialog.getOpenFileName(
@@ -1832,6 +2059,7 @@ class HomeWidget(QWidget):
             f"Dungeon Collection (*{COLLECTION_FILE_EXTENSION})",
         )
         if not filename:
+            _append_online_launch_log("home_host_prompt_cancelled_file")
             return
         port, ok = QInputDialog.getInt(
             self,
@@ -1843,8 +2071,18 @@ class HomeWidget(QWidget):
             1,
         )
         if not ok:
+            _append_online_launch_log(
+                "home_host_prompt_cancelled_port",
+                collection_path=str(filename),
+            )
             return
         collection_name = Path(filename).stem or "Collection"
+        _append_online_launch_log(
+            "home_host_applet_queued",
+            collection_path=str(filename),
+            port=int(port),
+            collection_name=str(collection_name),
+        )
         key = f"online_host::{port}::{collection_name}::{int(datetime.now().timestamp())}"
         applet = {
             "key": key,
@@ -1861,6 +2099,7 @@ class HomeWidget(QWidget):
         self._on_open(applet, True)
 
     def _join_dungeon_by_ip(self) -> None:
+        _append_online_launch_log("home_join_prompt_opened")
         host_ip, ok = QInputDialog.getText(
             self,
             "Join by IP",
@@ -1868,9 +2107,11 @@ class HomeWidget(QWidget):
             text="127.0.0.1",
         )
         if not ok:
+            _append_online_launch_log("home_join_prompt_cancelled_host")
             return
         host_ip = host_ip.strip()
         if not host_ip:
+            _append_online_launch_log("home_join_prompt_rejected_blank_host")
             QMessageBox.warning(self, "Join by IP", "Host IP is required.")
             return
         port, ok = QInputDialog.getInt(
@@ -1883,6 +2124,10 @@ class HomeWidget(QWidget):
             1,
         )
         if not ok:
+            _append_online_launch_log(
+                "home_join_prompt_cancelled_port",
+                host_ip=host_ip,
+            )
             return
         default_name = "Player"
         player_name, ok = QInputDialog.getText(
@@ -1892,11 +2137,27 @@ class HomeWidget(QWidget):
             text=default_name,
         )
         if not ok:
+            _append_online_launch_log(
+                "home_join_prompt_cancelled_name",
+                host_ip=host_ip,
+                port=int(port),
+            )
             return
         player_name = player_name.strip()
         if not player_name:
+            _append_online_launch_log(
+                "home_join_prompt_rejected_blank_name",
+                host_ip=host_ip,
+                port=int(port),
+            )
             QMessageBox.warning(self, "Join by IP", "Player name is required.")
             return
+        _append_online_launch_log(
+            "home_join_applet_queued",
+            host_ip=host_ip,
+            port=int(port),
+            player_name=str(player_name),
+        )
         key = f"online_join::{host_ip}:{port}::{player_name}::{int(datetime.now().timestamp())}"
         applet = {
             "key": key,
@@ -2004,19 +2265,31 @@ class HomeWidget(QWidget):
 
 
 def main() -> int:
-
+    _install_crash_logging()
+    _append_app_crash_log("app_main_enter")
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     clear_all_online_runtime_caches()
     try:
         refresh_character_sheet_index_cache()
     except Exception:
         pass
-    app = QApplication(sys.argv)
-    app.setApplicationName("DMT")
-    app.setStyleSheet(DARK_STYLESHEET)
-    window = MainLauncherWindow()
-    window.show()
-    return app.exec()
+    try:
+        app = QApplication(sys.argv)
+        app.setApplicationName("DMT")
+        app.setStyleSheet(DARK_STYLESHEET)
+        window = MainLauncherWindow()
+        window.show()
+        _append_app_crash_log("app_event_loop_enter")
+        exit_code = int(app.exec())
+        _append_app_crash_log("app_event_loop_exit", exit_code=exit_code)
+        return exit_code
+    except Exception as exc:
+        _append_app_crash_log(
+            "app_main_exception",
+            error=str(exc),
+            traceback=traceback.format_exc(),
+        )
+        raise
 
 
 if __name__ == "__main__":

@@ -1,15 +1,22 @@
 import os
 import sys
+import json
 
 import pytest
-from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QWidget
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from app import HomeWidget, MainLauncherWindow, APPLET_DEFINITIONS
+from app import (
+    HomeWidget,
+    MainLauncherWindow,
+    APPLET_DEFINITIONS,
+    build_applet_widget,
+    _append_online_launch_log,
+)
 from user_settings import is_session_autosave_enabled, load_app_settings
 
 
@@ -222,3 +229,93 @@ def test_home_widget_creates_and_reuses_launcher_player_id(qapp):
 
     second = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
     assert str(second._local_player_id) == first_id
+
+
+def test_online_join_launch_exception_writes_diagnostics_log(monkeypatch, qapp, tmp_path):
+    _ = qapp
+    log_path = tmp_path / "online_launch.log"
+    deleted = []
+
+    class _ExplodingDungeonWidget:
+        def __init__(self, parent=None):
+            _ = parent
+
+        def join_online_session(self, host_ip, port, player_name):
+            _ = (host_ip, port, player_name)
+            raise RuntimeError("join boom")
+
+        def deleteLater(self):
+            deleted.append(True)
+
+    monkeypatch.setattr("app._online_launch_log_path", lambda: log_path)
+    monkeypatch.setattr("app.DungeonAppletWidget", _ExplodingDungeonWidget)
+
+    result = build_applet_widget(
+        QWidget(),
+        "online_join::127.0.0.1:8765::Mira::123",
+        {
+            "key": "online_join::127.0.0.1:8765::Mira::123",
+            "online": {"host_ip": "127.0.0.1", "port": 8765, "player_name": "Mira"},
+        },
+    )
+
+    assert result is None
+    assert deleted == [True]
+    lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    events = [str(line.get("event") or "") for line in lines]
+    assert "online_join_launch_begin" in events
+    assert "online_join_launch_exception" in events
+    exception_row = next(row for row in lines if row.get("event") == "online_join_launch_exception")
+    assert "join boom" in str(exception_row.get("error") or "")
+    assert "RuntimeError" in str(exception_row.get("traceback") or "")
+
+
+def test_online_host_launch_failed_writes_diagnostics_log(monkeypatch, qapp, tmp_path):
+    _ = qapp
+    log_path = tmp_path / "online_launch.log"
+    deleted = []
+
+    class _HostFailDungeonWidget:
+        def __init__(self, parent=None):
+            _ = parent
+
+        def start_online_host(self, port, collection_path):
+            _ = (port, collection_path)
+            return False
+
+        def deleteLater(self):
+            deleted.append(True)
+
+    monkeypatch.setattr("app._online_launch_log_path", lambda: log_path)
+    monkeypatch.setattr("app.DungeonAppletWidget", _HostFailDungeonWidget)
+
+    result = build_applet_widget(
+        QWidget(),
+        "online_host::8765::Collection::123",
+        {
+            "key": "online_host::8765::Collection::123",
+            "online": {"port": 8765, "collection_path": "/tmp/test.dmtcollection"},
+        },
+    )
+
+    assert result is None
+    assert deleted == [True]
+    lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    events = [str(line.get("event") or "") for line in lines]
+    assert "online_host_launch_begin" in events
+    assert "online_host_launch_failed" in events
+
+
+def test_online_launch_log_is_written_to_shared_and_instance_files(monkeypatch, qapp, tmp_path):
+    _ = qapp
+    shared_path = tmp_path / "dmt_online_launch.log"
+    monkeypatch.setattr("app._online_launch_log_path", lambda: shared_path)
+
+    _append_online_launch_log("instance_file_probe", probe=True)
+
+    pid = os.getpid()
+    instance_path = tmp_path / f"dmt_online_launch_pid{pid}.log"
+    assert shared_path.exists()
+    assert instance_path.exists()
+    assert "instance_file_probe" in shared_path.read_text(encoding="utf-8")
+    assert "instance_file_probe" in instance_path.read_text(encoding="utf-8")

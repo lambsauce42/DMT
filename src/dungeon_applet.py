@@ -4398,6 +4398,18 @@ class DungeonAppletWidget(QWidget):
         self._pending_unlink_entity_requests: dict[str, dict] = {}
         self._host_unknown_item_review_cache: dict[str, dict] = {}
         self._suppress_client_disconnect_handler: bool = False
+        self._join_retry_prompt_open: bool = False
+        self._reconnect_status_dialog: QDialog | None = None
+        self._reconnect_status_label: QLabel | None = None
+        self._reconnect_retry_button: QPushButton | None = None
+        self._reconnect_dismiss_button: QPushButton | None = None
+        self._reconnect_status_message_base: str = ""
+        self._reconnect_status_animate: bool = False
+        self._reconnect_status_dot_count: int = 1
+        self._reconnect_status_anim_timer = QTimer(self)
+        self._reconnect_status_anim_timer.setSingleShot(False)
+        self._reconnect_status_anim_timer.setInterval(420)
+        self._reconnect_status_anim_timer.timeout.connect(self._on_reconnect_status_animation_tick)
         self._debug_instance_id: str = uuid.uuid4().hex[:8]
         self._debug_log_enabled: bool = str(
             os.environ.get("DMT_ONLINE_DEBUG_LOG", "0")
@@ -4480,10 +4492,6 @@ class DungeonAppletWidget(QWidget):
         layout.setSpacing(0)
         layout.setRowStretch(0, 1)
         self._app = QApplication.instance()
-        if self._app is not None:
-            self._app.installEventFilter(self)
-            self.destroyed.connect(self._remove_app_event_filter)
-        self._debug_log("widget_init", app_event_filter=bool(self._app is not None))
 
         # 1. The Canvas
         self.canvas = DungeonCanvas(self)
@@ -4787,6 +4795,10 @@ class DungeonAppletWidget(QWidget):
         # before centering, otherwise centerOn(0,0) might not work correctly.
         self.coord_label.setText("Centering...")
         QTimer.singleShot(250, self.canvas.reset_view)
+        if self._app is not None:
+            self._app.installEventFilter(self)
+            self.destroyed.connect(self._remove_app_event_filter)
+        self._debug_log("widget_init", app_event_filter=bool(self._app is not None))
 
     def start_online_host(self, port: int, collection_path: str | None = None) -> bool:
         self._debug_log(
@@ -4857,13 +4869,28 @@ class DungeonAppletWidget(QWidget):
         self._broadcast_snapshot_if_host()
         return True
 
-    def join_online_session(self, host_ip: str, port: int, player_name: str) -> None:
+    def join_online_session(
+        self,
+        host_ip: str,
+        port: int,
+        player_name: str,
+        persistent_player_id: str | None = None,
+    ) -> None:
         requested_player_name = str(player_name or "").strip() or "Player"
+        requested_persistent_player_id = str(
+            persistent_player_id or self._persistent_local_player_id or ""
+        ).strip()
+        if not requested_persistent_player_id:
+            requested_persistent_player_id = generate_probabilistic_unique_id("player")
+            self._append_server_log(
+                "[WARN] Missing local player identity. Generated a temporary identity for this join."
+            )
         self._debug_log(
             "join_online_session_begin",
             host_ip=str(host_ip),
             port=int(port),
             player_name=str(requested_player_name or ""),
+            persistent_player_id=str(requested_persistent_player_id or ""),
         )
         previous_runtime_cache_id = str(self._online_runtime_cache_id or "")
         self._session_loot_pool = []
@@ -4873,6 +4900,7 @@ class DungeonAppletWidget(QWidget):
         self._loot_claim_finalize_response_cache.clear()
         self._pending_loot_claim_rollbacks.clear()
         self._pending_add_loot_from_inventory_requests.clear()
+        self._hide_reconnect_status_dialog()
         self._initiative_state = {
             "active": False,
             "collapsed": False,
@@ -4894,7 +4922,7 @@ class DungeonAppletWidget(QWidget):
         self._host_port = int(port)
         self._local_player_name = requested_player_name
         self._local_profile["last_player_name"] = self._local_player_name
-        self._remember_known_player(self._persistent_local_player_id, self._local_player_name)
+        self._remember_known_player(requested_persistent_player_id, self._local_player_name)
         self._save_local_profile()
         self._local_player_id = None
         self._player_connection_ready = False
@@ -4917,6 +4945,7 @@ class DungeonAppletWidget(QWidget):
             self._client_controller.command_result.connect(self._on_client_command_result)
             self._client_controller.icon_asset_received.connect(self._on_client_icon_asset)
             self._client_controller.ping_received.connect(self._on_network_ping_received)
+            self._client_controller.reconnect_state_changed.connect(self._on_client_reconnect_state_changed)
             self._client_controller.client.hello_ack.connect(self._on_client_hello_ack)
         else:
             existing_client = getattr(self._client_controller, "client", None)
@@ -4932,7 +4961,7 @@ class DungeonAppletWidget(QWidget):
             host_ip,
             int(port),
             self._local_player_name,
-            persistent_player_id=self._persistent_local_player_id,
+            persistent_player_id=requested_persistent_player_id,
         )
 
     def _clear_online_runtime_cache(self, session_id: str | None = None) -> None:
@@ -5016,6 +5045,7 @@ class DungeonAppletWidget(QWidget):
             if bool(self._session_loot_pool) and self._loot_pool_panel.isHidden():
                 self._loot_pool_has_unseen_updates = True
         else:
+            self._hide_reconnect_status_dialog()
             self._loot_pool_has_unseen_updates = False
             self._player_connection_ready = False
             self._awaiting_player_snapshot = False
@@ -7481,6 +7511,42 @@ class DungeonAppletWidget(QWidget):
             silent=silent,
         ) is not None
 
+    def _dispatch_player_link_character_request(self, request_payload: dict) -> bool:
+        payload = dict(request_payload) if isinstance(request_payload, dict) else {}
+        request_id = self._dispatch_player_command_with_request_id(
+            "link_character_entity",
+            payload,
+            silent=True,
+        )
+        if not request_id:
+            return False
+        self._pending_link_entity_requests[request_id] = payload
+        return True
+
+    def _dispatch_player_unlink_character_request(self, request_payload: dict) -> bool:
+        payload = dict(request_payload) if isinstance(request_payload, dict) else {}
+        request_id = self._dispatch_player_command_with_request_id(
+            "unlink_character_entity",
+            payload,
+            silent=True,
+        )
+        if not request_id:
+            return False
+        self._pending_unlink_entity_requests[request_id] = payload
+        return True
+
+    def _has_pending_character_link_resolution_for_entity(self, entity_id: str) -> bool:
+        clean_entity = str(entity_id or "").strip()
+        if not clean_entity:
+            return False
+        for payload in self._pending_link_entity_requests.values():
+            if str(payload.get("entity_id") or "").strip() == clean_entity:
+                return True
+        for payload in self._pending_unlink_entity_requests.values():
+            if str(payload.get("entity_id") or "").strip() == clean_entity:
+                return True
+        return False
+
     def _queue_pending_player_state_update(self, payload: dict) -> None:
         if not isinstance(payload, dict):
             return
@@ -7939,9 +8005,180 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode == ONLINE_MODE_PLAYER:
             self._apply_online_permissions()
 
+    def _ensure_reconnect_status_dialog(self) -> QDialog:
+        if self._reconnect_status_dialog is not None:
+            return self._reconnect_status_dialog
+        dialog = QDialog(self)
+        dialog.setModal(False)
+        dialog.setWindowTitle("Connection Lost")
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        label = QLabel(
+            "Connection lost. Trying to reconnect...",
+            dialog,
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
+
+        retry_button = QPushButton("Retry Reconnect", dialog)
+        retry_button.setObjectName("SecondaryButton")
+        retry_button.setMinimumHeight(36)
+        retry_button.setMinimumWidth(150)
+        retry_button.clicked.connect(self._on_reconnect_dialog_retry_clicked)
+        actions.addWidget(retry_button)
+
+        dismiss_button = QPushButton("Dismiss", dialog)
+        dismiss_button.setObjectName("SecondaryButton")
+        dismiss_button.setMinimumHeight(36)
+        dismiss_button.setMinimumWidth(150)
+        dismiss_button.clicked.connect(self._hide_reconnect_status_dialog)
+        actions.addWidget(dismiss_button)
+
+        layout.addLayout(actions)
+
+        self._reconnect_status_dialog = dialog
+        self._reconnect_status_label = label
+        self._reconnect_retry_button = retry_button
+        self._reconnect_dismiss_button = dismiss_button
+        return dialog
+
+    def _refresh_reconnect_status_label(self) -> None:
+        label = self._reconnect_status_label
+        if label is None:
+            return
+        base = str(self._reconnect_status_message_base or "").strip() or "Connection lost. Trying to reconnect"
+        if not self._reconnect_status_animate:
+            label.setText(base)
+            return
+        dots = "." * max(1, min(3, int(self._reconnect_status_dot_count)))
+        label.setText(f"{base}{dots}")
+
+    def _on_reconnect_status_animation_tick(self) -> None:
+        if not self._reconnect_status_animate:
+            return
+        if self._reconnect_status_dialog is not None and not self._reconnect_status_dialog.isVisible():
+            self._reconnect_status_anim_timer.stop()
+            return
+        self._reconnect_status_dot_count = 1 if self._reconnect_status_dot_count >= 3 else self._reconnect_status_dot_count + 1
+        self._refresh_reconnect_status_label()
+
+    def _show_reconnect_status_dialog(
+        self,
+        message: str,
+        *,
+        allow_retry: bool,
+        animate_waiting: bool,
+    ) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return
+        dialog = self._ensure_reconnect_status_dialog()
+        self._reconnect_status_message_base = str(message or "Connection lost. Trying to reconnect").strip()
+        self._reconnect_status_animate = bool(animate_waiting)
+        self._reconnect_status_dot_count = 1
+        self._refresh_reconnect_status_label()
+        retry_button = self._reconnect_retry_button
+        if retry_button is not None:
+            retry_button.setEnabled(bool(allow_retry))
+            retry_button.setText("Retry Reconnect")
+        if self._reconnect_status_animate:
+            self._reconnect_status_anim_timer.start()
+        else:
+            self._reconnect_status_anim_timer.stop()
+        if not dialog.isVisible():
+            dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _hide_reconnect_status_dialog(self) -> None:
+        self._reconnect_status_anim_timer.stop()
+        self._reconnect_status_animate = False
+        self._reconnect_status_message_base = ""
+        self._reconnect_status_dot_count = 1
+        if self._reconnect_status_dialog is not None:
+            self._reconnect_status_dialog.hide()
+
+    def _on_reconnect_dialog_retry_clicked(self) -> None:
+        controller = self._client_controller
+        if controller is None:
+            self._append_server_log("[WARN] Reconnect retry unavailable: no client controller.")
+            return
+        retry = getattr(controller, "retry_reconnect", None)
+        if not callable(retry):
+            self._append_server_log("[WARN] Reconnect retry unavailable on this client controller.")
+            return
+        if not bool(retry()):
+            self._append_server_log("[WARN] Manual reconnect retry is not available right now.")
+
+    def _on_client_reconnect_state_changed(self, state: dict) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return
+        status = str((state or {}).get("status") or "").strip().lower()
+        attempt = max(0, int((state or {}).get("attempt") or 0))
+        max_attempts = max(1, int((state or {}).get("max_attempts") or 1))
+        next_delay_ms = max(0, int((state or {}).get("next_delay_ms") or 0))
+        manual_retry_available = bool((state or {}).get("manual_retry_available"))
+
+        if status in {"connected", "idle"}:
+            self._hide_reconnect_status_dialog()
+            return
+        if status == "scheduled":
+            delay_s = next_delay_ms / 1000.0
+            self._show_reconnect_status_dialog(
+                (
+                    "Connection lost. Trying to reconnect automatically "
+                    f"(attempt {attempt}/{max_attempts}) in {delay_s:.1f}s"
+                ),
+                allow_retry=False,
+                animate_waiting=True,
+            )
+            return
+        if status == "attempting":
+            self._show_reconnect_status_dialog(
+                f"Trying to reconnect now (attempt {attempt}/{max_attempts})",
+                allow_retry=False,
+                animate_waiting=True,
+            )
+            return
+        if status == "paused":
+            self._show_reconnect_status_dialog(
+                (
+                    "Automatic reconnect attempts are exhausted. "
+                    "Press retry to try another reconnect cycle."
+                ),
+                allow_retry=manual_retry_available,
+                animate_waiting=False,
+            )
+            return
+        self._show_reconnect_status_dialog(
+            "Connection lost. Trying to reconnect",
+            allow_retry=False,
+            animate_waiting=True,
+        )
+
+    def _redact_player_scene_while_disconnected(self) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return
+        self.inspector.set_entity(None)
+        self._initiative_overlay.hide()
+        self._initiative_reopen_btn.hide()
+        previous_suppress = bool(self._suppress_network_sync)
+        self._suppress_network_sync = True
+        try:
+            self._load_dungeon_state(self._blank_dungeon_state())
+        finally:
+            self._suppress_network_sync = previous_suppress
+
     def _on_client_connected(self) -> None:
         self._suppress_client_disconnect_handler = False
         if self._online_mode == ONLINE_MODE_PLAYER:
+            self._hide_reconnect_status_dialog()
             self._append_server_log("[INFO] Connected to host")
 
     @staticmethod
@@ -7953,10 +8190,25 @@ class DungeonAppletWidget(QWidget):
             or "player name already in use" in normalized
         )
 
+    @staticmethod
+    def _is_persistent_id_taken_join_error(message: str) -> bool:
+        normalized = str(message or "").strip().casefold()
+        return (
+            "persistent id already in use" in normalized
+            or "this player is already connected" in normalized
+        )
+
     def _retry_join_with_different_player_name(self, reason: str) -> bool:
         if _in_test_env():
             return False
-        if not self._is_name_taken_join_error(reason):
+        name_taken = self._is_name_taken_join_error(reason)
+        persistent_id_taken = self._is_persistent_id_taken_join_error(reason)
+        if not name_taken and not persistent_id_taken:
+            return False
+        if self._join_retry_prompt_open:
+            self._append_server_log(
+                "[WARN] Ignoring duplicate join retry prompt while another retry prompt is open."
+            )
             return False
         host_ip = str(self._host_ip or "").strip()
         try:
@@ -7966,26 +8218,67 @@ class DungeonAppletWidget(QWidget):
         if not host_ip or host_port <= 0:
             return False
         current_name = str(self._local_player_name or "").strip() or "Player"
+        prompt_title = "Player Name In Use"
         prompt = "Player name is already taken. Enter a different name to retry:"
-        for _attempt in range(5):
-            typed, ok = QInputDialog.getText(
-                self,
-                "Player Name In Use",
-                prompt,
-                text=current_name,
+        same_name_prompt = "That name is already in use. Enter a different player name:"
+        if persistent_id_taken and not name_taken:
+            prompt_title = "Player Already Connected"
+            prompt = (
+                "This local player identity is already connected.\n"
+                "Enter a different player name to join as an additional local player:"
             )
-            if not ok:
-                return False
-            next_name = str(typed or "").strip()
-            if not next_name:
-                prompt = "Player name cannot be empty. Enter a different name:"
-                continue
-            if next_name.casefold() == current_name.casefold():
-                prompt = "That name is already in use. Enter a different player name:"
-                continue
-            self._append_server_log(f"[INFO] Retrying join as '{next_name}'.")
-            self.join_online_session(host_ip, host_port, next_name)
-            return True
+            same_name_prompt = "Enter a different player name to join this session:"
+        self._join_retry_prompt_open = True
+        try:
+            for _attempt in range(5):
+                typed, ok = QInputDialog.getText(
+                    self,
+                    prompt_title,
+                    prompt,
+                    text=current_name,
+                )
+                if not ok:
+                    return False
+                next_name = str(typed or "").strip()
+                if not next_name:
+                    prompt = "Player name cannot be empty. Enter a different name:"
+                    continue
+                if next_name.casefold() == current_name.casefold():
+                    prompt = same_name_prompt
+                    continue
+                retry_persistent_player_id = ""
+                if persistent_id_taken:
+                    retry_persistent_player_id = generate_probabilistic_unique_id("player")
+                    self._append_server_log(
+                        "[WARN] Existing local player identity is active in another client. "
+                        "Retrying with a temporary local identity."
+                    )
+                self._append_server_log(f"[INFO] Retrying join as '{next_name}'.")
+
+                def _deferred_join(
+                    join_host: str = host_ip,
+                    join_port: int = host_port,
+                    join_name: str = next_name,
+                    join_persistent_id: str = retry_persistent_player_id,
+                ) -> None:
+                    try:
+                        if join_persistent_id:
+                            self.join_online_session(
+                                join_host,
+                                join_port,
+                                join_name,
+                                persistent_player_id=join_persistent_id,
+                            )
+                            return
+                        self.join_online_session(join_host, join_port, join_name)
+                    except RuntimeError as exc:
+                        self._append_server_log(f"[WARN] Join retry was cancelled: {exc}")
+
+                # Defer the next join attempt to avoid re-entering join teardown from disconnect handlers.
+                QTimer.singleShot(0, _deferred_join)
+                return True
+        finally:
+            self._join_retry_prompt_open = False
         return False
 
     def _on_client_disconnected(self) -> None:
@@ -8026,6 +8319,7 @@ class DungeonAppletWidget(QWidget):
         self._update_connected_players({})
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
+        self._redact_player_scene_while_disconnected()
         if terminal_disconnect_message:
             if self._retry_join_with_different_player_name(terminal_disconnect_message):
                 return
@@ -8034,6 +8328,7 @@ class DungeonAppletWidget(QWidget):
             self._approved_host_inventory_sync_characters.clear()
             self._append_server_log(f"[WARN] {terminal_disconnect_message}")
             self._append_chat_message("System", terminal_disconnect_message, True)
+            self._hide_reconnect_status_dialog()
             self._set_online_mode(ONLINE_MODE_LOCAL_DM)
             return
         if was_waiting_for_snapshot:
@@ -8042,6 +8337,11 @@ class DungeonAppletWidget(QWidget):
                 "System",
                 "Connection dropped before the host snapshot arrived. Waiting for reconnect.",
                 True,
+            )
+            self._show_reconnect_status_dialog(
+                "Connection dropped before the first snapshot. Trying to reconnect",
+                allow_retry=False,
+                animate_waiting=True,
             )
             self._apply_online_permissions()
             return
@@ -8057,6 +8357,7 @@ class DungeonAppletWidget(QWidget):
                 "Unable to connect to host. Check the address, port, player name, or your network connection.",
                 True,
             )
+            self._hide_reconnect_status_dialog()
             self._set_online_mode(ONLINE_MODE_LOCAL_DM)
             return
         self._append_server_log("[WARN] Disconnected from host. Waiting for reconnect...")
@@ -8065,6 +8366,11 @@ class DungeonAppletWidget(QWidget):
             "Connection lost. Actions are temporarily disabled until reconnect.",
             True,
         )
+        self._show_reconnect_status_dialog(
+            "Connection lost. Trying to reconnect automatically",
+            allow_retry=False,
+            animate_waiting=True,
+        )
         self._apply_online_permissions()
 
     def _on_client_hello_ack(self, player_id: str, resumed: bool = False) -> None:
@@ -8072,6 +8378,11 @@ class DungeonAppletWidget(QWidget):
             if self._client_controller is not None:
                 self._client_controller.disconnect()
             return
+        if self._client_controller is not None:
+            if hasattr(self._client_controller, "_session_established"):
+                self._client_controller._session_established = True
+            if hasattr(self._client_controller, "_reconnect_requires_established_session"):
+                self._client_controller._reconnect_requires_established_session = False
         self._local_player_id = player_id
         self._player_connection_ready = False
         self._awaiting_player_snapshot = True
@@ -12042,6 +12353,214 @@ class DungeonAppletWidget(QWidget):
         )
         return converted_payload, notes
 
+    def _local_character_replace_options(self) -> list[dict]:
+        try:
+            from player_sheets import character_id_for_entry, list_character_link_targets, sheet_id_for_entry
+        except Exception:
+            return []
+        options: list[dict] = []
+        seen_sheet_ids: set[str] = set()
+        for entry in list_character_link_targets():
+            try:
+                sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+                if not sheet_id or sheet_id in seen_sheet_ids:
+                    continue
+                sheet_name = str(getattr(entry, "name", "") or sheet_id).strip() or sheet_id
+                character_id = str(character_id_for_entry(entry) or "").strip() or self._character_id_for_sheet(
+                    sheet_id,
+                    sheet_name=sheet_name,
+                )
+            except Exception:
+                continue
+            options.append(
+                {
+                    "sheet_id": sheet_id,
+                    "sheet_name": sheet_name,
+                    "character_id": character_id,
+                    "label": f"{sheet_name} ({sheet_id})",
+                }
+            )
+            seen_sheet_ids.add(sheet_id)
+        return sorted(
+            options,
+            key=lambda option: str(option.get("sheet_name") or option.get("sheet_id") or "").lower(),
+        )
+
+    def _prompt_missing_local_linked_character_resolution(
+        self,
+        *,
+        sheet_id: str,
+        sheet_name: str,
+        character_id: str,
+        replace_options: list[dict],
+    ) -> tuple[str, str]:
+        if _in_test_env():
+            return "save_local", ""
+
+        dialog = QDialog(self)
+        dialog.setModal(True)
+        dialog.setWindowTitle("Linked Character Not Found Locally")
+        dialog.setMinimumWidth(560)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        linked_name = str(sheet_name or sheet_id or character_id or "Character").strip()
+        linked_sheet = str(sheet_id or "").strip()
+        linked_character = str(character_id or "").strip()
+        summary = QLabel(
+            (
+                f"This entity is linked to '{linked_name}', but that character is not available locally.\n\n"
+                f"Sheet: {linked_sheet or 'unknown'}\n"
+                f"Character id: {linked_character or 'unknown'}\n\n"
+                "Choose how to resolve this link:"
+            ),
+            dialog,
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        choice: dict[str, str] = {"action": "", "sheet_id": ""}
+
+        save_btn = QPushButton("Save Character Locally", dialog)
+        save_btn.setObjectName("SecondaryButton")
+        save_btn.setMinimumHeight(36)
+        save_btn.clicked.connect(
+            lambda: (choice.update(action="save_local", sheet_id=""), dialog.accept())
+        )
+        layout.addWidget(save_btn)
+
+        replace_row = QHBoxLayout()
+        replace_row.setSpacing(8)
+        replace_btn = QPushButton("Replace With Character", dialog)
+        replace_btn.setObjectName("SecondaryButton")
+        replace_btn.setMinimumHeight(36)
+        replace_combo = QComboBox(dialog)
+        replace_combo.setMinimumHeight(36)
+        replace_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for option in replace_options:
+            replace_combo.addItem(
+                str(option.get("label") or option.get("sheet_name") or option.get("sheet_id") or ""),
+                str(option.get("sheet_id") or ""),
+            )
+        if replace_combo.count() <= 0:
+            replace_combo.addItem("No local characters available", "")
+            replace_combo.setEnabled(False)
+            replace_btn.setEnabled(False)
+
+        def _choose_replace() -> None:
+            selected_sheet = str(replace_combo.currentData() or "").strip()
+            if not selected_sheet:
+                return
+            choice.update(action="replace", sheet_id=selected_sheet)
+            dialog.accept()
+
+        replace_btn.clicked.connect(_choose_replace)
+        replace_row.addWidget(replace_btn)
+        replace_row.addWidget(replace_combo, 1)
+        layout.addLayout(replace_row)
+
+        unlink_btn = QPushButton("Unlink Character", dialog)
+        unlink_btn.setObjectName("SecondaryButton")
+        unlink_btn.setMinimumHeight(36)
+        unlink_btn.clicked.connect(
+            lambda: (choice.update(action="unlink", sheet_id=""), dialog.accept())
+        )
+        layout.addWidget(unlink_btn)
+
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        controls.rejected.connect(dialog.reject)
+        layout.addWidget(controls)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return "", ""
+        return str(choice.get("action") or "").strip(), str(choice.get("sheet_id") or "").strip()
+
+    def _local_link_sync_payload_for_sheet(
+        self,
+        sheet_id: str,
+        *,
+        fallback_sheet_name: str = "",
+    ) -> tuple[dict | None, str]:
+        clean_sheet = str(sheet_id or "").strip()
+        if not clean_sheet:
+            return None, "Missing character selection."
+        try:
+            from player_sheets import character_id_for_sheet_id
+        except Exception:
+            character_id_for_sheet_id = None  # type: ignore[assignment]
+        sheet_name_hint = str(fallback_sheet_name or clean_sheet).strip() or clean_sheet
+        character_id = ""
+        if character_id_for_sheet_id is not None:
+            character_id = str(character_id_for_sheet_id(clean_sheet) or "").strip()
+        if not character_id:
+            character_id = self._character_id_for_sheet(clean_sheet, sheet_name=sheet_name_hint)
+        local_payload = self._resolve_local_sheet_sync_payload(character_id)
+        if not isinstance(local_payload, dict):
+            return None, "Unable to load selected local character data."
+        archive_b64 = str(local_payload.get("archive_b64") or "").strip()
+        if not archive_b64:
+            return (
+                None,
+                "Selected local character archive is missing. Open and save that character first.",
+            )
+        return {
+            "sheet_id": str(local_payload.get("sheet_id") or clean_sheet).strip() or clean_sheet,
+            "sheet_name": str(local_payload.get("sheet_name") or sheet_name_hint).strip() or sheet_name_hint,
+            "character_id": str(local_payload.get("character_id") or character_id).strip() or character_id,
+            "save_revision": int(local_payload.get("save_revision") or 0),
+            "last_saved_at": str(local_payload.get("last_saved_at") or ""),
+            "content_hash": str(local_payload.get("content_hash") or ""),
+            "inventory": normalize_inventory_payload(local_payload.get("inventory") or {}),
+            "stats": dict(local_payload.get("stats") or {}),
+            "archive_b64": archive_b64,
+        }, ""
+
+    def _request_replace_missing_local_character_link(
+        self,
+        *,
+        entity_id: str,
+        replacement_sheet_id: str,
+        dungeon_id: str,
+        fallback_sheet_name: str,
+    ) -> tuple[bool, str]:
+        local_payload, error = self._local_link_sync_payload_for_sheet(
+            replacement_sheet_id,
+            fallback_sheet_name=fallback_sheet_name,
+        )
+        if not isinstance(local_payload, dict):
+            return False, str(error or "Unable to load selected local character.")
+        request_payload = {
+            "entity_id": str(entity_id or "").strip(),
+            "sheet_id": str(local_payload.get("sheet_id") or "").strip(),
+            "sheet_name": str(local_payload.get("sheet_name") or "").strip(),
+            "character_id": str(local_payload.get("character_id") or "").strip(),
+            "save_revision": int(local_payload.get("save_revision") or 0),
+            "last_saved_at": str(local_payload.get("last_saved_at") or ""),
+            "content_hash": str(local_payload.get("content_hash") or ""),
+            "inventory": normalize_inventory_payload(local_payload.get("inventory") or {}),
+            "stats": dict(local_payload.get("stats") or {}),
+            "archive_b64": str(local_payload.get("archive_b64") or ""),
+            "dungeon_id": str(dungeon_id or self._active_dungeon_id or ""),
+        }
+        if not self._dispatch_player_link_character_request(request_payload):
+            return False, "Unable to request linked character replacement."
+        return True, "Requested replacement with local character."
+
+    def _request_unlink_missing_local_character_link(
+        self,
+        *,
+        entity_id: str,
+        dungeon_id: str,
+    ) -> tuple[bool, str]:
+        request_payload = {
+            "entity_id": str(entity_id or "").strip(),
+            "dungeon_id": str(dungeon_id or self._active_dungeon_id or ""),
+        }
+        if not self._dispatch_player_unlink_character_request(request_payload):
+            return False, "Unable to request character unlink."
+        return True, "Requested character unlink."
+
     def _sync_local_sheet_inventory_from_host(
         self,
         character_id: str,
@@ -12053,10 +12572,16 @@ class DungeonAppletWidget(QWidget):
         last_saved_at: str = "",
         content_hash: str = "",
         refresh_entities: bool = True,
+        sheet_id: str = "",
+        entity_id: str = "",
+        dungeon_id: str = "",
     ) -> tuple[bool, str]:
         clean_character = str(character_id or "").strip()
         if not clean_character:
             return False, "Missing character id for inventory sync."
+        clean_sheet = str(sheet_id or "").strip()
+        clean_entity = str(entity_id or "").strip()
+        clean_dungeon = str(dungeon_id or "").strip()
         local_sync_payload = self._resolve_local_sheet_sync_payload(clean_character)
         if local_sync_payload is None:
             try:
@@ -12068,6 +12593,34 @@ class DungeonAppletWidget(QWidget):
                 if mapped_character_id:
                     clean_character = mapped_character_id
                     local_sync_payload = self._resolve_local_sheet_sync_payload(clean_character)
+        if (
+            local_sync_payload is None
+            and self._online_mode == ONLINE_MODE_PLAYER
+            and clean_entity
+        ):
+            if self._has_pending_character_link_resolution_for_entity(clean_entity):
+                return True, "Awaiting linked character relink/unlink response."
+            replace_options = self._local_character_replace_options()
+            action, replacement_sheet_id = self._prompt_missing_local_linked_character_resolution(
+                sheet_id=clean_sheet,
+                sheet_name=str(sheet_name or clean_sheet or clean_character),
+                character_id=clean_character,
+                replace_options=replace_options,
+            )
+            if action == "replace":
+                return self._request_replace_missing_local_character_link(
+                    entity_id=clean_entity,
+                    replacement_sheet_id=replacement_sheet_id,
+                    dungeon_id=clean_dungeon,
+                    fallback_sheet_name=str(sheet_name or clean_sheet or clean_character),
+                )
+            if action == "unlink":
+                return self._request_unlink_missing_local_character_link(
+                    entity_id=clean_entity,
+                    dungeon_id=clean_dungeon,
+                )
+            if action != "save_local":
+                return True, "Linked character sync deferred by player."
         payload = normalize_inventory_payload(
             inventory_payload if isinstance(inventory_payload, dict) else {}
         )
@@ -12242,6 +12795,7 @@ class DungeonAppletWidget(QWidget):
     def _on_client_snapshot_received(self, snapshot: dict) -> None:
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
+        self._hide_reconnect_status_dialog()
         was_waiting_for_snapshot = bool(self._awaiting_player_snapshot)
         self._awaiting_player_snapshot = False
         self._player_connection_ready = True
@@ -12285,6 +12839,8 @@ class DungeonAppletWidget(QWidget):
                     candidate = {
                         "sheet_id": sheet_id,
                         "sheet_name": sheet_name,
+                        "entity_id": str(item_data.get("entity_id") or "").strip(),
+                        "dungeon_id": str(dungeon.get("id") or "").strip(),
                         "save_revision": host_save_revision,
                         "last_saved_at": str(item_data.get("linked_last_saved_at") or "").strip(),
                         "content_hash": str(item_data.get("linked_content_hash") or "").strip(),
@@ -12343,8 +12899,11 @@ class DungeonAppletWidget(QWidget):
                     last_saved_at=str(sync_payload.get("last_saved_at") or ""),
                     content_hash=str(sync_payload.get("content_hash") or ""),
                     refresh_entities=False,
+                    sheet_id=sheet_id,
+                    entity_id=str(sync_payload.get("entity_id") or ""),
+                    dungeon_id=str(sync_payload.get("dungeon_id") or ""),
                 )
-                if ok:
+                if ok and self._local_character_sheet_exists(character_id):
                     self._approved_host_inventory_sync_characters.add(character_id)
                 elif message:
                     self._append_server_log(f"[WARN] {message}")
@@ -12800,6 +13359,7 @@ class DungeonAppletWidget(QWidget):
         self._debug_log("close_event", session=current_session)
         self._suppress_change_tracking = True
         self._suppress_network_sync = True
+        self._hide_reconnect_status_dialog()
         loot_pool_viewport = getattr(self, "_loot_pool_viewport", None)
         if loot_pool_viewport is not None:
             try:
@@ -14019,13 +14579,7 @@ class DungeonAppletWidget(QWidget):
                     "archive_b64": archive_b64,
                     "dungeon_id": str(self._active_dungeon_id or ""),
                 }
-                request_id = self._dispatch_player_command_with_request_id(
-                    "link_character_entity",
-                    request_payload,
-                    silent=True,
-                )
-                if request_id:
-                    self._pending_link_entity_requests[request_id] = dict(request_payload)
+                self._dispatch_player_link_character_request(request_payload)
             return
 
         self._apply_character_link_to_entity(
@@ -14112,13 +14666,7 @@ class DungeonAppletWidget(QWidget):
                 "entity_id": entity_id,
                 "dungeon_id": str(self._active_dungeon_id or ""),
             }
-            request_id = self._dispatch_player_command_with_request_id(
-                "unlink_character_entity",
-                request_payload,
-                silent=True,
-            )
-            if request_id:
-                self._pending_unlink_entity_requests[request_id] = dict(request_payload)
+            self._dispatch_player_unlink_character_request(request_payload)
             return
         cleared_character_id = str(entity.data(ROLE_LINKED_CHARACTER_ID) or "").strip()
         if cleared_character_id:

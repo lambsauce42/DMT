@@ -47,6 +47,24 @@ class TestSavePaths(unittest.TestCase):
         self.assertEqual(Path(save_dir), Path("/home/user/Documents/DMT"))
 
     @patch("save_paths._in_test_env", return_value=False)
+    def test_debug_profile_dir_is_persistent_between_calls(self, _mock_in_test):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            debug_root = home / "Documents" / "DEBUG1_DMT"
+            marker = debug_root / "marker.txt"
+            debug_root.mkdir(parents=True, exist_ok=True)
+            marker.write_text("keep", encoding="utf-8")
+            with patch("os.path.expanduser", return_value=str(home)):
+                with patch("os.path.exists", return_value=True):
+                    with patch.dict(os.environ, {"DMT_SAVE_PROFILE": "DEBUG1"}, clear=False):
+                        first_dir = Path(save_paths.default_dnd_save_dir())
+                        second_dir = Path(save_paths.default_dnd_save_dir())
+
+            self.assertEqual(first_dir, debug_root)
+            self.assertEqual(second_dir, debug_root)
+            self.assertTrue(marker.exists())
+
+    @patch("save_paths._in_test_env", return_value=False)
     @patch("save_paths.default_dnd_save_dir")
     def test_derived_paths(self, mock_base, _mock_in_test):
         """Test paths derived from the canonical base save directory."""

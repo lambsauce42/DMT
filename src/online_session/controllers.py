@@ -13,6 +13,8 @@ _HEARTBEAT_INTERVAL_MS = 3000
 _HEARTBEAT_TIMEOUT_MS = 12000
 _RECONNECT_BASE_DELAY_MS = 1200
 _RECONNECT_MAX_DELAY_MS = 8000
+_RECONNECT_MAX_ATTEMPTS = 5
+_RECONNECT_CONNECT_TIMEOUT_MS = 6000
 
 
 def _utc_timestamp() -> str:
@@ -186,6 +188,7 @@ class ClientSessionController(QObject):
     command_result = Signal(dict)
     icon_asset_received = Signal(str, str, str)
     ping_received = Signal(float, float, str)
+    reconnect_state_changed = Signal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -204,6 +207,8 @@ class ClientSessionController(QObject):
         self._connect_persistent_player_id: str = ""
         self._manual_disconnect = False
         self._reconnect_attempt = 0
+        self._reconnect_paused = False
+        self._reconnect_requires_established_session = True
         self._terminal_disconnect_message = ""
         self._session_established = False
         self._last_transport_error = ""
@@ -219,6 +224,10 @@ class ClientSessionController(QObject):
         self._reconnect_timer = QTimer(self)
         self._reconnect_timer.setSingleShot(True)
         self._reconnect_timer.timeout.connect(self._attempt_reconnect)
+        self._reconnect_connect_timeout_timer = QTimer(self)
+        self._reconnect_connect_timeout_timer.setSingleShot(True)
+        self._reconnect_connect_timeout_timer.setInterval(_RECONNECT_CONNECT_TIMEOUT_MS)
+        self._reconnect_connect_timeout_timer.timeout.connect(self._on_reconnect_connect_timeout)
 
     @property
     def player_id(self) -> Optional[str]:
@@ -243,7 +252,11 @@ class ClientSessionController(QObject):
         self._terminal_disconnect_message = ""
         self._session_established = False
         self._last_transport_error = ""
+        self._reconnect_paused = False
+        self._reconnect_requires_established_session = True
         self._reconnect_timer.stop()
+        self._reconnect_connect_timeout_timer.stop()
+        self._emit_reconnect_state("idle")
         self.client.connect_to_host(
             host,
             port,
@@ -256,11 +269,16 @@ class ClientSessionController(QObject):
         self._terminal_disconnect_message = ""
         self._session_established = False
         self._last_transport_error = ""
+        self._reconnect_paused = False
+        self._reconnect_attempt = 0
+        self._reconnect_requires_established_session = True
         self._reconnect_timer.stop()
+        self._reconnect_connect_timeout_timer.stop()
         self._heartbeat_timer.stop()
         self._heartbeat_timeout_timer.stop()
         self._players = {}
         self.players_changed.emit(self.players)
+        self._emit_reconnect_state("idle")
         self.client.disconnect()
 
     def send_chat(self, text: str) -> None:
@@ -288,18 +306,30 @@ class ClientSessionController(QObject):
 
     def _on_connected(self) -> None:
         self._reconnect_attempt = 0
+        self._reconnect_paused = False
         self._terminal_disconnect_message = ""
         self._last_transport_error = ""
         self._heartbeat_timer.start()
         self._reset_heartbeat_timeout()
+        self._reconnect_connect_timeout_timer.stop()
+        self._emit_reconnect_state("connected")
         self.connected.emit()
 
     def _on_disconnected(self) -> None:
         had_session = bool(self._session_established)
+        if had_session:
+            # Once a session was established, reconnect attempts can continue
+            # even before hello_ack arrives on the next transport.
+            self._reconnect_requires_established_session = False
         self._session_established = False
         self._heartbeat_timer.stop()
         self._heartbeat_timeout_timer.stop()
-        if not self._manual_disconnect and not had_session:
+        self._reconnect_connect_timeout_timer.stop()
+        if (
+            not self._manual_disconnect
+            and not had_session
+            and self._reconnect_requires_established_session
+        ):
             if not self._terminal_disconnect_message:
                 if self._last_transport_error:
                     self._terminal_disconnect_message = (
@@ -314,10 +344,13 @@ class ClientSessionController(QObject):
         self.disconnected.emit()
         if not self._manual_disconnect:
             self._schedule_reconnect()
+        else:
+            self._emit_reconnect_state("idle")
         self._last_transport_error = ""
 
     def _on_hello_ack(self, player_id: str, resumed: bool) -> None:
         self._session_established = True
+        self._reconnect_requires_established_session = False
         self.log_line.emit(
             f"[INFO] {'Reconnected' if resumed else 'Joined'} as {player_id}"
         )
@@ -424,7 +457,22 @@ class ClientSessionController(QObject):
             return
         if not self._connect_host or self._connect_port <= 0:
             return
+        if self._reconnect_paused:
+            return
         if self._reconnect_timer.isActive():
+            return
+        if self._reconnect_attempt >= _RECONNECT_MAX_ATTEMPTS:
+            self._reconnect_paused = True
+            self.log_line.emit(
+                "[WARN] Reconnect paused after repeated failures. "
+                "Use manual retry to try again."
+            )
+            self._emit_reconnect_state(
+                "paused",
+                attempt=self._reconnect_attempt,
+                max_attempts=_RECONNECT_MAX_ATTEMPTS,
+                next_delay_ms=0,
+            )
             return
         attempt = self._reconnect_attempt + 1
         delay_ms = min(_RECONNECT_MAX_DELAY_MS, _RECONNECT_BASE_DELAY_MS * attempt)
@@ -432,18 +480,77 @@ class ClientSessionController(QObject):
         self.log_line.emit(
             f"[WARN] Connection lost. Reconnecting in {delay_ms / 1000:.1f}s (attempt {attempt})..."
         )
+        self._emit_reconnect_state(
+            "scheduled",
+            attempt=attempt,
+            max_attempts=_RECONNECT_MAX_ATTEMPTS,
+            next_delay_ms=delay_ms,
+        )
         self._reconnect_timer.start(delay_ms)
 
     def _attempt_reconnect(self) -> None:
         if self._manual_disconnect:
             return
+        if self._reconnect_paused:
+            return
         if self.client.is_connected() or self.client.is_connecting():
             return
+        self._emit_reconnect_state(
+            "attempting",
+            attempt=self._reconnect_attempt,
+            max_attempts=_RECONNECT_MAX_ATTEMPTS,
+            next_delay_ms=0,
+        )
         self.client.connect_to_host(
             self._connect_host,
             int(self._connect_port),
             self._connect_name,
             persistent_player_id=self._connect_persistent_player_id,
+        )
+        self._reconnect_connect_timeout_timer.start()
+
+    def _on_reconnect_connect_timeout(self) -> None:
+        if self._manual_disconnect or self._reconnect_paused:
+            return
+        if self.client.is_connected():
+            return
+        if self.client.is_connecting():
+            self.log_line.emit(
+                "[WARN] Reconnect attempt timed out. Forcing reconnect retry."
+            )
+            self.client.disconnect()
+            return
+        self._schedule_reconnect()
+
+    def retry_reconnect(self) -> bool:
+        if self._manual_disconnect:
+            return False
+        if not self._reconnect_paused:
+            return False
+        self._reconnect_paused = False
+        self._reconnect_attempt = 0
+        self.log_line.emit("[INFO] Manual reconnect retry started.")
+        self._attempt_reconnect()
+        return True
+
+    def _emit_reconnect_state(
+        self,
+        status: str,
+        *,
+        attempt: int = 0,
+        max_attempts: int = _RECONNECT_MAX_ATTEMPTS,
+        next_delay_ms: int = 0,
+    ) -> None:
+        self.reconnect_state_changed.emit(
+            {
+                "status": str(status or "").strip() or "idle",
+                "attempt": max(0, int(attempt)),
+                "max_attempts": max(1, int(max_attempts)),
+                "next_delay_ms": max(0, int(next_delay_ms)),
+                # -1 indicates unlimited manual retries.
+                "manual_retry_budget": -1,
+                "manual_retry_available": bool(self._reconnect_paused),
+            }
         )
 
     def consume_terminal_disconnect_message(self) -> str:

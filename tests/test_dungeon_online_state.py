@@ -1389,7 +1389,7 @@ def test_joining_player_session_stops_existing_host_controller(dungeon_widget):
 
 
 def test_retry_join_with_different_player_name_retries_with_prompt_value(
-    dungeon_widget, monkeypatch
+    dungeon_widget, monkeypatch, qtbot
 ):
     join_calls = []
     dungeon_widget._host_ip = "127.0.0.1"
@@ -1410,8 +1410,42 @@ def test_retry_join_with_different_player_name_retries_with_prompt_value(
         "Player name already in use. Choose a different name and reconnect."
     )
 
+    qtbot.waitUntil(lambda: bool(join_calls), timeout=1000)
     assert retried is True
     assert join_calls == [("127.0.0.1", 9010, "Mira-2")]
+
+
+def test_retry_join_with_different_player_name_uses_temporary_identity_for_persistent_id_conflict(
+    dungeon_widget, monkeypatch, qtbot
+):
+    join_calls = []
+    dungeon_widget._host_ip = "127.0.0.1"
+    dungeon_widget._host_port = 9010
+    dungeon_widget._local_player_name = "Mira"
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(
+        "dungeon_applet.QInputDialog.getText",
+        lambda *_args, **_kwargs: ("Mira-2", True),
+    )
+    monkeypatch.setattr(
+        "dungeon_applet.generate_probabilistic_unique_id",
+        lambda _prefix: "player_temp_retry_1",
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "join_online_session",
+        lambda host, port, name, persistent_player_id=None: join_calls.append(
+            (host, port, name, persistent_player_id)
+        ),
+    )
+
+    retried = dungeon_widget._retry_join_with_different_player_name(
+        "This player is already connected. Disconnect the other session or wait for it to close, then reconnect."
+    )
+
+    qtbot.waitUntil(lambda: bool(join_calls), timeout=1000)
+    assert retried is True
+    assert join_calls == [("127.0.0.1", 9010, "Mira-2", "player_temp_retry_1")]
 
 
 def test_client_disconnect_name_taken_uses_retry_path(dungeon_widget, monkeypatch):
@@ -5947,8 +5981,9 @@ def test_dm_denied_conflict_response_does_not_force_reprompt_loop(dungeon_widget
     assert conflict["conflict_key"] in dungeon_widget._suppressed_link_conflicts
 
 
-def test_snapshot_missing_local_character_prompts_before_creating_local_copy(dungeon_widget, monkeypatch):
-    prompts = []
+def test_snapshot_missing_local_character_forwards_entity_context_to_local_sync(
+    dungeon_widget, monkeypatch
+):
     sync_calls = []
 
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
@@ -5960,11 +5995,6 @@ def test_snapshot_missing_local_character_prompts_before_creating_local_copy(dun
     )
 
     monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_prompt_linked_character_conflict",
-        lambda payload, force=False: prompts.append((dict(payload), bool(force))),
-    )
     monkeypatch.setattr(
         dungeon_widget,
         "_sync_local_sheet_inventory_from_host",
@@ -6001,12 +6031,152 @@ def test_snapshot_missing_local_character_prompts_before_creating_local_copy(dun
 
     dungeon_widget._on_client_snapshot_received(snapshot)
 
-    assert len(prompts) == 1
-    payload, force = prompts[0]
-    assert force is False
-    assert payload["requires_local_create"] is True
-    assert payload["allow_force_push"] is False
-    assert sync_calls == []
+    assert len(sync_calls) == 1
+    _args, kwargs = sync_calls[0]
+    assert kwargs["sheet_id"] == "sheet-1"
+    assert kwargs["entity_id"] == "entity-1"
+    assert kwargs["dungeon_id"] == "d1"
+
+
+def test_missing_local_character_replace_dispatches_link_request(dungeon_widget, monkeypatch):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._local_player_id = "player-local"
+
+    def _resolve_local(character_id):
+        if character_id == "character-host":
+            return None
+        if character_id == "character-local":
+            return {
+                "sheet_id": "sheet-local",
+                "sheet_name": "Local Hero",
+                "character_id": "character-local",
+                "save_revision": 7,
+                "last_saved_at": "2026-03-05T10:00:00Z",
+                "content_hash": "local-hash",
+                "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+                "stats": {"name": "Local Hero", "ac": 13},
+                "archive_b64": "YXJjaGl2ZQ==",
+            }
+        return None
+
+    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", _resolve_local)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_local_character_replace_options",
+        lambda: [{"sheet_id": "sheet-local", "sheet_name": "Local Hero", "label": "Local Hero (sheet-local)"}],
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_missing_local_linked_character_resolution",
+        lambda **_kwargs: ("replace", "sheet-local"),
+    )
+
+    sent_payloads = []
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_dispatch_player_link_character_request",
+        lambda payload: sent_payloads.append(dict(payload)) or True,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "player_sheets",
+        types.SimpleNamespace(character_id_for_sheet_id=lambda sheet_id: "character-local" if sheet_id == "sheet-local" else ""),
+    )
+
+    ok, _message = dungeon_widget._sync_local_sheet_inventory_from_host(
+        "character-host",
+        {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+        sheet_name="Host Hero",
+        sheet_id="sheet-host",
+        entity_id="entity-1",
+        dungeon_id="d1",
+    )
+
+    assert ok is True
+    assert len(sent_payloads) == 1
+    sent = sent_payloads[0]
+    assert sent["entity_id"] == "entity-1"
+    assert sent["sheet_id"] == "sheet-local"
+    assert sent["character_id"] == "character-local"
+    assert sent["dungeon_id"] == "d1"
+
+
+def test_missing_local_character_unlink_dispatches_unlink_request(dungeon_widget, monkeypatch):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._local_player_id = "player-local"
+
+    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
+    monkeypatch.setattr(dungeon_widget, "_local_character_replace_options", lambda: [])
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_missing_local_linked_character_resolution",
+        lambda **_kwargs: ("unlink", ""),
+    )
+
+    unlink_payloads = []
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_dispatch_player_unlink_character_request",
+        lambda payload: unlink_payloads.append(dict(payload)) or True,
+    )
+
+    ok, _message = dungeon_widget._sync_local_sheet_inventory_from_host(
+        "character-host",
+        {"inventory": []},
+        sheet_name="Host Hero",
+        sheet_id="sheet-host",
+        entity_id="entity-1",
+        dungeon_id="d1",
+    )
+
+    assert ok is True
+    assert unlink_payloads == [{"entity_id": "entity-1", "dungeon_id": "d1"}]
+
+
+def test_missing_local_character_save_locally_continues_sync(dungeon_widget, monkeypatch):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._local_player_id = "player-local"
+
+    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
+    monkeypatch.setattr(dungeon_widget, "_local_character_replace_options", lambda: [])
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_missing_local_linked_character_resolution",
+        lambda **_kwargs: ("save_local", ""),
+    )
+
+    applied = {}
+
+    def _apply_remote(character_id, sheet_name, inventory_payload, **_kwargs):
+        applied["character_id"] = character_id
+        applied["sheet_name"] = sheet_name
+        applied["inventory"] = inventory_payload
+        return True, "Character synchronized.", inventory_payload
+
+    monkeypatch.setitem(
+        sys.modules,
+        "player_sheets",
+        types.SimpleNamespace(
+            character_id_for_sheet_id=lambda _sheet_id: "",
+            apply_remote_character_package_for_character_id=_apply_remote,
+        ),
+    )
+
+    ok, _message = dungeon_widget._sync_local_sheet_inventory_from_host(
+        "character-host",
+        {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+        sheet_name="Host Hero",
+        sheet_id="sheet-host",
+        entity_id="entity-1",
+        dungeon_id="d1",
+    )
+
+    assert ok is True
+    assert applied["character_id"] == "character-host"
+    assert applied["sheet_name"] == "Host Hero"
 
 
 def test_snapshot_does_not_reprompt_suppressed_conflict_with_unchanged_host_payload(

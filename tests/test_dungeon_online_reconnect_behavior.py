@@ -2,6 +2,7 @@ import os
 import sys
 
 import pytest
+from PySide6.QtCore import QPointF, Qt
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -13,6 +14,7 @@ from dungeon_applet import (
     ONLINE_MODE_LOCAL_DM,
     ONLINE_MODE_PLAYER,
 )
+from dungeon_items import EntityItem
 from online_session.controllers import ClientSessionController
 
 
@@ -398,3 +400,131 @@ def test_reconnect_keeps_unresolved_link_conflict_blocked(dungeon_widget, monkey
     )
 
     assert sent_commands == []
+
+
+def test_player_disconnect_redacts_scene_until_snapshot(dungeon_widget):
+    class _ClientStub:
+        def consume_terminal_disconnect_message(self):
+            return ""
+
+        def send_command(self, _action, _payload, request_id=None):
+            _ = request_id
+            return False
+
+        def disconnect(self):
+            return None
+
+    dungeon_widget.canvas._place_entity(QPointF(32.0, 32.0))
+    assert any(isinstance(item, EntityItem) for item in dungeon_widget.canvas.scene().items())
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._on_client_disconnected()
+
+    assert not any(isinstance(item, EntityItem) for item in dungeon_widget.canvas.scene().items())
+
+    snapshot = {
+        "players": {"player-1": "Mira"},
+        "players_dungeon_id": "players-dungeon",
+        "active_dungeon_id": "players-dungeon",
+        "dungeons": [
+            {
+                "id": "players-dungeon",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "label": "Visible Again",
+                            "pos": [64.0, 64.0],
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert any(isinstance(item, EntityItem) for item in dungeon_widget.canvas.scene().items())
+
+
+def test_reconnect_dialog_retry_button_stays_disabled_until_auto_retries_exhausted(
+    dungeon_widget, qtbot
+):
+    retry_calls = []
+
+    class _ClientStub:
+        def retry_reconnect(self):
+            retry_calls.append(True)
+            return True
+
+        def disconnect(self):
+            return None
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._client_controller = _ClientStub()
+
+    dungeon_widget._on_client_reconnect_state_changed(
+        {
+            "status": "scheduled",
+            "attempt": 1,
+            "max_attempts": 5,
+            "next_delay_ms": 1200,
+            "manual_retry_budget": 2,
+            "manual_retry_available": False,
+        }
+    )
+
+    retry_button = dungeon_widget._reconnect_retry_button
+    assert retry_button is not None
+    assert retry_button.isEnabled() is False
+
+    dungeon_widget._on_client_reconnect_state_changed(
+        {
+            "status": "paused",
+            "attempt": 5,
+            "max_attempts": 5,
+            "next_delay_ms": 0,
+            "manual_retry_budget": 2,
+            "manual_retry_available": True,
+        }
+    )
+
+    retry_button = dungeon_widget._reconnect_retry_button
+    assert retry_button is not None
+    assert retry_button.isEnabled() is True
+    qtbot.mouseClick(retry_button, Qt.MouseButton.LeftButton)
+    assert retry_calls == [True]
+
+
+def test_reconnect_dialog_waiting_message_animates_dot_suffix(dungeon_widget):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+
+    dungeon_widget._on_client_reconnect_state_changed(
+        {
+            "status": "attempting",
+            "attempt": 1,
+            "max_attempts": 5,
+            "next_delay_ms": 0,
+            "manual_retry_budget": -1,
+            "manual_retry_available": False,
+        }
+    )
+
+    label = dungeon_widget._reconnect_status_label
+    assert label is not None
+    text_a = label.text()
+    dungeon_widget._on_reconnect_status_animation_tick()
+    text_b = label.text()
+    dungeon_widget._on_reconnect_status_animation_tick()
+    text_c = label.text()
+    dungeon_widget._on_reconnect_status_animation_tick()
+    text_d = label.text()
+
+    assert text_a.endswith(".")
+    assert text_b.endswith("..")
+    assert text_c.endswith("...")
+    assert text_d.endswith(".")

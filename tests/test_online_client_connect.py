@@ -11,7 +11,10 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from online_session.client import OnlineSessionClient
-from online_session.controllers import ClientSessionController
+from online_session.controllers import (
+    ClientSessionController,
+    _RECONNECT_MAX_ATTEMPTS,
+)
 from online_session.server import OnlineSessionServer
 
 
@@ -208,3 +211,84 @@ def test_client_controller_sends_backpack_loot_transfer_without_retry_tracking(q
     assert sent_packets[-1]["request_id"] == "req-loot-add-1"
     assert not hasattr(controller, "_pending_commands")
     controller.disconnect()
+
+
+def test_client_controller_pauses_auto_reconnect_after_max_attempts():
+    controller = ClientSessionController()
+    controller._manual_disconnect = False
+    controller._connect_host = "127.0.0.1"
+    controller._connect_port = 9010
+    controller._reconnect_paused = False
+    controller._reconnect_attempt = _RECONNECT_MAX_ATTEMPTS
+
+    states = []
+    controller.reconnect_state_changed.connect(states.append)
+
+    controller._schedule_reconnect()
+
+    assert controller._reconnect_paused is True
+    assert not controller._reconnect_timer.isActive()
+    assert states
+    assert states[-1]["status"] == "paused"
+    assert states[-1]["manual_retry_available"] is True
+
+
+def test_client_controller_manual_retry_restarts_reconnect_cycle_with_unlimited_retries(monkeypatch):
+    controller = ClientSessionController()
+    sent_connect_calls = []
+    monkeypatch.setattr(
+        controller.client,
+        "connect_to_host",
+        lambda host, port, name, persistent_player_id=None: sent_connect_calls.append(
+            (host, port, name, persistent_player_id)
+        ),
+    )
+    controller._manual_disconnect = False
+    controller._connect_host = "127.0.0.1"
+    controller._connect_port = 9010
+    controller._connect_name = "Mira"
+    controller._connect_persistent_player_id = "pid-1"
+    controller._reconnect_paused = True
+    controller._reconnect_attempt = _RECONNECT_MAX_ATTEMPTS
+
+    ok = controller.retry_reconnect()
+    controller._reconnect_paused = True
+    ok_second = controller.retry_reconnect()
+
+    assert ok is True
+    assert ok_second is True
+    assert controller._reconnect_paused is False
+    assert sent_connect_calls == [
+        ("127.0.0.1", 9010, "Mira", "pid-1"),
+        ("127.0.0.1", 9010, "Mira", "pid-1"),
+    ]
+
+
+def test_client_controller_reconnect_failures_after_established_session_do_not_force_manual_disconnect():
+    controller = ClientSessionController()
+    controller._manual_disconnect = False
+    controller._connect_host = "127.0.0.1"
+    controller._connect_port = 9010
+    controller._session_established = True
+
+    controller._on_disconnected()
+    assert controller._manual_disconnect is False
+
+    controller._reconnect_timer.stop()
+    controller._on_disconnected()
+
+    assert controller._manual_disconnect is False
+
+
+def test_client_controller_connect_timeout_forces_next_reconnect_attempt(monkeypatch):
+    controller = ClientSessionController()
+    disconnect_calls = []
+    monkeypatch.setattr(controller.client, "is_connected", lambda: False)
+    monkeypatch.setattr(controller.client, "is_connecting", lambda: True)
+    monkeypatch.setattr(controller.client, "disconnect", lambda: disconnect_calls.append(True))
+
+    controller._manual_disconnect = False
+    controller._reconnect_paused = False
+    controller._on_reconnect_connect_timeout()
+
+    assert disconnect_calls == [True]
