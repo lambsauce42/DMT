@@ -64,7 +64,8 @@ def test_send_handles_oversized_message_encoding_failure_without_exception(monke
 
     monkeypatch.setattr("online_session.client.encode_message", _raise_too_large)
 
-    client.send({"type": "chat", "text": "x"})
+    sent = client.send({"type": "chat", "text": "x"})
 
+    assert sent is False
     assert client._socket.writes == []
     assert any("Failed to encode outbound message" in line for line in logs)

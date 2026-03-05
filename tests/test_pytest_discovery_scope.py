@@ -23,7 +23,7 @@ def test_root_pytest_collect_only_is_scoped_to_tests_dir() -> None:
     _DEBUG_LOG.write_text("", encoding="utf-8")
     env = os.environ.copy()
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
-    cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--tier-max=1"]
+    cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--capture=no", "--tier-max=1"]
     result = subprocess.run(
         cmd,
         cwd=str(ROOT),

@@ -15,8 +15,24 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("DMT_TEST_MODE", "1")
 
 import pytest
+from PySide6.QtCore import qInstallMessageHandler
 
 _TIER_MARKERS = ("tier0", "tier1", "tier2")
+_SUPPRESSED_QT_PLUGIN_MESSAGES = {
+    "This plugin does not support propagateSizeHints()",
+    "This plugin does not support raise()",
+}
+
+
+def _filtered_qt_message_handler(msg_type, context, message) -> None:
+    text = str(message or "").strip()
+    if text in _SUPPRESSED_QT_PLUGIN_MESSAGES:
+        return
+    if callable(_PREVIOUS_QT_MESSAGE_HANDLER):
+        _PREVIOUS_QT_MESSAGE_HANDLER(msg_type, context, message)
+
+
+_PREVIOUS_QT_MESSAGE_HANDLER = qInstallMessageHandler(_filtered_qt_message_handler)
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +64,7 @@ _KNOWN_TEST_FILES = frozenset(
         "test_dungeon_lifecycle_cleanup.py",
         "test_dungeon_online_reconnect_behavior.py",
         "test_dungeon_online_reconnect_consistency.py",
+        "test_dungeon_online_philosophy_guards.py",
         "test_dungeon_online_security.py",
         "test_dungeon_online_state.py",
         "test_dungeon_online_undo_scope.py",

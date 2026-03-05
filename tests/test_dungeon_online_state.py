@@ -2005,6 +2005,7 @@ def test_host_sync_character_inventory_updates_owned_linked_entities(
                 "hp": 999,
             },
             character_id=None,
+            archive_b64=_valid_archive_b64(),
         ),
         request_id="sync-1",
     )
@@ -2366,7 +2367,7 @@ def test_host_unlink_character_entity_clears_existing_link(dungeon_widget):
     assert int(entity_state.get("linked_save_revision") or 0) == 0
 
 
-def test_host_link_character_sync_rejects_overwriting_existing_authoritative_link(dungeon_widget):
+def test_host_link_character_sync_overwrites_existing_owned_link_immediately(dungeon_widget):
     host = _configure_online_host(
         dungeon_widget,
         _entity_state(
@@ -2389,17 +2390,17 @@ def test_host_link_character_sync_rejects_overwriting_existing_authoritative_lin
             sheet_id="sheet-local",
             sheet_name="Local Hero",
             character_id="character-local",
+            archive_b64=_valid_archive_b64(),
         ),
         request_id="link-authority-1",
     )
 
     result = host.results[-1][1]
-    assert result["ok"] is False
-    assert result["data"]["action"] == "resolve_linked_character_conflict"
-    assert result["data"]["resolution"] == "host_authoritative"
+    assert result["ok"] is True
+    assert result["data"]["action"] == "link_character_entity"
     entity_state = dungeon_widget._dungeons[0]["state"]["items"][0]
-    assert entity_state["linked_sheet_id"] == "sheet-host"
-    assert entity_state["linked_character_id"] == "character-host"
+    assert entity_state["linked_sheet_id"] == "sheet-local"
+    assert entity_state["linked_character_id"] == "character-local"
 
 
 def test_host_link_character_sync_allows_duplicate_active_assignment_for_same_player_without_character_id(
@@ -2470,6 +2471,7 @@ def test_host_link_character_entity_rejects_duplicate_link_for_different_player(
 
     result = host.results[-1][1]
     assert result["ok"] is False
+    assert result["data"]["action"] == "link_character_entity"
     assert "already actively assigned" in result["message"]
     entity_state = next(
         item
@@ -2478,109 +2480,6 @@ def test_host_link_character_entity_rejects_duplicate_link_for_different_player(
     )
     assert str(entity_state.get("linked_sheet_id") or "") == ""
     assert str(entity_state.get("linked_character_id") or "") == ""
-
-
-def test_host_authoritative_conflict_reports_authoritative_character_id(dungeon_widget):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            return None
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-host",
-                        "linked_sheet_name": "Host Hero",
-                        "linked_character_id": "character-host",
-                        "linked_save_revision": 4,
-                        "linked_content_hash": "host-hash",
-                        "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-                        "pos": [0.0, 0.0],
-                    }
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    _set_assigned_players_dungeon(dungeon_widget, "d1")
-
-    dungeon_widget._handle_host_link_character_entity(
-        "player-1",
-        {
-            "entity_id": "e1",
-            "sheet_id": "sheet-local",
-            "sheet_name": "Local Hero",
-            "character_id": "character-local",
-            "dungeon_id": "d1",
-            "inventory": {"inventory": []},
-            "stats": {"name": "Local Hero"},
-        },
-        request_id="link-authority-character-id",
-    )
-
-    result = dungeon_widget._host_controller.results[-1][1]
-    assert result["ok"] is False
-    assert result["data"]["resolution"] == "host_authoritative"
-    assert result["data"]["conflict"]["character_id"] == "character-host"
-
-
-def test_host_authoritative_conflict_result_prompts_player_resolution_once(dungeon_widget, monkeypatch):
-    prompted = []
-    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_prompt_linked_character_conflict",
-        lambda conflict, **_kwargs: prompted.append(dict(conflict)),
-    )
-
-    conflict = {
-        "conflict_key": "d1::e1::character-host",
-        "dungeon_id": "d1",
-        "entity_id": "e1",
-        "character_id": "character-host",
-        "sheet_id": "sheet-host",
-        "sheet_name": "Host Hero",
-        "save_revision": 4,
-        "last_saved_at": "",
-        "content_hash": "host-hash",
-        "inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-        "allow_force_push": True,
-        "requires_local_create": False,
-    }
-
-    dungeon_widget._on_client_command_result(
-        {
-            "ok": False,
-            "message": "Entity already has host-authoritative linked character data.",
-            "data": {
-                "action": "resolve_linked_character_conflict",
-                "resolution": "host_authoritative",
-                "conflict": conflict,
-            },
-        }
-    )
-
-    assert prompted == [conflict]
 
 
 def test_host_claim_loot_blocks_when_character_not_linked(dungeon_widget):
@@ -2960,9 +2859,48 @@ def test_host_add_loot_from_inventory_rejects_missing_inventory_item(dungeon_wid
 
     result = dungeon_widget._host_controller.results[-1][1]
     assert result["ok"] is False
+    assert result["data"]["action"] == "add_loot_from_inventory"
     assert "no longer available" in result["message"]
     assert dungeon_widget._session_loot_pool == []
     assert not dungeon_widget._host_controller.snapshots
+
+
+def test_client_failed_command_result_without_action_clears_pending_requests(dungeon_widget):
+    dungeon_widget._pending_link_entity_requests["link-1"] = {"entity_id": "entity-1"}
+    dungeon_widget._pending_unlink_entity_requests["unlink-1"] = {"entity_id": "entity-2"}
+    dungeon_widget._pending_add_loot_from_inventory_requests["loot-1"] = {
+        "sheet_id": "sheet-1",
+        "sheet_name": "Hero",
+    }
+
+    dungeon_widget._on_client_command_result(
+        {
+            "ok": False,
+            "request_id": "link-1",
+            "message": "Rejected link",
+            "data": {},
+        }
+    )
+    dungeon_widget._on_client_command_result(
+        {
+            "ok": False,
+            "request_id": "unlink-1",
+            "message": "Rejected unlink",
+            "data": {},
+        }
+    )
+    dungeon_widget._on_client_command_result(
+        {
+            "ok": False,
+            "request_id": "loot-1",
+            "message": "Rejected loot transfer",
+            "data": {},
+        }
+    )
+
+    assert dungeon_widget._pending_link_entity_requests == {}
+    assert dungeon_widget._pending_unlink_entity_requests == {}
+    assert dungeon_widget._pending_add_loot_from_inventory_requests == {}
 
 
 def test_host_claim_loot_reserves_entries_until_finalize(dungeon_widget):
@@ -3582,19 +3520,6 @@ def test_external_character_inventory_save_refreshes_linked_sync_metadata(dungeo
     assert broadcast_calls == [True]
 
 
-def test_pending_link_conflict_blocks_requested_character_id(dungeon_widget):
-    dungeon_widget._pending_link_conflicts = {
-        "d1::e1::host-character": {
-            "conflict_key": "d1::e1::host-character",
-            "character_id": "host-character",
-            "requested_character_id": "local-character",
-        }
-    }
-    assert dungeon_widget._has_pending_link_conflict_for_character("host-character")
-    assert dungeon_widget._has_pending_link_conflict_for_character("local-character")
-    assert not dungeon_widget._has_pending_link_conflict_for_character("different-character")
-
-
 def test_client_claim_result_applies_items_and_custom_notes(monkeypatch, dungeon_widget):
     class _ClientStub:
         def __init__(self):
@@ -3846,100 +3771,7 @@ def test_client_claim_waits_for_inventory_sync_before_finalize(monkeypatch, dung
     assert dungeon_widget._client_controller.calls[-1][0] == "claim_loot_finalize"
 
 
-def test_client_claim_conflict_keeps_claim_pending_until_resolved(monkeypatch, dungeon_widget):
-    class _ClientStub:
-        def __init__(self):
-            self.calls = []
-
-        def send_command(self, action, payload, request_id=None):
-            self.calls.append((action, payload, request_id))
-            return True
-
-        def disconnect(self):
-            return None
-
-    inventory_state = {
-        "inventory": [{"item_id": "item-before", "quantity": 1}],
-        "inventory_notes": "",
-        "equipment": {},
-        "gold": 0,
-        "silver": 0,
-        "copper": 0,
-    }
-    prompted = []
-
-    def _apply_claim(_sheet_id, *, item_ids, note_lines):
-        inventory_state["inventory"] = [
-            {"item_id": item_id, "normalized_item_name": item_id, "quantity": 1}
-            for item_id in item_ids
-        ]
-        inventory_state["inventory_notes"] = "\n".join(note_lines)
-        return True, "Claim applied.", dict(inventory_state)
-
-    fake_module = types.SimpleNamespace(
-        apply_claim_to_sheet=_apply_claim,
-        inventory_payload_for_sheet_id=lambda _sheet_id: dict(inventory_state),
-        character_id_for_sheet_id=lambda _sheet_id: "character-1",
-    )
-    monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_prompt_linked_character_conflict",
-        lambda conflict, **_kwargs: prompted.append(dict(conflict)),
-    )
-    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
-    dungeon_widget._client_controller = _ClientStub()
-    dungeon_widget._player_connection_ready = True
-
-    dungeon_widget._on_client_command_result(
-        {
-            "ok": True,
-            "data": {
-                "claim_id": "claim-conflict-1",
-                "sheet_id": "sheet-1",
-                "claimed_entries": [
-                    {"type": "item", "item_id": "item-a", "title": "Potion"},
-                ],
-            },
-        }
-    )
-
-    conflict = {
-        "conflict_key": "d1::e1::character-1",
-        "dungeon_id": "d1",
-        "entity_id": "e1",
-        "character_id": "character-1",
-        "sheet_id": "sheet-1",
-        "sheet_name": "Hero",
-        "save_revision": 2,
-        "last_saved_at": "",
-        "content_hash": "host-hash",
-        "inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-        "allow_force_push": True,
-        "requires_local_create": False,
-    }
-    dungeon_widget._on_client_command_result(
-        {
-            "ok": False,
-            "message": "Resolve the conflict before syncing inventory.",
-            "data": {
-                "action": "resolve_linked_character_conflict",
-                "resolution": "host_authoritative",
-                "claim_id": "claim-conflict-1",
-                "conflict": conflict,
-            },
-        }
-    )
-
-    assert prompted == [conflict]
-    assert "claim-conflict-1" not in dungeon_widget._pending_loot_claim_finalizations
-    pending = dungeon_widget._pending_loot_claim_rollbacks["claim-conflict-1"]
-    assert pending["status"] == "awaiting_conflict_resolution"
-    assert pending["conflict_key"] == "d1::e1::character-1"
-    assert dungeon_widget._client_controller.calls[-1][0] == "sync_character_inventory"
-
-
-def test_client_disconnect_rolls_back_pending_loot_claim_conflict(monkeypatch, dungeon_widget):
+def test_client_sync_failure_rolls_back_pending_loot_claim(monkeypatch, dungeon_widget):
     class _ClientStub:
         def __init__(self):
             self.calls = []
@@ -3982,7 +3814,6 @@ def test_client_disconnect_rolls_back_pending_loot_claim_conflict(monkeypatch, d
         character_id_for_sheet_id=lambda _sheet_id: "character-1",
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
-    monkeypatch.setattr(dungeon_widget, "_prompt_linked_character_conflict", lambda *_args, **_kwargs: None)
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._client_controller = _ClientStub()
     dungeon_widget._player_connection_ready = True
@@ -4003,25 +3834,10 @@ def test_client_disconnect_rolls_back_pending_loot_claim_conflict(monkeypatch, d
     dungeon_widget._on_client_command_result(
         {
             "ok": False,
-            "message": "Resolve the conflict before syncing inventory.",
+            "message": "Host has newer linked character data. Pull the latest host state and retry.",
             "data": {
-                "action": "resolve_linked_character_conflict",
-                "resolution": "host_authoritative",
+                "action": "sync_character_inventory",
                 "claim_id": "claim-disconnect-1",
-                "conflict": {
-                    "conflict_key": "d1::e1::character-1",
-                    "dungeon_id": "d1",
-                    "entity_id": "e1",
-                    "character_id": "character-1",
-                    "sheet_id": "sheet-1",
-                    "sheet_name": "Hero",
-                    "save_revision": 2,
-                    "last_saved_at": "",
-                    "content_hash": "host-hash",
-                    "inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-                    "allow_force_push": True,
-                    "requires_local_create": False,
-                },
             },
         }
     )
@@ -4034,7 +3850,7 @@ def test_client_disconnect_rolls_back_pending_loot_claim_conflict(monkeypatch, d
         {"item_id": "item-before", "normalized_item_name": "item-before", "quantity": 1}
     ]
     assert "claim-disconnect-1" not in dungeon_widget._pending_loot_claim_rollbacks
-    assert "claim-disconnect-1" not in dungeon_widget._pending_loot_claim_finalizations
+    assert dungeon_widget._pending_loot_claim_finalizations["claim-disconnect-1"]["applied"] is False
 
 
 def test_host_stale_loot_claim_timeout_skips_held_claims(dungeon_widget):
@@ -5715,272 +5531,6 @@ def test_extract_character_stats_from_generated_pdf_fixture(tmp_path):
     assert stats.get("hp_current") == 19
 
 
-def test_host_can_ignore_player_overwrite_requests_for_current_session(dungeon_widget):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            return None
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._ignore_player_overwrite_requests = True
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_sheet_name": "Hero",
-                        "linked_character_id": "character-1",
-                        "linked_inventory": {"inventory": []},
-                        "pos": [0.0, 0.0],
-                    }
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    _set_assigned_players_dungeon(dungeon_widget, "d1")
-    dungeon_widget._handle_host_resolve_linked_character_conflict(
-        "player-1",
-        {
-            "mode": "overwrite_dm",
-            "conflict_key": "d1::e1::character-1",
-            "entity_id": "e1",
-            "sheet_id": "sheet-1",
-            "sheet_name": "Hero",
-            "dungeon_id": "d1",
-            "character_id": "character-1",
-            "inventory": {"inventory": ["item-1"]},
-            "stats": {"name": "Hero"},
-        },
-        request_id="ignore-overwrite-1",
-    )
-
-    result = dungeon_widget._host_controller.results[-1][1]
-    assert result["ok"] is False
-    assert result["data"]["action"] == "resolve_linked_character_conflict"
-    assert result["data"]["resolution"] == "dm_ignored"
-    assert "ignoring overwrite requests" in str(result["message"]).lower()
-
-
-def test_host_conflict_resolution_missing_entity_returns_error_without_crash(dungeon_widget):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            return None
-
-        def stop(self):
-            return None
-
-    host = _HostStub()
-    dungeon_widget._host_controller = host
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {"items": [], "fog": {"path": []}},
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    _set_assigned_players_dungeon(dungeon_widget, "d1")
-    dungeon_widget._handle_host_resolve_linked_character_conflict(
-        "player-1",
-        {
-            "mode": "overwrite_dm",
-            "conflict_key": "d1::missing::character-1",
-            "entity_id": "missing",
-            "sheet_id": "sheet-1",
-            "sheet_name": "Hero",
-            "dungeon_id": "d1",
-            "character_id": "character-1",
-            "inventory": {"inventory": ["item-1"]},
-            "stats": {"name": "Hero"},
-        },
-        request_id="missing-entity",
-    )
-
-    assert host.results
-    result = host.results[-1][1]
-    assert result["ok"] is False
-    assert "not found" in str(result.get("message") or "").lower()
-    assert result["data"]["action"] == "resolve_linked_character_conflict"
-    assert result["data"]["conflict"]["character_id"] == ""
-
-
-def test_host_duplicate_overwrite_requests_are_throttled(monkeypatch, dungeon_widget):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def broadcast_snapshot(self, snapshot):
-            return None
-
-        def stop(self):
-            return None
-
-    class _FakeDialog:
-        ButtonRole = dungeon_applet_module.QMessageBox.ButtonRole
-        shown = 0
-
-        def __init__(self, *_args, **_kwargs):
-            self._reject = object()
-            self._clicked = self._reject
-
-        def setWindowTitle(self, *_args, **_kwargs):
-            return None
-
-        def setText(self, *_args, **_kwargs):
-            return None
-
-        def setInformativeText(self, *_args, **_kwargs):
-            return None
-
-        def addButton(self, _label, role):
-            if role == self.ButtonRole.RejectRole:
-                return self._reject
-            return object()
-
-        def exec(self):
-            _FakeDialog.shown += 1
-            return None
-
-        def clickedButton(self):
-            return self._clicked
-
-    monkeypatch.setattr(dungeon_applet_module, "_in_test_env", lambda: False)
-    monkeypatch.setattr(dungeon_applet_module, "QMessageBox", _FakeDialog)
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    dungeon_widget._connected_players = {"player-1": "Mira"}
-    dungeon_widget._dungeons = [
-        {
-            "id": "d1",
-            "name": "Dungeon 1",
-            "state": {
-                "items": [
-                    {
-                        "type": "entity",
-                        "entity_id": "e1",
-                        "owner_player_id": "player-1",
-                        "linked_sheet_id": "sheet-1",
-                        "linked_sheet_name": "Hero",
-                        "linked_character_id": "character-1",
-                        "linked_save_revision": 1,
-                        "linked_content_hash": "host-hash",
-                        "linked_inventory": {"inventory": [{"item_id": "item-1", "quantity": 1}]},
-                        "pos": [0.0, 0.0],
-                    }
-                ],
-                "fog": {"path": []},
-            },
-            "preview": None,
-            "preview_signature": None,
-            "dirty": False,
-        }
-    ]
-    _set_assigned_players_dungeon(dungeon_widget, "d1")
-    payload = {
-        "mode": "overwrite_dm",
-        "conflict_key": "d1::e1::character-1",
-        "entity_id": "e1",
-        "sheet_id": "sheet-1",
-        "sheet_name": "Hero",
-        "dungeon_id": "d1",
-        "character_id": "character-1",
-        "save_revision": 2,
-        "last_saved_at": "",
-        "content_hash": "player-hash",
-        "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
-        "stats": {"name": "Hero"},
-    }
-
-    dungeon_widget._handle_host_resolve_linked_character_conflict(
-        "player-1",
-        dict(payload),
-        request_id="overwrite-1",
-    )
-    dungeon_widget._handle_host_resolve_linked_character_conflict(
-        "player-1",
-        dict(payload),
-        request_id="overwrite-2",
-    )
-
-    assert _FakeDialog.shown == 1
-    assert len(dungeon_widget._host_controller.results) == 2
-    first = dungeon_widget._host_controller.results[0][1]
-    second = dungeon_widget._host_controller.results[1][1]
-    assert first["message"] == second["message"]
-    assert first["data"]["resolution"] == "dm_denied"
-    assert second["data"]["resolution"] == "dm_denied"
-
-
-def test_dm_denied_conflict_response_does_not_force_reprompt_loop(dungeon_widget, monkeypatch):
-    prompts = []
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_prompt_linked_character_conflict",
-        lambda *args, **kwargs: prompts.append((args, kwargs)),
-    )
-
-    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
-    conflict = {
-        "conflict_key": "d1::e1::character-1",
-        "dungeon_id": "d1",
-        "entity_id": "e1",
-        "character_id": "character-1",
-        "sheet_id": "sheet-1",
-        "sheet_name": "Hero",
-        "save_revision": 1,
-        "last_saved_at": "",
-        "content_hash": "host-hash",
-        "inventory": {"inventory": [{"item_id": "item-1", "quantity": 1}]},
-    }
-    dungeon_widget._on_client_command_result(
-        {
-            "ok": False,
-            "message": "DM denied overwrite request.",
-            "data": {
-                "action": "resolve_linked_character_conflict",
-                "resolution": "dm_denied",
-                "conflict": dict(conflict),
-            },
-        }
-    )
-
-    assert prompts == []
-    assert conflict["conflict_key"] in dungeon_widget._pending_link_conflicts
-    assert conflict["conflict_key"] in dungeon_widget._suppressed_link_conflicts
-
-
 def test_snapshot_missing_local_character_forwards_entity_context_to_local_sync(
     dungeon_widget, monkeypatch
 ):
@@ -6177,92 +5727,6 @@ def test_missing_local_character_save_locally_continues_sync(dungeon_widget, mon
     assert ok is True
     assert applied["character_id"] == "character-host"
     assert applied["sheet_name"] == "Host Hero"
-
-
-def test_snapshot_does_not_reprompt_suppressed_conflict_with_unchanged_host_payload(
-    dungeon_widget, monkeypatch
-):
-    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
-    dungeon_widget._local_player_id = "player-local"
-    dungeon_widget._player_connection_ready = True
-    dungeon_widget._client_controller = types.SimpleNamespace(
-        send_command=lambda *_args, **_kwargs: True,
-        disconnect=lambda: None,
-    )
-
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_resolve_local_sheet_sync_payload",
-        lambda _character_id: {
-            "sheet_id": "sheet-1",
-            "sheet_name": "Hero",
-            "character_id": "character-1",
-            "save_revision": 1,
-            "last_saved_at": "",
-            "content_hash": "local-hash",
-            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
-            "stats": {"name": "Hero"},
-        },
-    )
-
-    prompts = []
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_prompt_linked_character_conflict",
-        lambda payload, force=False: prompts.append((dict(payload), bool(force))),
-    )
-
-    suppressed_conflict = {
-        "conflict_key": "d1::entity-1::character-1",
-        "dungeon_id": "d1",
-        "entity_id": "entity-1",
-        "character_id": "character-1",
-        "sheet_id": "sheet-1",
-        "sheet_name": "Hero",
-        "save_revision": 1,
-        "last_saved_at": "",
-        "content_hash": "host-hash",
-        "inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-        "allow_force_push": True,
-        "requires_local_create": False,
-    }
-    conflict_key = str(suppressed_conflict["conflict_key"])
-    dungeon_widget._suppressed_link_conflicts[conflict_key] = (
-        dungeon_widget._linked_character_conflict_signature(suppressed_conflict)
-    )
-
-    snapshot = {
-        "players": {"player-local": "Mira"},
-        "players_dungeon_id": "d1",
-        "active_dungeon_id": "d1",
-        "dungeons": [
-            {
-                "id": "d1",
-                "name": "Players",
-                "state": {
-                    "items": [
-                        {
-                            "type": "entity",
-                            "entity_id": "entity-1",
-                            "owner_player_id": "player-local",
-                            "linked_sheet_id": "sheet-1",
-                            "linked_sheet_name": "Hero",
-                            "linked_character_id": "character-1",
-                            "linked_save_revision": 1,
-                            "linked_content_hash": "host-hash",
-                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-                        }
-                    ],
-                    "fog": {"path": []},
-                },
-            }
-        ],
-    }
-
-    dungeon_widget._on_client_snapshot_received(snapshot)
-
-    assert prompts == []
-
 
 def test_player_state_update_is_queued_when_send_fails_and_flushed_after_snapshot(
     dungeon_widget, monkeypatch

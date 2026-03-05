@@ -78,14 +78,15 @@ class HostSessionController(QObject):
             return False
         reason = str(message or "Removed from host.").strip() or "Removed from host."
         self._pending_kick_messages[clean_player_id] = reason
+        ok = bool(self.server.disconnect_player(clean_player_id, message=reason))
+        if not ok:
+            self._pending_kick_messages.pop(clean_player_id, None)
+            return False
         self.broadcast_chat(
             actor_name="System",
             text=f"{player_name} was kicked: {reason}",
             system=True,
         )
-        ok = bool(self.server.disconnect_player(clean_player_id, message=reason))
-        if not ok:
-            self._pending_kick_messages.pop(clean_player_id, None)
         return ok
 
     def broadcast_chat(self, *, actor_name: str, text: str, system: bool = False) -> None:
@@ -290,7 +291,7 @@ class ClientSessionController(QObject):
         if not self.client.is_connected():
             self.log_line.emit(f"[WARN] Dropped '{action}' command while disconnected")
             return False
-        self.client.send(
+        sent = self.client.send(
             {
                 "type": "command",
                 "action": action,
@@ -298,6 +299,9 @@ class ClientSessionController(QObject):
                 "request_id": request_id,
             }
         )
+        if sent is False:
+            self.log_line.emit(f"[WARN] Failed to send '{action}' command")
+            return False
         return True
 
     def request_snapshot(self) -> None:

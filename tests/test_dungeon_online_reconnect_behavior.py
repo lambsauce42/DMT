@@ -1,5 +1,6 @@
 import os
 import sys
+import types
 
 import pytest
 from PySide6.QtCore import QPointF, Qt
@@ -137,6 +138,44 @@ def test_disconnect_after_hello_ack_keeps_player_mode_and_reconnects(dungeon_wid
     assert controller._reconnect_timer.isActive()
 
 
+def test_failed_reconnect_attempt_after_established_session_keeps_player_mode(dungeon_widget):
+    controller = ClientSessionController(dungeon_widget)
+    controller.disconnected.connect(dungeon_widget._on_client_disconnected)
+    controller._connect_host = "127.0.0.1"
+    controller._connect_port = 8765
+    controller._connect_name = "Mira"
+    dungeon_widget._client_controller = controller
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_name = "Mira"
+
+    dungeon_widget._on_client_hello_ack("player-1")
+    controller._on_disconnected()
+    controller._reconnect_timer.stop()
+    controller._on_disconnected()
+
+    assert dungeon_widget._online_mode == ONLINE_MODE_PLAYER
+    assert controller._manual_disconnect is False
+
+
+def test_player_disconnect_clears_pending_online_command_requests(dungeon_widget):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = types.SimpleNamespace(
+        _reconnect_requires_established_session=False,
+        consume_terminal_disconnect_message=lambda: "",
+        disconnect=lambda: None,
+    )
+    dungeon_widget._pending_link_entity_requests["link-1"] = {"entity_id": "entity-1"}
+    dungeon_widget._pending_unlink_entity_requests["unlink-1"] = {"entity_id": "entity-2"}
+    dungeon_widget._pending_add_loot_from_inventory_requests["loot-1"] = {"sheet_id": "sheet-1"}
+
+    dungeon_widget._on_client_disconnected()
+
+    assert dungeon_widget._pending_link_entity_requests == {}
+    assert dungeon_widget._pending_unlink_entity_requests == {}
+    assert dungeon_widget._pending_add_loot_from_inventory_requests == {}
+
+
 def test_first_player_snapshot_does_not_auto_push_pending_character_overrides(dungeon_widget):
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._local_player_id = "player-local"
@@ -216,11 +255,11 @@ def test_player_snapshot_triggers_managed_linked_artifact_cleanup(dungeon_widget
     assert cleanup_calls == [True]
 
 
-def test_snapshot_with_newer_local_linked_character_prompts_conflict_instead_of_auto_push(
+def test_snapshot_with_newer_local_linked_character_pulls_host_state_without_auto_push(
     dungeon_widget, monkeypatch
 ):
     pushed = []
-    prompted = []
+    synced_from_host = []
 
     class _ClientStub:
         def send_command(self, action, payload, request_id=None):
@@ -250,8 +289,8 @@ def test_snapshot_with_newer_local_linked_character_prompts_conflict_instead_of_
     )
     monkeypatch.setattr(
         dungeon_widget,
-        "_prompt_linked_character_conflict",
-        lambda conflict, **_kwargs: prompted.append(dict(conflict)),
+        "_sync_local_sheet_inventory_from_host",
+        lambda *args, **kwargs: synced_from_host.append((args, kwargs)) or (True, "ok"),
     )
 
     snapshot = {
@@ -294,112 +333,7 @@ def test_snapshot_with_newer_local_linked_character_prompts_conflict_instead_of_
     dungeon_widget._on_client_snapshot_received(snapshot)
 
     assert pushed == []
-    assert len(prompted) == 1
-    assert prompted[0]["character_id"] == "character-1"
-
-
-def test_reconnect_keeps_unresolved_link_conflict_blocked(dungeon_widget, monkeypatch):
-    sent_commands = []
-
-    class _ClientStub:
-        def send_command(self, action, payload, request_id=None):
-            sent_commands.append((action, dict(payload), request_id))
-            return True
-
-        def disconnect(self):
-            return None
-
-    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
-    dungeon_widget._local_player_id = "player-local"
-    dungeon_widget._local_player_name = "Mira"
-    dungeon_widget._player_connection_ready = True
-    dungeon_widget._client_controller = _ClientStub()
-
-    monkeypatch.setattr("player_sheets.character_id_for_sheet_id", lambda _sheet_id: "character-1")
-    monkeypatch.setattr("player_sheets.inventory_payload_for_sheet_id", lambda _sheet_id: {"inventory": []})
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_resolve_local_sheet_sync_payload",
-        lambda _character_id: {
-            "sheet_id": "sheet-1",
-            "sheet_name": "Hero",
-            "character_id": "character-1",
-            "save_revision": 5,
-            "last_saved_at": "",
-            "content_hash": "local-hash",
-            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
-            "stats": {"name": "Hero"},
-            "archive_b64": "",
-        },
-    )
-
-    conflict = {
-        "conflict_key": "d1::entity-1::character-1",
-        "dungeon_id": "d1",
-        "entity_id": "entity-1",
-        "character_id": "character-1",
-        "sheet_id": "sheet-1",
-        "sheet_name": "Hero",
-        "save_revision": 2,
-        "last_saved_at": "",
-        "content_hash": "host-hash",
-        "inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-        "allow_force_push": True,
-        "requires_local_create": False,
-    }
-    conflict_key = str(conflict["conflict_key"])
-    dungeon_widget._pending_link_conflicts[conflict_key] = dict(conflict)
-    dungeon_widget._suppressed_link_conflicts[conflict_key] = (
-        dungeon_widget._linked_character_conflict_signature(conflict)
-    )
-
-    dungeon_widget._on_client_disconnected()
-    dungeon_widget._on_client_hello_ack("player-local")
-
-    prompts = []
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_prompt_linked_character_conflict",
-        lambda payload, force=False: prompts.append((dict(payload), bool(force))),
-    )
-
-    snapshot = {
-        "players": {"player-local": "Mira"},
-        "players_dungeon_id": "d1",
-        "active_dungeon_id": "d1",
-        "dungeons": [
-            {
-                "id": "d1",
-                "name": "Players",
-                "state": {
-                    "items": [
-                        {
-                            "type": "entity",
-                            "entity_id": "entity-1",
-                            "owner_player_id": "player-local",
-                            "linked_sheet_id": "sheet-1",
-                            "linked_sheet_name": "Hero",
-                            "linked_character_id": "character-1",
-                            "linked_save_revision": 2,
-                            "linked_content_hash": "host-hash",
-                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-                        }
-                    ],
-                    "fog": {"path": []},
-                },
-            }
-        ],
-    }
-
-    dungeon_widget._on_client_snapshot_received(snapshot)
-
-    assert prompts == []
-    dungeon_widget._on_external_character_inventory_saved(
-        "sheet-1",
-        {"inventory": [{"item_id": "item-local", "quantity": 1}]},
-    )
-
-    assert sent_commands == []
+    assert synced_from_host
 
 
 def test_player_disconnect_redacts_scene_until_snapshot(dungeon_widget):

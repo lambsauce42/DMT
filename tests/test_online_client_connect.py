@@ -13,6 +13,7 @@ if SRC not in sys.path:
 from online_session.client import OnlineSessionClient
 from online_session.controllers import (
     ClientSessionController,
+    HostSessionController,
     _RECONNECT_MAX_ATTEMPTS,
 )
 from online_session.server import OnlineSessionServer
@@ -199,11 +200,11 @@ def test_client_controller_sends_backpack_loot_transfer_without_retry_tracking(q
     monkeypatch.setattr(controller.client, "is_connected", lambda: True)
     monkeypatch.setattr(controller.client, "send", lambda payload: sent_packets.append(dict(payload)))
 
-    controller.send_command(
+    assert controller.send_command(
         "add_loot_from_inventory",
         {"sheet_id": "sheet-1", "items": [{"item_id": "item-a"}]},
         request_id="req-loot-add-1",
-    )
+    ) is True
 
     assert sent_packets
     assert sent_packets[-1]["type"] == "command"
@@ -211,6 +212,61 @@ def test_client_controller_sends_backpack_loot_transfer_without_retry_tracking(q
     assert sent_packets[-1]["request_id"] == "req-loot-add-1"
     assert not hasattr(controller, "_pending_commands")
     controller.disconnect()
+
+
+def test_client_controller_send_command_returns_false_when_client_send_fails(monkeypatch):
+    controller = ClientSessionController()
+    monkeypatch.setattr(controller.client, "is_connected", lambda: True)
+    monkeypatch.setattr(controller.client, "send", lambda payload: False)
+
+    assert (
+        controller.send_command(
+            "add_loot_from_inventory",
+            {"sheet_id": "sheet-1", "items": [{"item_id": "item-a"}]},
+            request_id="req-loot-add-fail",
+        )
+        is False
+    )
+
+
+def test_host_controller_kick_player_only_broadcasts_after_disconnect_starts(monkeypatch):
+    controller = HostSessionController()
+    controller.server._players["player-1"] = "Alice"
+    broadcasts = []
+    disconnect_calls = []
+
+    monkeypatch.setattr(
+        controller,
+        "broadcast_chat",
+        lambda **kwargs: broadcasts.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        controller.server,
+        "disconnect_player",
+        lambda player_id, message="": disconnect_calls.append((player_id, message)) or False,
+    )
+
+    assert controller.kick_player("player-1", message="Removed.") is False
+    assert broadcasts == []
+
+    monkeypatch.setattr(
+        controller.server,
+        "disconnect_player",
+        lambda player_id, message="": disconnect_calls.append((player_id, message)) or True,
+    )
+
+    assert controller.kick_player("player-1", message="Removed.") is True
+    assert disconnect_calls == [
+        ("player-1", "Removed."),
+        ("player-1", "Removed."),
+    ]
+    assert broadcasts == [
+        {
+            "actor_name": "System",
+            "text": "Alice was kicked: Removed.",
+            "system": True,
+        }
+    ]
 
 
 def test_client_controller_pauses_auto_reconnect_after_max_attempts():

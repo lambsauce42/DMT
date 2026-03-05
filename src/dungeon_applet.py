@@ -4396,6 +4396,11 @@ class DungeonAppletWidget(QWidget):
         self._approved_host_inventory_sync_characters: set[str] = set()
         self._pending_link_entity_requests: dict[str, dict] = {}
         self._pending_unlink_entity_requests: dict[str, dict] = {}
+        self._pending_link_conflicts: dict[str, dict] = {}
+        self._suppressed_link_conflicts: dict[str, str] = {}
+        self._host_link_conflict_response_cache: dict[str, dict] = {}
+        self._ignore_player_overwrite_requests: bool = False
+        self._sent_character_override_fingerprints: dict[str, str] = {}
         self._host_unknown_item_review_cache: dict[str, dict] = {}
         self._suppress_client_disconnect_handler: bool = False
         self._join_retry_prompt_open: bool = False
@@ -4813,7 +4818,7 @@ class DungeonAppletWidget(QWidget):
         self._pending_loot_claim_finalizations.clear()
         self._loot_claim_finalize_response_cache.clear()
         self._pending_loot_claim_rollbacks.clear()
-        self._pending_add_loot_from_inventory_requests.clear()
+        self._clear_pending_online_command_requests(reason="starting a hosted session")
         self._server_log_panel.set_ignore_overwrite_checked(False)
         self._initiative_state = {
             "active": False,
@@ -4899,7 +4904,7 @@ class DungeonAppletWidget(QWidget):
         self._pending_loot_claim_finalizations.clear()
         self._loot_claim_finalize_response_cache.clear()
         self._pending_loot_claim_rollbacks.clear()
-        self._pending_add_loot_from_inventory_requests.clear()
+        self._clear_pending_online_command_requests(reason="starting a new join session")
         self._hide_reconnect_status_dialog()
         self._initiative_state = {
             "active": False,
@@ -5033,7 +5038,7 @@ class DungeonAppletWidget(QWidget):
             self._loot_claim_entry_reservations.clear()
             self._pending_loot_claim_finalizations.clear()
             self._pending_loot_claim_rollbacks.clear()
-            self._pending_add_loot_from_inventory_requests.clear()
+            self._clear_pending_online_command_requests(reason="leaving the current online session")
             self._host_unknown_item_review_cache.clear()
         else:
             self._server_log_panel.set_ignore_overwrite_checked(False)
@@ -5053,6 +5058,10 @@ class DungeonAppletWidget(QWidget):
             self._pending_player_state_update_request_id = ""
             self._online_inventory_sync_fingerprints.clear()
             self._approved_host_inventory_sync_characters.clear()
+            self._pending_link_conflicts.clear()
+            self._suppressed_link_conflicts.clear()
+            self._host_link_conflict_response_cache.clear()
+            self._sent_character_override_fingerprints.clear()
         self._render_initiative_overlay()
         self._update_loot_pool_badge()
         self._apply_online_permissions()
@@ -7466,7 +7475,7 @@ class DungeonAppletWidget(QWidget):
             return False
         if isinstance(self._client_controller, ClientSessionController):
             return bool(self._player_connection_ready)
-        return True
+        return callable(getattr(self._client_controller, "send_command", None))
 
     def _dispatch_player_command_with_request_id(
         self,
@@ -7484,8 +7493,11 @@ class DungeonAppletWidget(QWidget):
             if (not silent) and unavailable_title and unavailable_message:
                 QMessageBox.warning(self, unavailable_title, unavailable_message)
             return None
+        send_command = getattr(self._client_controller, "send_command", None)
+        if not callable(send_command):
+            return None
         outgoing_request_id = str(request_id or uuid.uuid4().hex)
-        sent = self._client_controller.send_command(
+        sent = send_command(
             action,
             payload,
             request_id=outgoing_request_id,
@@ -7546,6 +7558,159 @@ class DungeonAppletWidget(QWidget):
             if str(payload.get("entity_id") or "").strip() == clean_entity:
                 return True
         return False
+
+    def _pending_online_command_action_for_request(self, request_id: str) -> str:
+        clean_request_id = str(request_id or "").strip()
+        if not clean_request_id:
+            return ""
+        if clean_request_id == self._pending_player_state_update_request_id:
+            return "state_update"
+        if clean_request_id in self._pending_link_entity_requests:
+            return "link_character_entity"
+        if clean_request_id in self._pending_unlink_entity_requests:
+            return "unlink_character_entity"
+        if clean_request_id in self._pending_add_loot_from_inventory_requests:
+            return "add_loot_from_inventory"
+        return ""
+
+    def _clear_pending_online_command_requests(self, *, reason: str = "") -> None:
+        pending_count = (
+            len(self._pending_link_entity_requests)
+            + len(self._pending_unlink_entity_requests)
+            + len(self._pending_add_loot_from_inventory_requests)
+        )
+        if pending_count <= 0:
+            return
+        self._pending_link_entity_requests.clear()
+        self._pending_unlink_entity_requests.clear()
+        self._pending_add_loot_from_inventory_requests.clear()
+        if reason:
+            noun = "request" if pending_count == 1 else "requests"
+            self._append_server_log(
+                f"[WARN] Cleared {pending_count} pending online command {noun} after {reason}."
+            )
+
+    def _linked_character_conflict_signature(self, conflict: dict) -> str:
+        payload = dict(conflict) if isinstance(conflict, dict) else {}
+        requested_character_id = str(payload.get("requested_character_id") or "").strip()
+        if not requested_character_id or requested_character_id == str(payload.get("character_id") or "").strip():
+            payload.pop("requested_character_id", None)
+        payload["inventory"] = normalize_inventory_payload(payload.get("inventory") or {})
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    def _has_pending_link_conflict_for_character(self, character_id: str) -> bool:
+        clean_character = str(character_id or "").strip()
+        if not clean_character:
+            return False
+        for conflict in self._pending_link_conflicts.values():
+            if not isinstance(conflict, dict):
+                continue
+            if str(conflict.get("character_id") or "").strip() == clean_character:
+                return True
+            if str(conflict.get("requested_character_id") or "").strip() == clean_character:
+                return True
+        return False
+
+    def _cache_host_link_conflict_response(
+        self,
+        cache_key: str,
+        signature: str,
+        *,
+        ok: bool,
+        message: str,
+        data: dict | None = None,
+    ) -> None:
+        clean_cache_key = str(cache_key or "").strip()
+        if not clean_cache_key:
+            return
+        self._host_link_conflict_response_cache[clean_cache_key] = {
+            "signature": str(signature or "").strip(),
+            "ok": bool(ok),
+            "message": str(message or "").strip(),
+            "data": dict(data) if isinstance(data, dict) else {},
+            "created_monotonic": float(time.monotonic()),
+        }
+
+    def _replay_host_link_conflict_response(
+        self,
+        player_id: str,
+        cache_key: str,
+        signature: str,
+        *,
+        request_id: str | None = None,
+    ) -> bool:
+        if self._host_controller is None:
+            return False
+        cached = self._host_link_conflict_response_cache.get(str(cache_key or "").strip())
+        if not isinstance(cached, dict):
+            return False
+        if str(cached.get("signature") or "").strip() != str(signature or "").strip():
+            return False
+        self._host_controller.send_command_result(
+            player_id,
+            ok=bool(cached.get("ok")),
+            message=str(cached.get("message") or "Command rejected"),
+            request_id=request_id,
+            data=dict(cached.get("data") or {}),
+        )
+        return True
+
+    def _build_linked_character_conflict(
+        self,
+        *,
+        dungeon_id: str,
+        entity_id: str,
+        character_id: str,
+        sheet_id: str,
+        sheet_name: str,
+        save_revision: int = 0,
+        last_saved_at: str = "",
+        content_hash: str = "",
+        inventory: dict | None = None,
+        requested_character_id: str = "",
+        allow_force_push: bool = True,
+        requires_local_create: bool = False,
+    ) -> dict:
+        clean_character = str(character_id or "").strip()
+        clean_entity = str(entity_id or "").strip()
+        clean_dungeon = str(dungeon_id or "").strip()
+        conflict_key = "::".join(
+            [
+                clean_dungeon or "",
+                clean_entity or "",
+                clean_character or "",
+            ]
+        )
+        return {
+            "conflict_key": conflict_key,
+            "dungeon_id": clean_dungeon,
+            "entity_id": clean_entity,
+            "character_id": clean_character,
+            "requested_character_id": str(requested_character_id or "").strip(),
+            "sheet_id": str(sheet_id or "").strip(),
+            "sheet_name": str(sheet_name or sheet_id or character_id).strip(),
+            "save_revision": max(0, int(save_revision or 0)),
+            "last_saved_at": str(last_saved_at or ""),
+            "content_hash": str(content_hash or ""),
+            "inventory": normalize_inventory_payload(inventory or {}),
+            "allow_force_push": bool(allow_force_push),
+            "requires_local_create": bool(requires_local_create),
+        }
+
+    def _prompt_linked_character_conflict(self, conflict: dict, *, force: bool = False) -> bool:
+        normalized = dict(conflict) if isinstance(conflict, dict) else {}
+        conflict_key = str(normalized.get("conflict_key") or "").strip()
+        if not conflict_key:
+            return False
+        signature = self._linked_character_conflict_signature(normalized)
+        existing_signature = self._suppressed_link_conflicts.get(conflict_key, "")
+        if (not force) and existing_signature == signature:
+            return False
+        self._pending_link_conflicts[conflict_key] = normalized
+        self._append_server_log(
+            "[WARN] Linked character data conflict detected. Resolve it before retrying inventory sync."
+        )
+        return True
 
     def _queue_pending_player_state_update(self, payload: dict) -> None:
         if not isinstance(payload, dict):
@@ -8288,6 +8453,7 @@ class DungeonAppletWidget(QWidget):
         was_ready = bool(self._player_connection_ready)
         was_waiting_for_snapshot = bool(self._awaiting_player_snapshot)
         terminal_disconnect_message = ""
+        reconnect_after_established_session = False
         if self._client_controller is not None:
             consume_terminal_message = getattr(
                 self._client_controller,
@@ -8296,6 +8462,9 @@ class DungeonAppletWidget(QWidget):
             )
             if callable(consume_terminal_message):
                 terminal_disconnect_message = str(consume_terminal_message() or "").strip()
+            reconnect_after_established_session = not bool(
+                getattr(self._client_controller, "_reconnect_requires_established_session", True)
+            )
         self._player_connection_ready = False
         self._awaiting_player_snapshot = False
         if isinstance(self._pending_player_state_update, dict):
@@ -8304,7 +8473,7 @@ class DungeonAppletWidget(QWidget):
             self._append_server_log(
                 "[WARN] Dropped pending player state update on disconnect to avoid replaying stale local state after reconnect."
             )
-        self._pending_add_loot_from_inventory_requests.clear()
+        self._clear_pending_online_command_requests(reason="connection loss")
         pending_claim_ids = [
             str(claim_id)
             for claim_id, pending in self._pending_loot_claim_rollbacks.items()
@@ -8319,7 +8488,14 @@ class DungeonAppletWidget(QWidget):
         self._update_connected_players({})
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
-        self._redact_player_scene_while_disconnected()
+        should_redact_scene = not (
+            isinstance(self._client_controller, ClientSessionController)
+            and not reconnect_after_established_session
+        )
+        if should_redact_scene:
+            self._redact_player_scene_while_disconnected()
+        else:
+            self._apply_online_permissions()
         if terminal_disconnect_message:
             if self._retry_join_with_different_player_name(terminal_disconnect_message):
                 return
@@ -8345,7 +8521,7 @@ class DungeonAppletWidget(QWidget):
             )
             self._apply_online_permissions()
             return
-        if not was_ready:
+        if not was_ready and not reconnect_after_established_session:
             self._pending_player_state_update = None
             self._pending_player_state_update_request_id = ""
             self._approved_host_inventory_sync_characters.clear()
@@ -8818,6 +8994,7 @@ class DungeonAppletWidget(QWidget):
                 ok=False,
                 message="Linked character conflict resolution is no longer supported.",
                 request_id=request_id,
+                data={"action": "resolve_linked_character_conflict"},
             )
             return
 
@@ -9105,6 +9282,7 @@ class DungeonAppletWidget(QWidget):
         archive_ok, archive_b64, archive_bytes = self._validate_archive_payload(
             str(payload.get("archive_b64") or "")
         )
+        archive_supplied = "archive_b64" in payload
         inventory_payload = payload.get("inventory")
         stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
         if not sheet_id or not isinstance(inventory_payload, dict):
@@ -9194,6 +9372,7 @@ class DungeonAppletWidget(QWidget):
                 archive_b64=archive_b64,
                 archive_bytes=archive_bytes,
                 fallback_archive_b64=fallback_archive_b64,
+                archive_required=True,
             )
             if not metadata_ok:
                 self._host_controller.send_command_result(
@@ -9228,6 +9407,7 @@ class DungeonAppletWidget(QWidget):
                 incoming_content_hash=content_hash,
                 archive_b64=archive_b64,
                 archive_bytes=archive_bytes,
+                archive_required=True,
             )
             if not metadata_ok:
                 self._host_controller.send_command_result(
@@ -9317,6 +9497,23 @@ class DungeonAppletWidget(QWidget):
     ) -> None:
         if self._host_controller is None:
             return
+        def _send_link_result(
+            *,
+            ok: bool,
+            message: str,
+            data: dict | None = None,
+        ) -> None:
+            response_data = dict(result_data) if isinstance(result_data, dict) else {}
+            if isinstance(data, dict):
+                response_data.update(data)
+            response_data.setdefault("action", "link_character_entity")
+            self._host_controller.send_command_result(
+                player_id,
+                ok=ok,
+                message=message,
+                request_id=request_id,
+                data=response_data,
+            )
         entity_id = str(payload.get("entity_id") or "").strip()
         sheet_id = str(payload.get("sheet_id") or "").strip()
         sheet_name = str(payload.get("sheet_name") or sheet_id).strip() or sheet_id
@@ -9330,54 +9527,37 @@ class DungeonAppletWidget(QWidget):
         archive_ok, archive_b64, archive_bytes = self._validate_archive_payload(
             str(payload.get("archive_b64") or "")
         )
+        archive_supplied = "archive_b64" in payload
         allowed_dungeon_id = self._player_action_dungeon_id()
         dungeon_id = str(payload.get("dungeon_id") or "").strip()
         if not dungeon_id:
             dungeon_id = allowed_dungeon_id
         if allowed_dungeon_id and dungeon_id and dungeon_id != allowed_dungeon_id:
-            self._host_controller.send_command_result(
-                player_id,
+            _send_link_result(
                 ok=False,
                 message="Players can only link characters in the assigned players dungeon.",
-                request_id=request_id,
             )
             return
         stats = payload.get("stats")
         inventory = payload.get("inventory")
         if not entity_id or not sheet_id or not isinstance(stats, dict) or not isinstance(inventory, dict):
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message="Invalid link payload",
-                request_id=request_id,
-            )
+            _send_link_result(ok=False, message="Invalid link payload")
             return
         if not archive_ok:
-            self._host_controller.send_command_result(
-                player_id,
+            _send_link_result(
                 ok=False,
                 message="Linked character archive payload is invalid.",
-                request_id=request_id,
             )
             return
 
         dungeon, item_data = self._find_entity_state_entry(entity_id, dungeon_id)
         if dungeon is None or item_data is None:
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message="Target entity not found",
-                request_id=request_id,
-            )
+            _send_link_result(ok=False, message="Target entity not found")
             return
         if str(item_data.get("owner_player_id") or "").strip() != player_id:
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message="Entity owned by different player",
-                request_id=request_id,
-            )
+            _send_link_result(ok=False, message="Entity owned by different player")
             return
+        existing_sheet_id = str(item_data.get("linked_sheet_id") or "").strip()
         existing_character_id = str(item_data.get("linked_character_id") or "").strip()
         if not character_id:
             for other_dungeon in self._dungeons:
@@ -9435,11 +9615,9 @@ class DungeonAppletWidget(QWidget):
             if duplicate_link_found:
                 break
         if duplicate_link_found:
-            self._host_controller.send_command_result(
-                player_id,
+            _send_link_result(
                 ok=False,
                 message="That character is already actively assigned to another player-owned entity.",
-                request_id=request_id,
             )
             return
 
@@ -9471,15 +9649,10 @@ class DungeonAppletWidget(QWidget):
             archive_b64=archive_b64,
             archive_bytes=archive_bytes,
             fallback_archive_b64=fallback_archive_b64,
+            archive_required=bool(archive_supplied),
         )
         if not metadata_ok:
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message=metadata_message,
-                request_id=request_id,
-                data={"action": "link_character_entity"},
-            )
+            _send_link_result(ok=False, message=metadata_message)
             return
         unknown_status, resolved_payload, unknown_status_note = self._resolve_unknown_linked_items_for_host(
             player_id=player_id,
@@ -9491,21 +9664,12 @@ class DungeonAppletWidget(QWidget):
         if unknown_status == "kick":
             reason = unknown_status_note or "DM rejected unknown linked items and removed the player."
             self._remove_player_from_host_session(player_id, reason=reason)
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message=reason,
-                request_id=request_id,
-                data={"action": "link_character_entity"},
-            )
+            _send_link_result(ok=False, message=reason)
             return
         if unknown_status != "ok":
-            self._host_controller.send_command_result(
-                player_id,
+            _send_link_result(
                 ok=False,
                 message=unknown_status_note or "Linked item review is unresolved.",
-                request_id=request_id,
-                data={"action": "link_character_entity"},
             )
             return
         normalized_inventory = normalize_inventory_payload(resolved_payload)
@@ -9592,52 +9756,47 @@ class DungeonAppletWidget(QWidget):
     ) -> None:
         if self._host_controller is None:
             return
+        def _send_unlink_result(
+            *,
+            ok: bool,
+            message: str,
+            data: dict | None = None,
+        ) -> None:
+            response_data = dict(data) if isinstance(data, dict) else {}
+            response_data.setdefault("action", "unlink_character_entity")
+            self._host_controller.send_command_result(
+                player_id,
+                ok=ok,
+                message=message,
+                request_id=request_id,
+                data=response_data,
+            )
         entity_id = str(payload.get("entity_id") or "").strip()
         allowed_dungeon_id = self._player_action_dungeon_id()
         dungeon_id = str(payload.get("dungeon_id") or "").strip() or allowed_dungeon_id
         if allowed_dungeon_id and dungeon_id and dungeon_id != allowed_dungeon_id:
-            self._host_controller.send_command_result(
-                player_id,
+            _send_unlink_result(
                 ok=False,
                 message="Players can only unlink characters in the assigned players dungeon.",
-                request_id=request_id,
             )
             return
         if not entity_id:
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message="Invalid unlink payload",
-                request_id=request_id,
-            )
+            _send_unlink_result(ok=False, message="Invalid unlink payload")
             return
         dungeon, item_data = self._find_entity_state_entry(entity_id, dungeon_id)
         if dungeon is None or item_data is None:
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message="Target entity not found",
-                request_id=request_id,
-            )
+            _send_unlink_result(ok=False, message="Target entity not found")
             return
         if str(item_data.get("owner_player_id") or "").strip() != player_id:
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message="Entity owned by different player",
-                request_id=request_id,
-            )
+            _send_unlink_result(ok=False, message="Entity owned by different player")
             return
         cleared_character_id = str(item_data.get("linked_character_id") or "").strip()
         cleared_sheet_id = str(item_data.get("linked_sheet_id") or "").strip()
         if not cleared_character_id and not cleared_sheet_id:
-            self._host_controller.send_command_result(
-                player_id,
+            _send_unlink_result(
                 ok=True,
                 message="Entity is already unlinked",
-                request_id=request_id,
                 data={
-                    "action": "unlink_character_entity",
                     "entity_id": entity_id,
                     "character_id": "",
                     "sheet_id": "",
@@ -9659,13 +9818,10 @@ class DungeonAppletWidget(QWidget):
                 self.inspector.set_linked_character_info("")
                 self.inspector.set_entity(target_entity)
 
-        self._host_controller.send_command_result(
-            player_id,
+        _send_unlink_result(
             ok=True,
             message="Character unlinked",
-            request_id=request_id,
             data={
-                "action": "unlink_character_entity",
                 "entity_id": entity_id,
                 "character_id": cleared_character_id,
                 "sheet_id": cleared_sheet_id,
@@ -9889,6 +10045,7 @@ class DungeonAppletWidget(QWidget):
         archive_b64: str,
         archive_bytes: bytes | None,
         fallback_archive_b64: str = "",
+        archive_required: bool = True,
     ) -> tuple[bool, str, str, str]:
         effective_archive_b64 = str(archive_b64 or "").strip()
         effective_archive_bytes = archive_bytes
@@ -9900,8 +10057,10 @@ class DungeonAppletWidget(QWidget):
                 return False, "", "", "Stored authoritative linked character archive payload is invalid."
             effective_archive_b64 = validated_fallback_b64
             effective_archive_bytes = validated_fallback_bytes
-        if effective_archive_bytes is None:
+        if effective_archive_bytes is None and archive_required:
             return False, "", "", "Linked character archive payload is required."
+        if effective_archive_bytes is None:
+            return True, "", str(incoming_content_hash or "").strip(), ""
 
         clean_character = str(character_id or "").strip()
         clean_content_hash = str(incoming_content_hash or "").strip()
@@ -10129,14 +10288,27 @@ class DungeonAppletWidget(QWidget):
     ) -> None:
         if self._host_controller is None:
             return
+        def _send_loot_transfer_result(
+            *,
+            ok: bool,
+            message: str,
+            data: dict | None = None,
+        ) -> None:
+            response_data = dict(data) if isinstance(data, dict) else {}
+            response_data.setdefault("action", "add_loot_from_inventory")
+            self._host_controller.send_command_result(
+                player_id,
+                ok=ok,
+                message=message,
+                request_id=request_id,
+                data=response_data,
+            )
         sheet_id = str(payload.get("sheet_id") or "").strip()
         selected_items = payload.get("items")
         if not sheet_id or not isinstance(selected_items, list):
-            self._host_controller.send_command_result(
-                player_id,
+            _send_loot_transfer_result(
                 ok=False,
                 message="Invalid inventory transfer payload",
-                request_id=request_id,
             )
             return
         allowed_dungeon_id = self._player_action_dungeon_id()
@@ -10145,11 +10317,9 @@ class DungeonAppletWidget(QWidget):
             sheet_id,
             dungeon_id=allowed_dungeon_id,
         ):
-            self._host_controller.send_command_result(
-                player_id,
+            _send_loot_transfer_result(
                 ok=False,
                 message="Transfer target character is not linked to your entities in the assigned players dungeon.",
-                request_id=request_id,
             )
             return
         linked_inventory = self._linked_inventory_payload_for_player_sheet(
@@ -10158,11 +10328,9 @@ class DungeonAppletWidget(QWidget):
             dungeon_id=allowed_dungeon_id,
         )
         if not isinstance(linked_inventory, dict):
-            self._host_controller.send_command_result(
-                player_id,
+            _send_loot_transfer_result(
                 ok=False,
                 message="Character inventory is unavailable on host.",
-                request_id=request_id,
             )
             return
         character_id = ""
@@ -10217,11 +10385,9 @@ class DungeonAppletWidget(QWidget):
                 item_payload["item_document"] = dict(item_document)
             parsed_items.append(item_payload)
         if not parsed_items:
-            self._host_controller.send_command_result(
-                player_id,
+            _send_loot_transfer_result(
                 ok=False,
                 message="No inventory/equipment items selected",
-                request_id=request_id,
             )
             return
 
@@ -10234,12 +10400,7 @@ class DungeonAppletWidget(QWidget):
             message = "Selected inventory/equipment items are no longer available."
             if missing_preview:
                 message = f"{message} Missing: {missing_preview}"
-            self._host_controller.send_command_result(
-                player_id,
-                ok=False,
-                message=message,
-                request_id=request_id,
-            )
+            _send_loot_transfer_result(ok=False, message=message)
             return
 
         linked_inventory_documents = _inventory_payload_item_documents(linked_inventory)
@@ -10297,14 +10458,12 @@ class DungeonAppletWidget(QWidget):
             if missing_documents:
                 preview = ", ".join(missing_documents[:3])
                 suffix = "..." if len(missing_documents) > 3 else ""
-                self._host_controller.send_command_result(
-                    player_id,
+                _send_loot_transfer_result(
                     ok=False,
                     message=(
                         "Unknown loot item definitions are missing and cannot be transferred. "
                         f"Missing: {preview}{suffix}"
                     ),
-                    request_id=request_id,
                 )
                 return
             accept_unknown = self._prompt_unknown_items_with_preview(
@@ -10317,11 +10476,9 @@ class DungeonAppletWidget(QWidget):
                 default_accept=True,
             )
             if not accept_unknown:
-                self._host_controller.send_command_result(
-                    player_id,
+                _send_loot_transfer_result(
                     ok=False,
                     message="DM rejected unknown loot item definitions. No items were transferred.",
-                    request_id=request_id,
                 )
                 return
             imported_count, import_messages = self._import_linked_item_documents_to_dm_library(
@@ -10331,11 +10488,9 @@ class DungeonAppletWidget(QWidget):
             if import_messages:
                 self._append_server_log(f"[WARN] {' '.join(import_messages)}")
             if imported_count < len(unknown_entries_for_import):
-                self._host_controller.send_command_result(
-                    player_id,
+                _send_loot_transfer_result(
                     ok=False,
                     message="Unable to persist unknown loot item definitions into DM storage.",
-                    request_id=request_id,
                 )
                 return
             for imported_entry in unknown_entries_for_import:
@@ -10344,11 +10499,9 @@ class DungeonAppletWidget(QWidget):
                     continue
                 authoritative_document = self._linked_item_document_by_id(item_id)
                 if not isinstance(authoritative_document, dict):
-                    self._host_controller.send_command_result(
-                        player_id,
+                    _send_loot_transfer_result(
                         ok=False,
                         message="Unable to resolve imported unknown loot item definitions.",
-                        request_id=request_id,
                     )
                     return
                 authoritative_item_documents[item_id] = self._clone_item_document_with_item_id(
@@ -10395,11 +10548,9 @@ class DungeonAppletWidget(QWidget):
             added_entries.append(self._sanitize_loot_pool_entry(entry_payload))
 
         if not added_entries:
-            self._host_controller.send_command_result(
-                player_id,
+            _send_loot_transfer_result(
                 ok=False,
                 message="No valid inventory/equipment items selected",
-                request_id=request_id,
             )
             return
 
@@ -10420,13 +10571,10 @@ class DungeonAppletWidget(QWidget):
             last_saved_at=str(sync_metadata.get("last_saved_at") or ""),
             content_hash=str(sync_metadata.get("content_hash") or ""),
         )
-        self._host_controller.send_command_result(
-            player_id,
+        _send_loot_transfer_result(
             ok=True,
             message=f"Added {len(added_entries)} inventory/equipment item(s) to loot pool",
-            request_id=request_id,
             data={
-                "action": "add_loot_from_inventory",
                 "sheet_id": sheet_id,
                 "sheet_name": linked_sheet_name,
                 "character_id": character_id,
@@ -12720,17 +12868,28 @@ class DungeonAppletWidget(QWidget):
         if not clean_character:
             return None
         try:
-            from player_sheets import (
-                archive_bytes_for_character_id,
+            import player_sheets as player_sheets_module
+        except Exception:
+            return None
+        character_id_for_entry = getattr(player_sheets_module, "character_id_for_entry", None)
+        list_character_link_targets = getattr(player_sheets_module, "list_character_link_targets", None)
+        sheet_id_for_entry = getattr(player_sheets_module, "sheet_id_for_entry", None)
+        inventory_payload_for_sheet_id = getattr(player_sheets_module, "inventory_payload_for_sheet_id", None)
+        ensure_entry_archive = getattr(player_sheets_module, "ensure_entry_archive", None)
+        character_sheet_pdf_path = getattr(player_sheets_module, "character_sheet_pdf_path", None)
+        character_sheet_archive_path = getattr(player_sheets_module, "character_sheet_archive_path", None)
+        archive_bytes_for_character_id = getattr(player_sheets_module, "archive_bytes_for_character_id", None)
+        if not all(
+            callable(fn)
+            for fn in (
                 character_id_for_entry,
                 list_character_link_targets,
                 sheet_id_for_entry,
                 inventory_payload_for_sheet_id,
-                ensure_entry_archive,
                 character_sheet_pdf_path,
                 character_sheet_archive_path,
             )
-        except Exception:
+        ):
             return None
 
         target_entry = None
@@ -12744,10 +12903,11 @@ class DungeonAppletWidget(QWidget):
         if target_entry is None:
             return None
 
-        try:
-            ensure_entry_archive(target_entry)
-        except Exception:
-            pass
+        if callable(ensure_entry_archive):
+            try:
+                ensure_entry_archive(target_entry)
+            except Exception:
+                pass
 
         sheet_id = str(sheet_id_for_entry(target_entry) or "").strip()
         sheet_name = str(getattr(target_entry, "name", "") or clean_character).strip() or clean_character
@@ -12772,7 +12932,7 @@ class DungeonAppletWidget(QWidget):
             stats = {}
         if not str(stats.get("name") or "").strip():
             stats["name"] = sheet_name
-        archive_bytes = archive_bytes_for_character_id(clean_character)
+        archive_bytes = archive_bytes_for_character_id(clean_character) if callable(archive_bytes_for_character_id) else b""
         archive_b64 = (
             base64.b64encode(archive_bytes).decode("ascii")
             if archive_bytes
@@ -12864,6 +13024,8 @@ class DungeonAppletWidget(QWidget):
                 sheet_name = str(sync_payload.get("sheet_name") or character_id)
                 host_save_revision = int(sync_payload.get("save_revision") or 0)
                 host_content_hash = str(sync_payload.get("content_hash") or "").strip()
+                entity_id = str(sync_payload.get("entity_id") or "").strip()
+                dungeon_id = str(sync_payload.get("dungeon_id") or "").strip()
                 local_payload = self._resolve_local_sheet_sync_payload(character_id)
                 if isinstance(local_payload, dict) and sheet_id:
                     try:
@@ -12873,13 +13035,9 @@ class DungeonAppletWidget(QWidget):
                     local_inventory = normalize_inventory_payload(local_payload.get("inventory") or {})
                     local_content_hash = str(local_payload.get("content_hash") or "").strip()
                     if local_save_revision > host_save_revision:
-                        request_id, _character_id = self._dispatch_online_character_inventory_sync(
-                            sheet_id,
-                            local_inventory,
-                            log_conflict_blocked=False,
+                        self._append_server_log(
+                            "[WARN] Replaced newer local linked character data with the latest host session state."
                         )
-                        if request_id:
-                            continue
                     if local_save_revision == host_save_revision:
                         if local_content_hash and host_content_hash and local_content_hash == host_content_hash:
                             continue
@@ -12890,18 +13048,26 @@ class DungeonAppletWidget(QWidget):
                             )
                         ):
                             continue
+                sync_kwargs = {
+                    "sheet_name": sheet_name,
+                    "archive_b64": str(sync_payload.get("archive_b64") or ""),
+                    "save_revision": int(sync_payload.get("save_revision") or 0),
+                    "last_saved_at": str(sync_payload.get("last_saved_at") or ""),
+                    "content_hash": str(sync_payload.get("content_hash") or ""),
+                    "refresh_entities": True,
+                }
+                if local_payload is None:
+                    sync_kwargs.update(
+                        {
+                            "sheet_id": sheet_id,
+                            "entity_id": entity_id,
+                            "dungeon_id": dungeon_id,
+                        }
+                    )
                 ok, message = self._sync_local_sheet_inventory_from_host(
                     character_id,
                     inventory_payload,
-                    sheet_name=sheet_name,
-                    archive_b64=str(sync_payload.get("archive_b64") or ""),
-                    save_revision=int(sync_payload.get("save_revision") or 0),
-                    last_saved_at=str(sync_payload.get("last_saved_at") or ""),
-                    content_hash=str(sync_payload.get("content_hash") or ""),
-                    refresh_entities=False,
-                    sheet_id=sheet_id,
-                    entity_id=str(sync_payload.get("entity_id") or ""),
-                    dungeon_id=str(sync_payload.get("dungeon_id") or ""),
+                    **sync_kwargs,
                 )
                 if ok and self._local_character_sheet_exists(character_id):
                     self._approved_host_inventory_sync_characters.add(character_id)
@@ -13074,6 +13240,8 @@ class DungeonAppletWidget(QWidget):
         request_id = str(result.get("request_id") or "").strip()
         data = result.get("data")
         action = str(data.get("action") or "").strip() if isinstance(data, dict) else ""
+        if not action and request_id:
+            action = self._pending_online_command_action_for_request(request_id)
         conflict = data.get("conflict") if isinstance(data, dict) else None
         conflict_key = str(conflict.get("conflict_key") or "").strip() if isinstance(conflict, dict) else ""
         correlated_claim_id = ""

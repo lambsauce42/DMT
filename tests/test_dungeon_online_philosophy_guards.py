@@ -50,37 +50,6 @@ def _valid_archive_b64() -> str:
     return base64.b64encode(payload.getvalue()).decode("ascii")
 
 
-def test_player_inventory_save_does_not_forward_while_link_conflict_pending(
-    dungeon_widget, monkeypatch
-):
-    calls = []
-
-    class _ClientStub:
-        def send_command(self, action, payload, request_id=None):
-            calls.append((action, dict(payload), request_id))
-            return True
-
-        def disconnect(self):
-            return None
-
-    dungeon_widget._client_controller = _ClientStub()
-    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
-    dungeon_widget._player_connection_ready = True
-    dungeon_widget._pending_link_conflicts["d1::entity-1::character-1"] = {
-        "character_id": "character-1",
-    }
-
-    monkeypatch.setattr("player_sheets.character_id_for_sheet_id", lambda _sheet_id: "character-1")
-    monkeypatch.setattr("player_sheets.inventory_payload_for_sheet_id", lambda _sheet_id: {"inventory": []})
-
-    dungeon_widget._on_external_character_inventory_saved(
-        "sheet-1",
-        {"inventory": [{"item_id": "item-1", "quantity": 1}]},
-    )
-
-    assert calls == []
-
-
 def test_host_sync_character_inventory_rejects_invalid_archive_payload(dungeon_widget):
     class _HostStub:
         def __init__(self):
@@ -180,6 +149,7 @@ def test_host_sync_character_inventory_rejects_mismatched_content_hash(dungeon_w
             "character_id": "character-1",
             "inventory": {"inventory": [{"item_id": "item-1", "quantity": 1}]},
             "stats": {"name": "Hero"},
+            "archive_b64": _valid_archive_b64(),
             "content_hash": hashlib.sha256(b"wrong").hexdigest(),
         },
         request_id="mismatched-hash-sync",
@@ -271,6 +241,7 @@ def test_conflicting_known_item_definition_enters_review_before_sync(
                 },
             },
             "stats": {"name": "Hero"},
+            "archive_b64": _valid_archive_b64(),
         },
         request_id="review-conflict",
     )
@@ -374,6 +345,7 @@ def test_conflicting_known_item_definition_can_explicitly_overwrite_dm_authority
                 },
             },
             "stats": {"name": "Hero"},
+            "archive_b64": _valid_archive_b64(),
         },
         request_id="review-conflict-overwrite",
     )
@@ -586,40 +558,6 @@ def test_delete_linked_entity_triggers_managed_cleanup_and_undo_recovery(dungeon
     dungeon_widget.canvas.undo()
 
     assert cleanup_calls[-1] == {"character-delete"}
-
-
-def test_host_link_conflict_response_cache_replays_without_time_expiry(dungeon_widget, monkeypatch):
-    class _HostStub:
-        def __init__(self):
-            self.results = []
-
-        def send_command_result(self, player_id, **kwargs):
-            self.results.append((player_id, kwargs))
-
-        def stop(self):
-            return None
-
-    dungeon_widget._host_controller = _HostStub()
-    dungeon_widget._cache_host_link_conflict_response(
-        "player-1::conflict-1",
-        "sig-1",
-        ok=False,
-        message="DM denied overwrite request.",
-        data={"action": "resolve_linked_character_conflict"},
-    )
-    monkeypatch.setattr("dungeon_applet.time.monotonic", lambda: 10_000.0)
-
-    replayed = dungeon_widget._replay_host_link_conflict_response(
-        "player-1",
-        "player-1::conflict-1",
-        "sig-1",
-        request_id="req-cache-replay",
-    )
-
-    assert replayed is True
-    assert dungeon_widget._host_controller.results[-1][1]["request_id"] == "req-cache-replay"
-    assert dungeon_widget._host_controller.results[-1][1]["message"] == "DM denied overwrite request."
-
 
 def test_host_add_loot_from_inventory_uses_authoritative_item_document(dungeon_widget):
     class _HostStub:
