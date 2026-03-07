@@ -1,0 +1,241 @@
+{
+  "model": "gpt-oss:20b",
+  "transcript_path": "C:\\Users\\Max\\Documents\\DMT\\session_transcripts\\Untitled_Session_2026-03-05T22_48_44_session_20260305214844_654caaca1c0b5582a50778df_22aae4557b374dad\\transcript\\manual_transcript.txt",
+  "estimated_tokens": 2855,
+  "runs": {
+    "low": {
+      "think": "low",
+      "stages": {
+        "stage1_summary": {
+          "ok": true,
+          "error": "",
+          "attempt_count": 1,
+          "attempts": [
+            {
+              "attempt": 1,
+              "valid": true,
+              "error": "",
+              "response": "You track the lanterns out of Harrowfen to a half‑sunk toll house on the marshy causeway, where a dim green glow comes from an upstairs window and two people are inside. Thorn silently takes out a rear guard, Lysa puts a sleeping spell on the other, and Mira and Bram break in, discovering a sleeping cultist and a robed figure clutching a satchel that turns out to be a ledger and a silver signet. The robed man explains that the ledger lists buyers of “people, passage, oaths” and that if it reaches Harrowfen the chain breaks. The party disables a signaling bowl, secures the ledger and signet, ties up the robed cultist, and takes the frightened rear guard back to town, deciding to hand the documents to Captain Rusk rather than the compromised magistrate. The session ends with the party holding the ledger, the signet, a captive, and a tied cultist, while the marsh still holds unknown threats.",
+              "thinking_len": 60,
+              "done_reason": "stop",
+              "prompt_eval_count": 2381,
+              "prompt_eval_duration": 630869800,
+              "eval_count": 230,
+              "eval_duration": 1561675400,
+              "load_duration": 243636000,
+              "total_duration": 2658332100,
+              "wall_seconds": 2.667280673980713
+            }
+          ],
+          "sum_wall_seconds": 2.667280673980713,
+          "final_text": "You track the lanterns out of Harrowfen to a half‑sunk toll house on the marshy causeway, where a dim green glow comes from an upstairs window and two people are inside. Thorn silently takes out a rear guard, Lysa puts a sleeping spell on the other, and Mira and Bram break in, discovering a sleeping cultist and a robed figure clutching a satchel that turns out to be a ledger and a silver signet. The robed man explains that the ledger lists buyers of “people, passage, oaths” and that if it reaches Harrowfen the chain breaks. The party disables a signaling bowl, secures the ledger and signet, ties up the robed cultist, and takes the frightened rear guard back to town, deciding to hand the documents to Captain Rusk rather than the compromised magistrate. The session ends with the party holding the ledger, the signet, a captive, and a tied cultist, while the marsh still holds unknown threats."
+        },
+        "stage2_refine": {
+          "ok": true,
+          "error": "",
+          "attempt_count": 1,
+          "attempts": [
+            {
+              "attempt": 1,
+              "valid": true,
+              "error": "",
+              "response": "You followed the lanterns out of Harrowfen to a half‑sunk toll house on the marshy causeway. Thorn slipped behind a rotten back door and took out the rear guard, while Lysa cast Sleep on the other guard in the front room. Mira and Bram burst in, finding a sleeping cultist and a robed figure clutching a satchel that turned out to be a ledger and a silver signet. The robed man explained that the ledger lists buyers of “people, passage, oaths” and that if it reaches Harrowfen the chain breaks. The party disabled a signaling bowl, secured the ledger and signet, tied up the robed cultist, and took the frightened rear guard back to town, deciding to hand the documents to Captain Rusk rather than the compromised magistrate. The session ends with the party holding the ledger, the signet, a captive, and a tied cultist, while the marsh still holds unknown threats.",
+              "thinking_len": 73,
+              "done_reason": "stop",
+              "prompt_eval_count": 2608,
+              "prompt_eval_duration": 405621500,
+              "eval_count": 223,
+              "eval_duration": 1498025200,
+              "load_duration": 237618800,
+              "total_duration": 2370931100,
+              "wall_seconds": 2.396721124649048
+            }
+          ],
+          "sum_wall_seconds": 2.396721124649048,
+          "final_text": "You followed the lanterns out of Harrowfen to a half‑sunk toll house on the marshy causeway. Thorn slipped behind a rotten back door and took out the rear guard, while Lysa cast Sleep on the other guard in the front room. Mira and Bram burst in, finding a sleeping cultist and a robed figure clutching a satchel that turned out to be a ledger and a silver signet. The robed man explained that the ledger lists buyers of “people, passage, oaths” and that if it reaches Harrowfen the chain breaks. The party disabled a signaling bowl, secured the ledger and signet, tied up the robed cultist, and took the frightened rear guard back to town, deciding to hand the documents to Captain Rusk rather than the compromised magistrate. The session ends with the party holding the ledger, the signet, a captive, and a tied cultist, while the marsh still holds unknown threats."
+        },
+        "stage3_audit": {
+          "ok": true,
+          "error": "",
+          "attempt_count": 2,
+          "attempts": [
+            {
+              "attempt": 1,
+              "valid": false,
+              "error": "Response was empty.",
+              "response": "",
+              "thinking_len": 1743,
+              "done_reason": "length",
+              "prompt_eval_count": 2597,
+              "prompt_eval_duration": 403953100,
+              "eval_count": 420,
+              "eval_duration": 2865665700,
+              "load_duration": 236404700,
+              "total_duration": 3853948400,
+              "wall_seconds": 3.863133430480957
+            },
+            {
+              "attempt": 2,
+              "valid": true,
+              "error": "",
+              "response": "The recap omits that the robed cultist was left tied and unconscious upstairs rather than taken back to town, and that an escaped contact is still somewhere in the marsh. It also fails to note that the signaling bowl was disabled, that the ledger lists buyers including “Edda Voss, east dock office,” and that the rear guard was taken back to town. These details are still relevant to the ending state and unresolved hooks.",
+              "thinking_len": 1140,
+              "done_reason": "stop",
+              "prompt_eval_count": 2643,
+              "prompt_eval_duration": 33775800,
+              "eval_count": 332,
+              "eval_duration": 2243204800,
+              "load_duration": 227857800,
+              "total_duration": 2826082400,
+              "wall_seconds": 2.8467233180999756
+            }
+          ],
+          "sum_wall_seconds": 6.709856748580933,
+          "final_text": "The recap omits that the robed cultist was left tied and unconscious upstairs rather than taken back to town, and that an escaped contact is still somewhere in the marsh. It also fails to note that the signaling bowl was disabled, that the ledger lists buyers including “Edda Voss, east dock office,” and that the rear guard was taken back to town. These details are still relevant to the ending state and unresolved hooks."
+        },
+        "stage3_repair": {
+          "ok": true,
+          "error": "",
+          "attempt_count": 1,
+          "attempts": [
+            {
+              "attempt": 1,
+              "valid": true,
+              "error": "",
+              "response": "You followed the lanterns out of Harrowfen to a half‑sunk toll house on the marshy causeway. Thorn slipped behind a rotten back door and took out the rear guard, while Lysa cast Sleep on the other guard in the front room. Mira and Bram burst in, finding a sleeping cultist and a robed figure clutching a satchel that turned out to be a ledger and a silver signet. The robed man explained that the ledger lists buyers of “people, passage, oaths” and that if it reaches Harrowfen the chain breaks. The party disabled the signaling bowl, secured the ledger and signet, tied up the robed cultist upstairs and left him unconscious, and took the frightened rear guard back to town, deciding to hand the documents to Captain Rusk rather than the compromised magistrate. The session ends with the party holding the ledger, the signet, a captive, a tied cultist, and an escaped contact still somewhere in the marsh.",
+              "thinking_len": 287,
+              "done_reason": "stop",
+              "prompt_eval_count": 2726,
+              "prompt_eval_duration": 448569700,
+              "eval_count": 270,
+              "eval_duration": 1812959700,
+              "load_duration": 229293500,
+              "total_duration": 2766080200,
+              "wall_seconds": 2.771359443664551
+            }
+          ],
+          "sum_wall_seconds": 2.771359443664551,
+          "final_text": "You followed the lanterns out of Harrowfen to a half‑sunk toll house on the marshy causeway. Thorn slipped behind a rotten back door and took out the rear guard, while Lysa cast Sleep on the other guard in the front room. Mira and Bram burst in, finding a sleeping cultist and a robed figure clutching a satchel that turned out to be a ledger and a silver signet. The robed man explained that the ledger lists buyers of “people, passage, oaths” and that if it reaches Harrowfen the chain breaks. The party disabled the signaling bowl, secured the ledger and signet, tied up the robed cultist upstairs and left him unconscious, and took the frightened rear guard back to town, deciding to hand the documents to Captain Rusk rather than the compromised magistrate. The session ends with the party holding the ledger, the signet, a captive, a tied cultist, and an escaped contact still somewhere in the marsh."
+        },
+        "stage3_reaudit": {
+          "ok": false,
+          "error": "stage3_reaudit failed after 3 invalid responses",
+          "attempt_count": 3,
+          "attempts": [
+            {
+              "attempt": 1,
+              "valid": false,
+              "error": "Response was empty.",
+              "response": "",
+              "thinking_len": 1978,
+              "done_reason": "length",
+              "prompt_eval_count": 2603,
+              "prompt_eval_duration": 407264200,
+              "eval_count": 420,
+              "eval_duration": 2818553900,
+              "load_duration": 239952100,
+              "total_duration": 3864550000,
+              "wall_seconds": 3.874108076095581
+            },
+            {
+              "attempt": 2,
+              "valid": false,
+              "error": "Response was empty.",
+              "response": "",
+              "thinking_len": 1728,
+              "done_reason": "length",
+              "prompt_eval_count": 2649,
+              "prompt_eval_duration": 33507700,
+              "eval_count": 420,
+              "eval_duration": 2846041300,
+              "load_duration": 245428100,
+              "total_duration": 3503119600,
+              "wall_seconds": 3.524801731109619
+            },
+            {
+              "attempt": 3,
+              "valid": false,
+              "error": "Response was empty.",
+              "response": "",
+              "thinking_len": 1897,
+              "done_reason": "length",
+              "prompt_eval_count": 2695,
+              "prompt_eval_duration": 34559000,
+              "eval_count": 420,
+              "eval_duration": 2842066800,
+              "load_duration": 243767600,
+              "total_duration": 3507398200,
+              "wall_seconds": 3.514299154281616
+            }
+          ],
+          "sum_wall_seconds": 10.913208961486816,
+          "final_text": ""
+        }
+      },
+      "status": "failed_stage3_reaudit",
+      "final_recap_text": "You followed the lanterns out of Harrowfen to a half‑sunk toll house on the marshy causeway. Thorn slipped behind a rotten back door and took out the rear guard, while Lysa cast Sleep on the other guard in the front room. Mira and Bram burst in, finding a sleeping cultist and a robed figure clutching a satchel that turned out to be a ledger and a silver signet. The robed man explained that the ledger lists buyers of “people, passage, oaths” and that if it reaches Harrowfen the chain breaks. The party disabled the signaling bowl, secured the ledger and signet, tied up the robed cultist upstairs and left him unconscious, and took the frightened rear guard back to town, deciding to hand the documents to Captain Rusk rather than the compromised magistrate. The session ends with the party holding the ledger, the signet, a captive, a tied cultist, and an escaped contact still somewhere in the marsh.",
+      "final_markdown": "## Session Recap\n\nYou followed the lanterns out of Harrowfen to a half‑sunk toll house on the marshy causeway. Thorn slipped behind a rotten back door and took out the rear guard, while Lysa cast Sleep on the other guard in the front room. Mira and Bram burst in, finding a sleeping cultist and a robed figure clutching a satchel that turned out to be a ledger and a silver signet. The robed man explained that the ledger lists buyers of “people, passage, oaths” and that if it reaches Harrowfen the chain breaks. The party disabled the signaling bowl, secured the ledger and signet, tied up the robed cultist upstairs and left him unconscious, and took the frightened rear guard back to town, deciding to hand the documents to Captain Rusk rather than the compromised magistrate. The session ends with the party holding the ledger, the signet, a captive, a tied cultist, and an escaped contact still somewhere in the marsh.",
+      "total_wall_seconds": 25.45842695236206
+    },
+    "high": {
+      "think": "high",
+      "stages": {
+        "stage1_summary": {
+          "ok": false,
+          "error": "stage1_summary failed after 3 invalid responses",
+          "attempt_count": 3,
+          "attempts": [
+            {
+              "attempt": 1,
+              "valid": false,
+              "error": "Response was empty.",
+              "response": "",
+              "thinking_len": 2277,
+              "done_reason": "length",
+              "prompt_eval_count": 2381,
+              "prompt_eval_duration": 385020000,
+              "eval_count": 520,
+              "eval_duration": 3502447500,
+              "load_duration": 240114300,
+              "total_duration": 4626967900,
+              "wall_seconds": 4.656875133514404
+            },
+            {
+              "attempt": 2,
+              "valid": false,
+              "error": "Response was empty.",
+              "response": "",
+              "thinking_len": 2182,
+              "done_reason": "length",
+              "prompt_eval_count": 2422,
+              "prompt_eval_duration": 31909400,
+              "eval_count": 520,
+              "eval_duration": 3563013800,
+              "load_duration": 238692300,
+              "total_duration": 4253264800,
+              "wall_seconds": 4.257155179977417
+            },
+            {
+              "attempt": 3,
+              "valid": false,
+              "error": "Response was empty.",
+              "response": "",
+              "thinking_len": 2167,
+              "done_reason": "length",
+              "prompt_eval_count": 2463,
+              "prompt_eval_duration": 32403600,
+              "eval_count": 520,
+              "eval_duration": 3516019300,
+              "load_duration": 248447500,
+              "total_duration": 4285504300,
+              "wall_seconds": 4.311754465103149
+            }
+          ],
+          "sum_wall_seconds": 13.22578477859497,
+          "final_text": ""
+        }
+      },
+      "status": "failed_stage1"
+    }
+  }
+}

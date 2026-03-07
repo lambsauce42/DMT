@@ -61,6 +61,20 @@ debug/
 !assets/
 !assets/**
 
+# … and vendorized runtime assets that are intentionally kept in-repo
+!vendor/
+!vendor/**
+
+# Reproducible local build outputs should never be versioned.
+vendor/**/build/
+
+# Large local model artifacts are stored in chunked source form for GitHub.
+vendor/whisper.cpp/models/*.bin
+vendor/whisper.cpp/models/*.xz
+!vendor/whisper.cpp/models/*.xz.sha256
+!vendor/whisper.cpp/models/*.xz.parts/
+!vendor/whisper.cpp/models/*.xz.parts/**
+
 # … and un-exclude EVERYTHING inside data/ unconditionally
 !data/
 !data/**
@@ -81,6 +95,9 @@ debug/
 *.dylib
 *.exe
 *.out
+*.o
+*.obj
+*.a
 
 # ── Local config / secrets ────────────────────────────────────────────────────
 *.env

@@ -12,16 +12,19 @@ import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QObject, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
+    QPushButton,
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -34,6 +37,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+try:
+    from PySide6.QtSvg import QSvgRenderer
+
+    SVG_AVAILABLE = True
+except Exception:
+    SVG_AVAILABLE = False
+
 from save_paths import session_transcript_dir
 from user_settings import load_app_settings, save_app_settings
 
@@ -44,8 +54,6 @@ DEFAULT_OLLAMA_MODEL = "gpt-oss:20b"
 DEFAULT_SOURCE_MODE = "mic"
 MANUAL_TRANSCRIPT_ENTRY_TOKENS = 4200
 TRANSCRIPT_SETTINGS_KEYS = (
-    "transcript_whisper_cli_path",
-    "transcript_whisper_model_path",
     "recap_ollama_host",
     "recap_ollama_model",
 )
@@ -60,18 +68,43 @@ SYSTEM_AUDIO_KEYWORDS = (
 CAPTURE_CHUNK_MS = 15000
 SYSTEM_LOOPBACK_SAMPLE_RATE = 16000
 SYSTEM_LOOPBACK_BLOCK_FRAMES = 2048
-RECAP_PIPELINE_VERSION = "v3.code-first"
-RECAP_MAX_INPUT_TOKENS = 10000
-RECAP_TARGET_INPUT_TOKENS = 8200
+RECAP_PIPELINE_VERSION = "v8.gist-two-pass-full-transcript"
+RECAP_AUTO_GENERATE_MAX_TOKENS = 90000
+RECAP_MAX_INPUT_TOKENS = 110000
+RECAP_TARGET_INPUT_TOKENS = RECAP_AUTO_GENERATE_MAX_TOKENS
 RECAP_INVESTIGATION_WINDOW_TOKENS = 5200
 RECAP_SEGMENT_BUNDLE_TOKENS = 6200
 RECAP_COVERAGE_BUNDLE_TOKENS = 6200
 RECAP_TEXT_SLICE_TOKENS = 380
 RECAP_CHECKLIST_LINE_MAX_CHARS = 180
+RECAP_MICRO_BLOCK_TOKENS = 520
+RECAP_SCENE_TARGET_TOKENS = 1700
+RECAP_STAGE_MAX_ATTEMPTS = 3
+RECAP_REASONING_BUDGET_TOKENS = 10000
+MANAGED_WHISPER_REPO_URL = "https://github.com/ggml-org/whisper.cpp.git"
+MANAGED_WHISPER_MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin?download=true"
+MANAGED_WHISPER_MODEL_FILE = "ggml-base.en.bin"
+MANAGED_WHISPER_MODEL_LABEL = "base.en"
+BUTTON_ICON_TINT = QColor("#ffffff")
+RECAP_ALLOWED_BLOCK_MODES = (
+    "setup",
+    "investigation",
+    "combat",
+    "interrogation",
+    "loot",
+    "planning",
+    "travel",
+    "aftermath",
+    "other",
+)
 ICON_DIR = Path(__file__).resolve().parent.parent / "assets" / "icons"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+VENDOR_DIR = REPO_ROOT / "vendor"
 FIELD_HEIGHT = 34
 ACTION_BUTTON_SIZE = 34
 ACTION_ICON_SIZE = 16
+ACTION_TEXT_BUTTON_HEIGHT = 40
+ACTION_ROW_HEIGHT = 54
 RECAP_MAX_CHRONOLOGY_ITEMS = 10
 RECAP_MAX_FACT_ITEMS = 12
 RECAP_MAX_DECISION_ITEMS = 12
@@ -91,34 +124,280 @@ def _icon_path(icon_name: str) -> str:
     return str((ICON_DIR / icon_name).resolve())
 
 
+def _is_svg_icon(path: Path) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return b"<svg" in handle.read(512).lower()
+    except Exception:
+        return False
+
+
+def _load_icon_pixmap(path: Path, size: int) -> tuple[Optional[QPixmap], bool]:
+    if not path.exists():
+        return None, False
+    is_svg = path.suffix.lower() == ".svg" or _is_svg_icon(path)
+    if SVG_AVAILABLE and is_svg:
+        renderer = QSvgRenderer(str(path))
+        if not renderer.isValid():
+            return None, False
+        image = QImage(size, size, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        renderer.render(painter)
+        painter.end()
+        return QPixmap.fromImage(image), True
+    pixmap = QPixmap(str(path))
+    if pixmap.isNull():
+        return None, False
+    return (
+        pixmap.scaled(
+            size,
+            size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ),
+        is_svg,
+    )
+
+
+def _tint_pixmap_white(pixmap: QPixmap) -> QPixmap:
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    for y in range(image.height()):
+        for x in range(image.width()):
+            alpha = QColor.fromRgba(image.pixel(x, y)).alpha()
+            if alpha:
+                image.setPixelColor(x, y, QColor(BUTTON_ICON_TINT.red(), BUTTON_ICON_TINT.green(), BUTTON_ICON_TINT.blue(), alpha))
+    return QPixmap.fromImage(image)
+
+
+def _button_icon(icon_name: str) -> QIcon:
+    icon_path = Path(_icon_path(icon_name))
+    pixmap, is_svg = _load_icon_pixmap(icon_path, ACTION_ICON_SIZE)
+    if pixmap is not None:
+        if is_svg:
+            pixmap = _tint_pixmap_white(pixmap)
+        return QIcon(pixmap)
+    return QIcon(str(icon_path)) if icon_path.exists() else QIcon()
+
+
+class _HoverTextPopup(QFrame):
+    def __init__(self) -> None:
+        super().__init__(None, Qt.WindowType.ToolTip)
+        self.setObjectName("HoverTextPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(0)
+        self._label = QLabel(self)
+        self._label.setWordWrap(True)
+        self._label.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self._label)
+        self.setStyleSheet(
+            "QFrame#HoverTextPopup {"
+            "background: #161b22;"
+            "border: 1px solid #30363d;"
+            "border-radius: 6px;"
+            "}"
+            "QFrame#HoverTextPopup QLabel { color: #e6edf3; }"
+        )
+
+    def show_for(self, anchor: QWidget, text: str) -> None:
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            self.hide()
+            return
+        self._label.setText(clean_text)
+        self._label.setMaximumWidth(240)
+        self.adjustSize()
+        screen = anchor.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else anchor.rect()
+        origin = anchor.mapToGlobal(QPoint(anchor.width() + 10, anchor.height() // 2))
+        x = min(origin.x(), available.right() - self.width() - 8)
+        y = origin.y() - (self.height() // 2)
+        x = max(available.left() + 8, x)
+        y = max(available.top() + 8, min(y, available.bottom() - self.height() - 8))
+        self.move(QPoint(x, y))
+        self.show()
+
+
+class _IconToolButton(QToolButton):
+    _hover_popup: Optional[_HoverTextPopup] = None
+
+    def __init__(self, parent: QWidget, hover_text: str) -> None:
+        super().__init__(parent)
+        self._hover_text = str(hover_text or "").strip()
+        self.setMouseTracking(True)
+
+    @classmethod
+    def _popup(cls) -> _HoverTextPopup:
+        if cls._hover_popup is None:
+            cls._hover_popup = _HoverTextPopup()
+        return cls._hover_popup
+
+    def set_hover_text(self, text: str) -> None:
+        self._hover_text = str(text or "").strip()
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        if self._hover_text:
+            self._popup().show_for(self, self._hover_text)
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._popup().hide()
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        if self.underMouse() and self._hover_text:
+            self._popup().show_for(self, self._hover_text)
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        if self._popup().isVisible():
+            self._popup().hide()
+
+
 def _make_icon_tool_button(
     parent: QWidget,
     icon_name: str,
     tooltip: str,
     *,
     object_name: str = "SecondaryButton",
+    button_size: int = ACTION_BUTTON_SIZE,
 ) -> QToolButton:
-    button = QToolButton(parent)
+    button = _IconToolButton(parent, tooltip)
     button.setObjectName(object_name)
     button.setProperty("compact", True)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    button.setToolTip(tooltip)
+    button.setAccessibleName(tooltip)
+    button.setToolTip("")
+    button.setStatusTip(tooltip)
+    button.setToolTipDuration(8000)
     button.setAutoRaise(False)
-    button.setFixedSize(ACTION_BUTTON_SIZE, ACTION_BUTTON_SIZE)
+    button.setFixedSize(button_size, button_size)
     button.setIconSize(QSize(ACTION_ICON_SIZE, ACTION_ICON_SIZE))
     button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     button.setStyleSheet(
-        f"padding: 0px; border-radius: 6px; min-width: {ACTION_BUTTON_SIZE}px; max-width: {ACTION_BUTTON_SIZE}px; "
-        f"min-height: {ACTION_BUTTON_SIZE}px; max-height: {ACTION_BUTTON_SIZE}px;"
+        f"padding: 0px; border-radius: 6px; min-width: {button_size}px; max-width: {button_size}px; "
+        f"min-height: {button_size}px; max-height: {button_size}px;"
     )
     icon_file = Path(_icon_path(icon_name))
     if icon_file.exists():
-        button.setIcon(QIcon(str(icon_file)))
+        button.setIcon(_button_icon(icon_name))
     else:
         button.setText(tooltip[:1].upper())
     return button
 
+
+def _make_action_button(
+    parent: QWidget,
+    icon_name: str,
+    label: str,
+    tooltip: str,
+    *,
+    object_name: str = "SecondaryButton",
+    minimum_width: int = 112,
+) -> QPushButton:
+    button = QPushButton(label, parent)
+    button.setObjectName(object_name)
+    button.setProperty("compact", False)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    button.setAccessibleName(tooltip)
+    button.setToolTip("")
+    button.setStatusTip(tooltip)
+    font = button.font()
+    if font.pointSize() <= 0:
+        font.setPointSize(11)
+    button.setFont(font)
+    button.setFixedHeight(ACTION_TEXT_BUTTON_HEIGHT)
+    button.setProperty("baseMinimumWidth", int(minimum_width))
+    button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    button.setIcon(_button_icon(icon_name))
+    button.setIconSize(QSize(ACTION_ICON_SIZE, ACTION_ICON_SIZE))
+    button.setProperty(
+        "baseStyleSheet",
+        (
+            f"padding: 0px 12px; "
+            f"height: {ACTION_TEXT_BUTTON_HEIGHT}px; "
+            f"min-height: {ACTION_TEXT_BUTTON_HEIGHT}px; "
+            f"max-height: {ACTION_TEXT_BUTTON_HEIGHT}px; "
+            "border-radius: 6px;"
+        ),
+    )
+    button.setStyleSheet(str(button.property("baseStyleSheet") or ""))
+    _fit_action_button_width(button, label)
+    return button
+
+
+def _set_icon_tool_button_state(
+    button: QToolButton,
+    icon_name: str,
+    tooltip: str,
+    *,
+    object_name: Optional[str] = None,
+) -> None:
+    if object_name:
+        button.setObjectName(object_name)
+    button.setAccessibleName(tooltip)
+    button.setToolTip("")
+    button.setStatusTip(tooltip)
+    button.setToolTipDuration(8000)
+    if isinstance(button, _IconToolButton):
+        button.set_hover_text(tooltip)
+    icon_file = Path(_icon_path(icon_name))
+    if icon_file.exists():
+        button.setIcon(_button_icon(icon_name))
+        if isinstance(button, QToolButton):
+            button.setText("")
+    else:
+        button.setIcon(QIcon())
+        button.setText(tooltip[:1].upper())
+    button.style().unpolish(button)
+    button.style().polish(button)
+    button.update()
+
+
+def _set_action_button_state(
+    button: QPushButton,
+    icon_name: str,
+    label: str,
+    tooltip: str,
+    *,
+    object_name: Optional[str] = None,
+) -> None:
+    if object_name:
+        button.setObjectName(object_name)
+    button.setText(label)
+    button.setAccessibleName(tooltip)
+    button.setStatusTip(tooltip)
+    button.setToolTip("")
+    button.setIcon(_button_icon(icon_name))
+    _fit_action_button_width(button, label)
+    button.style().unpolish(button)
+    button.style().polish(button)
+    button.update()
+
+
+def _fit_action_button_width(button: QPushButton, label: str) -> None:
+    base_width = max(0, int(button.property("baseMinimumWidth") or 0))
+    text_width = button.fontMetrics().horizontalAdvance(str(label or "")) + ACTION_ICON_SIZE + 40
+    button.setMinimumWidth(max(base_width, text_width))
+
+
+def _equalize_button_widths(*buttons: QPushButton) -> None:
+    valid_buttons = [button for button in buttons if button is not None]
+    if not valid_buttons:
+        return
+    target_width = max(button.sizeHint().width() for button in valid_buttons)
+    for button in valid_buttons:
+        base_style = str(button.property("baseStyleSheet") or "").strip()
+        width_style = f" min-width: {target_width}px; max-width: {target_width}px;"
+        button.setStyleSheet(f"{base_style}{width_style}")
+        button.setMinimumWidth(target_width)
+        button.setMaximumWidth(target_width)
 
 def _make_hint_label(text: str, parent: QWidget) -> QLabel:
     label = QLabel(text, parent)
@@ -377,11 +656,227 @@ def _compose_summary_sentences(candidates: list[str], *, max_sentences: int = 3,
     return " ".join(sentences).strip()
 
 
+def _normalize_model_output(text: str) -> str:
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _parse_choice_response(text: str, allowed: tuple[str, ...]) -> tuple[bool, str, str]:
+    cleaned = _normalize_model_output(text).lower()
+    allowed_set = {value.strip().lower() for value in allowed}
+    if cleaned in allowed_set:
+        return True, cleaned, ""
+    return False, "", f"Expected exactly one of {', '.join(allowed)} but received {cleaned!r}."
+
+
+def _parse_flag_lines_response(
+    text: str,
+    required_keys: dict[str, tuple[str, ...]],
+) -> tuple[bool, dict[str, str], str]:
+    cleaned = _normalize_model_output(text)
+    if not cleaned:
+        return False, {}, "Response was empty."
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if len(lines) != len(required_keys):
+        return False, {}, f"Expected exactly {len(required_keys)} non-empty lines but received {len(lines)}."
+    parsed: dict[str, str] = {}
+    expected_order = list(required_keys.keys())
+    for index, expected_key in enumerate(expected_order):
+        line = lines[index]
+        prefix = f"{expected_key}:"
+        if not line.startswith(prefix):
+            return False, {}, f"Line {index + 1} must start with {prefix!r} but received {line!r}."
+        value = line[len(prefix) :].strip().lower()
+        allowed_values = {choice.strip().lower() for choice in required_keys[expected_key]}
+        if value not in allowed_values:
+            return False, {}, f"Line {index + 1} for {expected_key} must be one of {required_keys[expected_key]} but received {value!r}."
+        parsed[expected_key] = value
+    return True, parsed, ""
+
+
+def _parse_prefixed_lines_response(
+    text: str,
+    *,
+    prefix: str,
+    max_items: int,
+    allow_none: bool = True,
+) -> tuple[bool, list[str], str]:
+    cleaned = _normalize_model_output(text)
+    if not cleaned:
+        return False, [], "Response was empty."
+    if allow_none and cleaned.lower() == "none":
+        return True, [], ""
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        return False, [], "Response did not contain any non-empty lines."
+    parsed: list[str] = []
+    for index, line in enumerate(lines):
+        if not line.startswith(prefix):
+            return False, [], f"Line {index + 1} must start with {prefix!r} but received {line!r}."
+        value = _normalize_line_item(line[len(prefix) :].strip(), max_chars=320)
+        if not value or value.lower() == "none":
+            continue
+        parsed.append(value)
+    if not parsed and not allow_none:
+        return False, [], f"Response did not contain any usable {prefix!r} lines."
+    if len(parsed) > max_items:
+        return False, [], f"Response exceeded the maximum of {max_items} {prefix!r} lines."
+    return True, _dedupe_preserve_order(parsed)[:max_items], ""
+
+
+def _parse_single_prefixed_line_response(
+    text: str,
+    *,
+    prefix: str,
+    allow_none: bool = False,
+) -> tuple[bool, str, str]:
+    ok, values, error_message = _parse_prefixed_lines_response(
+        text,
+        prefix=prefix,
+        max_items=1,
+        allow_none=allow_none,
+    )
+    if not ok:
+        return False, "", error_message
+    if not values:
+        return True, "", ""
+    return True, values[0], ""
+
+
+def _parse_paragraph_lines_response(text: str) -> tuple[bool, list[str], str]:
+    cleaned = _normalize_model_output(text)
+    if not cleaned:
+        return False, [], "Response was empty."
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if len(lines) < 2 or len(lines) > 3:
+        return False, [], f"Expected 2 or 3 paragraph lines but received {len(lines)}."
+    paragraphs: list[str] = []
+    expected_prefixes = ("P1:", "P2:", "P3:")
+    for index, line in enumerate(lines):
+        prefix = expected_prefixes[index]
+        if not line.startswith(prefix):
+            return False, [], f"Line {index + 1} must start with {prefix!r} but received {line!r}."
+        body = _normalize_line_item(line[len(prefix) :].strip(), max_chars=900)
+        if not body:
+            return False, [], f"Line {index + 1} was empty after {prefix!r}."
+        if body.startswith("-") or "## " in body or "slice range" in body.lower():
+            return False, [], f"Line {index + 1} contained forbidden formatting or metadata."
+        paragraphs.append(body)
+    return True, paragraphs, ""
+
+
+def _parse_plain_recap_response(
+    text: str,
+    *,
+    min_chars: int = 140,
+    max_paragraphs: int = 4,
+    max_sentences: int = 15,
+) -> tuple[bool, str, str]:
+    cleaned = _normalize_model_output(text)
+    if not cleaned:
+        return False, "", "Response was empty."
+    lines = [line.rstrip() for line in cleaned.splitlines()]
+    if any(line.lstrip().startswith(("P1:", "P2:", "P3:", "-", "*", "#")) for line in lines if line.strip()):
+        return False, "", "Response must be plain prose without headings, bullets, or prefixed paragraph labels."
+    paragraphs = [
+        re.sub(r"\s+", " ", paragraph).strip()
+        for paragraph in re.split(r"\n{2,}", cleaned)
+        if paragraph.strip()
+    ]
+    if not paragraphs:
+        return False, "", "Response did not contain any usable prose paragraphs."
+    if len(paragraphs) > max_paragraphs:
+        return False, "", f"Response contained {len(paragraphs)} paragraphs but the maximum is {max_paragraphs}."
+    normalized_paragraphs: list[str] = []
+    seen: set[str] = set()
+    forbidden_tokens = ("coverage window", "slice range", "merge round", "prompt", "metadata")
+    for paragraph in paragraphs:
+        if any(token in paragraph.lower() for token in forbidden_tokens):
+            return False, "", "Response contained recap metadata instead of session prose."
+        sentence = paragraph.strip()
+        if len(sentence) < 40:
+            return False, "", "Response paragraph was too short to be useful."
+        key = sentence.casefold()
+        if key in seen:
+            return False, "", "Response repeated the same paragraph."
+        seen.add(key)
+        normalized_paragraphs.append(sentence)
+    normalized = "\n\n".join(normalized_paragraphs).strip()
+    if len(normalized) < min_chars:
+        return False, "", "Response was too short to qualify as a session recap."
+    sentence_count = len(re.findall(r"[.!?]+(?:\s|$)", normalized))
+    if sentence_count <= 0:
+        sentence_count = 1
+    if sentence_count > max_sentences:
+        return False, "", f"Response contained {sentence_count} sentences but the maximum is {max_sentences}."
+    return True, normalized, ""
+
+
+def _parse_plain_audit_notes_response(text: str) -> tuple[bool, str, str]:
+    cleaned = _normalize_model_output(text)
+    if not cleaned:
+        return False, "", "Response was empty."
+    lines = [line.rstrip() for line in cleaned.splitlines()]
+    if any(line.lstrip().startswith(("-", "*", "#", "STATUS:", "MISSING:")) for line in lines if line.strip()):
+        return False, "", "Response must be plain prose without bullets, headings, or status prefixes."
+    paragraphs = [
+        re.sub(r"\s+", " ", paragraph).strip()
+        for paragraph in re.split(r"\n{2,}", cleaned)
+        if paragraph.strip()
+    ]
+    if not paragraphs:
+        return False, "", "Response did not contain any usable audit notes."
+    if len(paragraphs) > 2:
+        return False, "", f"Response contained {len(paragraphs)} paragraphs but the maximum is 2."
+    normalized = "\n\n".join(paragraphs).strip()
+    if len(normalized) < 20:
+        return False, "", "Response was too short to be a useful audit note."
+    return True, normalized, ""
+
+
+def _new_recap_stream_snapshot() -> dict[str, object]:
+    return {
+        "running": False,
+        "host": "",
+        "model": "",
+        "stage_name": "",
+        "message": "",
+        "thinking_log": "",
+        "response_log": "",
+    }
+
+
+def _parse_status_missing_response(text: str) -> tuple[bool, dict[str, object], str]:
+    cleaned = _normalize_model_output(text)
+    if not cleaned:
+        return False, {}, "Response was empty."
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        return False, {}, "Response did not contain any non-empty lines."
+    first = lines[0]
+    if not first.startswith("STATUS:"):
+        return False, {}, f"First line must start with 'STATUS:' but received {first!r}."
+    status = first[len("STATUS:") :].strip().lower()
+    if status not in {"pass", "fail"}:
+        return False, {}, f"STATUS must be 'pass' or 'fail' but received {status!r}."
+    missing: list[str] = []
+    for index, line in enumerate(lines[1:], start=2):
+        if not line.startswith("MISSING:"):
+            return False, {}, f"Line {index} must start with 'MISSING:' but received {line!r}."
+        value = _normalize_line_item(line[len("MISSING:") :].strip(), max_chars=320)
+        if value:
+            missing.append(value)
+    if status == "pass" and missing:
+        return False, {}, "Audit returned STATUS: pass with MISSING lines."
+    if status == "fail" and not missing:
+        return False, {}, "Audit returned STATUS: fail without any MISSING lines."
+    return True, {"status": status, "missing": _dedupe_preserve_order(missing)[:6]}, ""
+
+
 def load_transcript_runtime_settings() -> dict[str, str]:
     settings = load_app_settings()
     return {
-        "whisper_cli_path": str(settings.get("transcript_whisper_cli_path") or "").strip(),
-        "whisper_model_path": str(settings.get("transcript_whisper_model_path") or "").strip(),
+        "whisper_cli_path": str(_managed_whisper_cli_path()),
+        "whisper_model_path": str(_managed_whisper_model_path()),
         "ollama_host": str(settings.get("recap_ollama_host") or DEFAULT_OLLAMA_HOST).strip()
         or DEFAULT_OLLAMA_HOST,
         "ollama_model": str(settings.get("recap_ollama_model") or DEFAULT_OLLAMA_MODEL).strip()
@@ -396,13 +891,107 @@ def save_transcript_runtime_settings(
     ollama_model: str,
 ) -> dict[str, str]:
     normalized = {
-        "transcript_whisper_cli_path": str(whisper_cli_path or "").strip(),
-        "transcript_whisper_model_path": str(whisper_model_path or "").strip(),
         "recap_ollama_host": str(ollama_host or DEFAULT_OLLAMA_HOST).strip() or DEFAULT_OLLAMA_HOST,
         "recap_ollama_model": str(ollama_model or DEFAULT_OLLAMA_MODEL).strip() or DEFAULT_OLLAMA_MODEL,
     }
     save_app_settings(normalized)
     return load_transcript_runtime_settings()
+
+
+def _managed_whisper_root() -> Path:
+    return VENDOR_DIR / "whisper.cpp"
+
+
+def _managed_whisper_source_dir() -> Path:
+    return _managed_whisper_root() / "source"
+
+
+def _managed_whisper_build_dir() -> Path:
+    return _managed_whisper_root() / "build"
+
+
+def _managed_whisper_models_dir() -> Path:
+    return _managed_whisper_root() / "models"
+
+
+def _managed_whisper_model_path() -> Path:
+    return _managed_whisper_models_dir() / MANAGED_WHISPER_MODEL_FILE
+
+
+def _managed_whisper_cli_candidates() -> list[Path]:
+    build_dir = _managed_whisper_build_dir()
+    return [
+        build_dir / "bin" / "whisper-cli.exe",
+        build_dir / "bin" / "Release" / "whisper-cli.exe",
+        build_dir / "bin" / "whisper-cli",
+        build_dir / "bin" / "Release" / "whisper-cli",
+    ]
+
+
+def _managed_whisper_cli_path() -> Path:
+    for candidate in _managed_whisper_cli_candidates():
+        if candidate.exists():
+            return candidate
+    return _managed_whisper_build_dir() / "bin" / "whisper-cli.exe"
+
+
+def _run_managed_whisper_command(command: list[str], *, cwd: Optional[Path] = None, label: str) -> None:
+    print(f"[INFO] {label}: {' '.join(command)}", file=sys.stderr)
+    result = subprocess.run(
+        command,
+        cwd=str(cwd) if cwd is not None else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+    stdout = str(result.stdout or "").strip()
+    stderr = str(result.stderr or "").strip()
+    raise RuntimeError(stderr or stdout or f"{label} failed with exit code {result.returncode}.")
+
+
+def ensure_managed_whisper_runtime() -> tuple[Path, Path]:
+    root = _managed_whisper_root()
+    source_dir = _managed_whisper_source_dir()
+    build_dir = _managed_whisper_build_dir()
+    model_path = _managed_whisper_model_path()
+    root.mkdir(parents=True, exist_ok=True)
+    if not source_dir.exists():
+        _run_managed_whisper_command(
+            ["git", "clone", "--depth", "1", MANAGED_WHISPER_REPO_URL, str(source_dir)],
+            label="Cloning whisper.cpp",
+        )
+    if not model_path.exists():
+        _managed_whisper_models_dir().mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Downloading Whisper model {MANAGED_WHISPER_MODEL_LABEL} to {model_path}", file=sys.stderr)
+        with urllib_request.urlopen(MANAGED_WHISPER_MODEL_URL, timeout=600) as response:
+            model_path.write_bytes(response.read())
+    cli_path = next((candidate for candidate in _managed_whisper_cli_candidates() if candidate.exists()), None)
+    if cli_path is None:
+        build_dir.mkdir(parents=True, exist_ok=True)
+        _run_managed_whisper_command(
+            [
+                "cmake",
+                "-S",
+                str(source_dir),
+                "-B",
+                str(build_dir),
+                "-G",
+                "Ninja",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DWHISPER_BUILD_TESTS=OFF",
+            ],
+            label="Configuring whisper.cpp",
+        )
+        _run_managed_whisper_command(
+            ["cmake", "--build", str(build_dir), "--config", "Release", "--target", "whisper-cli", "-j", "4"],
+            label="Building whisper.cpp",
+        )
+        cli_path = next((candidate for candidate in _managed_whisper_cli_candidates() if candidate.exists()), None)
+    if cli_path is None:
+        raise RuntimeError("Managed whisper.cpp build completed without producing whisper-cli.")
+    return cli_path, model_path
 
 
 class SessionTranscriptStore:
@@ -1016,6 +1605,18 @@ class SessionTranscriptStore:
             self._append_event_locked("error", f"Recap failed: {recap['last_error']}")
             self._save_locked()
 
+    def stop_recap(self, model: str, message: str = "") -> None:
+        with self._lock:
+            recap = self._manifest.setdefault("recap", {})
+            recap["status"] = "idle"
+            recap["last_error"] = ""
+            recap["model"] = str(model or recap.get("model") or "").strip()
+            recap["strategy"] = RECAP_PIPELINE_VERSION
+            recap["updated_at"] = _now_timestamp()
+            if message:
+                self._append_event_locked("info", message)
+            self._save_locked()
+
     def save_final_recap(self, text: str, model: str) -> None:
         clean_text = str(text or "").strip()
         self.final_recap_path.write_text(clean_text, encoding="utf-8")
@@ -1028,6 +1629,30 @@ class SessionTranscriptStore:
             recap["strategy"] = RECAP_PIPELINE_VERSION
             recap["final_path"] = str(Path("recap") / self.final_recap_path.name).replace("\\", "/")
             self._append_event_locked("info", "Final recap is ready.")
+            self._save_locked()
+
+    def save_recap_text(self, text: str, model: str) -> None:
+        clean_text = str(text or "").strip()
+        if clean_text and not clean_text.lstrip().startswith("#"):
+            clean_text = f"## Session Recap\n\n{clean_text}".strip()
+        with self._lock:
+            recap = self._manifest.setdefault("recap", {})
+            recap["last_error"] = ""
+            recap["updated_at"] = _now_timestamp()
+            recap["model"] = str(model or recap.get("model") or "").strip()
+            recap["strategy"] = RECAP_PIPELINE_VERSION
+            if clean_text:
+                self.final_recap_path.write_text(clean_text, encoding="utf-8")
+                recap["status"] = "ready"
+                recap["final_path"] = str(Path("recap") / self.final_recap_path.name).replace("\\", "/")
+            else:
+                recap["status"] = "idle"
+                recap["final_path"] = ""
+                try:
+                    if self.final_recap_path.exists():
+                        self.final_recap_path.unlink()
+                except Exception as exc:
+                    print(f"[WARN] Failed to remove recap {self.final_recap_path}: {exc}", file=sys.stderr)
             self._save_locked()
 
     def recap_text(self) -> str:
@@ -1124,6 +1749,8 @@ class OllamaGenerationResult:
     text: str
     prompt_eval_count: int = 0
     eval_count: int = 0
+    thinking_text: str = ""
+    thinking_truncated: bool = False
 
 
 def _soundcard_modules() -> tuple[object | None, object | None, str]:
@@ -1188,18 +1815,10 @@ def _resolve_soundcard_loopback_device(device_id: str):
 
 class WhisperCppRunner:
     def transcribe(self, audio_path: Path, cli_path: str, model_path: str) -> str:
-        clean_cli_path = str(cli_path or "").strip()
-        clean_model_path = str(model_path or "").strip()
-        if not clean_cli_path:
-            raise RuntimeError("Whisper.cpp CLI path is not configured.")
-        if not clean_model_path:
-            raise RuntimeError("Whisper.cpp model path is not configured.")
-        cli = Path(clean_cli_path)
-        model = Path(clean_model_path)
-        if not cli.exists():
-            raise RuntimeError(f"Whisper.cpp CLI was not found: {cli}")
-        if not model.exists():
-            raise RuntimeError(f"Whisper.cpp model was not found: {model}")
+        cli = Path(str(cli_path or "").strip()) if str(cli_path or "").strip() else _managed_whisper_cli_path()
+        model = Path(str(model_path or "").strip()) if str(model_path or "").strip() else _managed_whisper_model_path()
+        if not cli.exists() or not model.exists():
+            cli, model = ensure_managed_whisper_runtime()
         output_prefix = audio_path.with_suffix("")
         txt_output = output_prefix.with_suffix(".txt")
         try:
@@ -1251,24 +1870,30 @@ class OllamaRecapRunner:
         *,
         format_hint: object = "",
         num_predict: int = 0,
+        stream_callback: Optional[Callable[[str, str], None]] = None,
     ) -> OllamaGenerationResult:
         clean_host = str(host or DEFAULT_OLLAMA_HOST).strip() or DEFAULT_OLLAMA_HOST
         clean_model = str(model or DEFAULT_OLLAMA_MODEL).strip() or DEFAULT_OLLAMA_MODEL
+        model_name = clean_model.lower()
         url = f"{clean_host.rstrip('/')}/api/generate"
+        think_setting: object = False
+        if "gpt-oss" in model_name:
+            think_setting = "medium"
         payload_obj: dict[str, object] = {
             "model": clean_model,
             "system": str(system_prompt or "").strip(),
             "prompt": str(user_prompt or ""),
-            "stream": False,
-            "think": False,
+            "stream": True,
+            "think": think_setting,
             "options": {
-                "temperature": 0.15,
+                "temperature": 1.0,
             },
         }
         if format_hint:
             payload_obj["format"] = format_hint
         if num_predict > 0:
-            payload_obj["options"]["num_predict"] = max(64, int(num_predict))
+            minimum_predict = 160 if "gpt-oss" in model_name else 64
+            payload_obj["options"]["num_predict"] = max(minimum_predict, int(num_predict))
         payload = json.dumps(payload_obj).encode("utf-8")
         req = urllib_request.Request(
             url,
@@ -1278,7 +1903,53 @@ class OllamaRecapRunner:
         )
         try:
             with urllib_request.urlopen(req, timeout=300) as response:
-                raw = response.read().decode("utf-8")
+                final_payload: Optional[dict[str, object]] = None
+                response_chunks: list[str] = []
+                thinking_chunks: list[str] = []
+                saw_payload = False
+                thinking_truncated = False
+                truncation_notice = (
+                    f"\n\n[reasoning truncated after about {RECAP_REASONING_BUDGET_TOKENS} estimated tokens]\n"
+                )
+                while True:
+                    raw_line = response.readline()
+                    if not raw_line:
+                        break
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    saw_payload = True
+                    try:
+                        payload_obj = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(
+                            f"Ollama returned invalid streaming JSON: {line[:240]}"
+                        ) from exc
+                    if not isinstance(payload_obj, dict):
+                        raise RuntimeError("Ollama returned an invalid streaming response payload.")
+                    error_message = str(payload_obj.get("error") or "").strip()
+                    if error_message:
+                        raise RuntimeError(f"Ollama request failed: {error_message}")
+                    thinking_chunk = str(payload_obj.get("thinking") or "")
+                    response_chunk = str(payload_obj.get("response") or "")
+                    if thinking_chunk:
+                        if not thinking_truncated:
+                            candidate_thinking = "".join((*thinking_chunks, thinking_chunk))
+                            if _estimate_text_tokens(candidate_thinking) > RECAP_REASONING_BUDGET_TOKENS:
+                                thinking_truncated = True
+                                thinking_chunks.append(truncation_notice)
+                                if stream_callback is not None:
+                                    stream_callback("thinking", truncation_notice)
+                            else:
+                                thinking_chunks.append(thinking_chunk)
+                                if stream_callback is not None:
+                                    stream_callback("thinking", thinking_chunk)
+                    if response_chunk:
+                        response_chunks.append(response_chunk)
+                        if stream_callback is not None:
+                            stream_callback("response", response_chunk)
+                    if bool(payload_obj.get("done")):
+                        final_payload = payload_obj
         except urllib_error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else str(exc)
             raise RuntimeError(f"Ollama request failed: {detail or exc}") from exc
@@ -1286,14 +1957,17 @@ class OllamaRecapRunner:
             raise RuntimeError(
                 f"Unable to reach Ollama at {clean_host}. Is the local server running?"
             ) from exc
-        payload_obj = json.loads(raw)
-        if not isinstance(payload_obj, dict):
-            raise RuntimeError("Ollama returned an invalid response payload.")
-        text = str(payload_obj.get("response") or "").strip()
+        if not saw_payload:
+            raise RuntimeError("Ollama returned an empty streaming response.")
+        if final_payload is None:
+            raise RuntimeError("Ollama stream ended without a final payload.")
+        text = "".join(response_chunks).strip()
         return OllamaGenerationResult(
             text=text,
-            prompt_eval_count=max(0, int(payload_obj.get("prompt_eval_count") or 0)),
-            eval_count=max(0, int(payload_obj.get("eval_count") or 0)),
+            prompt_eval_count=max(0, int(final_payload.get("prompt_eval_count") or 0)),
+            eval_count=max(0, int(final_payload.get("eval_count") or 0)),
+            thinking_text="".join(thinking_chunks).strip(),
+            thinking_truncated=thinking_truncated,
         )
 
 
@@ -1628,6 +2302,7 @@ class TranscriptSessionController(QObject):
     stateChanged = Signal()
     transcriptChanged = Signal(str)
     recapChanged = Signal(str)
+    recapStreamChanged = Signal(object)
 
     def __init__(
         self,
@@ -1651,10 +2326,14 @@ class TranscriptSessionController(QObject):
         self._system_devices_cache: list[AudioInputDescriptor] = []
         self._mic_devices_error = ""
         self._system_devices_error = ""
+        self._recap_stream_lock = threading.Lock()
+        self._recap_stream_state = _new_recap_stream_snapshot()
+        self._recap_stream_last_stage_by_channel = {"thinking": "", "response": ""}
 
     def close(self) -> None:
         self.halt(announce=False)
         self._session_generation += 1
+        self._reset_recap_stream()
 
     def bind_session(self, session_id: Optional[str], session_name: str = "") -> None:
         self.halt(announce=False)
@@ -1663,6 +2342,7 @@ class TranscriptSessionController(QObject):
         self._session_name = str(session_name or "").strip()
         if not session_id:
             self._store = None
+            self._reset_recap_stream()
             self.stateChanged.emit()
             self.transcriptChanged.emit("")
             self.recapChanged.emit("")
@@ -1675,6 +2355,7 @@ class TranscriptSessionController(QObject):
             runtime["ollama_host"],
             runtime["ollama_model"],
         )
+        self._reset_recap_stream()
         self.stateChanged.emit()
         self.transcriptChanged.emit(self.transcript_text())
         self.recapChanged.emit(self.recap_text())
@@ -1692,6 +2373,7 @@ class TranscriptSessionController(QObject):
                 "capture_devices": {"mic_id": "", "mic_name": "", "system_id": "", "system_name": ""},
                 "manual_transcript": {"enabled": False, "path": "", "updated_at": "", "estimated_tokens": 0},
                 "recap": {"status": "idle", "last_error": "", "checkpoint_count": 0, "processed_chunk_count": 0},
+                "transcript_estimated_tokens": 0,
                 "session_dir": "",
                 "recording": False,
                 "audio_devices_error": self._combined_audio_devices_error(),
@@ -1714,6 +2396,7 @@ class TranscriptSessionController(QObject):
                 {"enabled": False, "path": "", "updated_at": "", "estimated_tokens": 0},
             ),
             "recap": manifest.get("recap", {}),
+            "transcript_estimated_tokens": self.estimated_transcript_tokens(),
             "session_dir": str(self._store.root),
             "recording": bool(self._recorders),
             "audio_devices_error": self._combined_audio_devices_error(),
@@ -1728,6 +2411,31 @@ class TranscriptSessionController(QObject):
         if self._store is None:
             return ""
         return self._store.recap_text()
+
+    def recap_stream_snapshot(self) -> dict[str, object]:
+        with self._recap_stream_lock:
+            return dict(self._recap_stream_state)
+
+    def estimated_transcript_tokens(self) -> int:
+        if self._store is None:
+            return 0
+        return _estimate_text_tokens(self._store.transcript_text())
+
+    def recap_generation_preflight(self, *, store: Optional[SessionTranscriptStore] = None) -> tuple[bool, int, str]:
+        active_store = store or self._store
+        if active_store is None:
+            return False, 0, "Create or select a session first."
+        transcript_text = active_store.transcript_text().strip()
+        if not transcript_text:
+            return False, 0, "Transcript is empty. Generate transcript text first."
+        estimated_tokens = _estimate_text_tokens(transcript_text)
+        if estimated_tokens > RECAP_AUTO_GENERATE_MAX_TOKENS:
+            return (
+                False,
+                estimated_tokens,
+                f"Cannot auto generate recap because the transcript is estimated at {estimated_tokens} tokens and the limit is {RECAP_AUTO_GENERATE_MAX_TOKENS}.",
+            )
+        return True, estimated_tokens, ""
 
     def generated_transcript_text(self) -> str:
         if self._store is None:
@@ -1790,6 +2498,19 @@ class TranscriptSessionController(QObject):
         self._store.clear_manual_transcript()
         self.stateChanged.emit()
         self.transcriptChanged.emit(self.transcript_text())
+        self.recapChanged.emit(self.recap_text())
+
+    def save_recap_text(self, text: str) -> None:
+        if self._store is None:
+            return
+        snapshot = self.snapshot()
+        model = str(
+            snapshot.get("recap", {}).get("model")
+            or snapshot.get("runtime", {}).get("ollama_model")
+            or DEFAULT_OLLAMA_MODEL
+        )
+        self._store.save_recap_text(text, model)
+        self.stateChanged.emit()
         self.recapChanged.emit(self.recap_text())
 
     def _combined_audio_devices_error(self) -> str:
@@ -1945,6 +2666,7 @@ class TranscriptSessionController(QObject):
         self._stop_requested = True
         active_recorders = list(self._recorders.values())
         self._recorders = {}
+        had_recorders = bool(active_recorders)
         for recorder in active_recorders:
             try:
                 recorder.halt()
@@ -1952,8 +2674,18 @@ class TranscriptSessionController(QObject):
                 if self._store is not None:
                     self._store.append_event("error", f"Failed to halt capture cleanly: {exc}")
         if self._store is not None:
-            message = "Capture halted." if announce else ""
+            if had_recorders:
+                message = "Capture stopped. Final chunk saved and queued for transcription." if announce else ""
+            else:
+                message = "Work halted." if announce else ""
             self._store.set_state("halted", message)
+        if self.recap_stream_snapshot().get("running"):
+            if self._store is not None:
+                recap_model = str(self._store.snapshot().get("recap", {}).get("model") or DEFAULT_OLLAMA_MODEL)
+                self._store.stop_recap(recap_model)
+            self._finish_recap_stream("", clear_reasoning=True)
+        if had_recorders:
+            self.request_processing(run_recap=False)
         self.stateChanged.emit()
 
     def retry_failed_chunks(self) -> None:
@@ -1967,6 +2699,7 @@ class TranscriptSessionController(QObject):
     def request_processing(self, *, run_recap: bool) -> None:
         if self._store is None:
             return
+        self._stop_requested = False
         with self._worker_lock:
             self._pending_recap_request = self._pending_recap_request or bool(run_recap)
             if self._worker_running:
@@ -2047,6 +2780,13 @@ class TranscriptSessionController(QObject):
     def request_recap(self) -> None:
         if self._store is None:
             return
+        allowed, _, error_message = self.recap_generation_preflight()
+        if not allowed:
+            if error_message:
+                self._store.mark_recap_failed(error_message, "")
+                self.stateChanged.emit()
+                self.recapChanged.emit(self.recap_text())
+            return
         self._store.clear_recap_error()
         self.request_processing(run_recap=True)
         self.stateChanged.emit()
@@ -2060,81 +2800,131 @@ class TranscriptSessionController(QObject):
         active_store = store or self._store
         if active_store is None:
             return False
+        allowed, transcript_tokens, error_message = self.recap_generation_preflight(store=active_store)
         entries = active_store.transcript_entries()
-        if not entries:
-            active_store.mark_recap_failed("Transcript is empty. Generate transcript text first.", "")
+        if not allowed:
+            self._reset_recap_stream(message=error_message)
+            active_store.mark_recap_failed(error_message, "")
             return False
+        transcript_text = active_store.transcript_text().strip()
         runtime = active_store.snapshot().get("runtime", {})
         host = str(runtime.get("ollama_host") or DEFAULT_OLLAMA_HOST)
         model = str(runtime.get("ollama_model") or DEFAULT_OLLAMA_MODEL)
         active_store.mark_recap_running(model)
+        self._reset_recap_stream(running=True, host=host, model=model, message="Recap generation started.")
         active_store.save_recap_artifact("pipeline_prompts.md", self._pipeline_prompts_markdown())
         try:
-            windows = self._build_investigation_windows(entries)
-            if not windows:
-                raise RuntimeError("Transcript entries were present, but no recap windows could be built from them.")
-            active_store.update_recap_progress(windows=len(windows), merge_rounds=0, processed_chunk_count=0)
-            dossier_docs: list[dict[str, object]] = []
-            coverage_docs: list[dict[str, object]] = []
-            total_windows = len(windows)
-            for window in windows:
-                self._ensure_recap_generation_active(active_store, generation)
-                dossier_doc, coverage_doc = self._investigate_window(
-                    active_store,
-                    host,
-                    model,
-                    window,
-                    total_windows=total_windows,
-                )
-                dossier_docs.append(dossier_doc)
-                coverage_docs.append(coverage_doc)
-                active_store.save_recap_checkpoint(
-                    str(dossier_doc.get("text") or ""),
-                    int(window.get("processed_entry_count") or 0),
-                    model,
-                )
-            narrative_doc, narrative_rounds = self._reduce_narrative_documents(
+            self._ensure_recap_generation_active(active_store, generation)
+            active_store.update_recap_progress(windows=1, merge_rounds=0, processed_chunk_count=len(entries))
+            stage_one = self._run_validated_recap_stage(
                 active_store,
                 host,
                 model,
-                dossier_docs,
-                generation=generation,
+                stage_name="stage1_summary",
+                system_prompt=self._stage_one_recap_system_prompt(),
+                user_prompt=self._build_stage_one_recap_prompt(transcript_text, transcript_tokens),
+                format_requirements=(
+                    "Return only the recap gist in plain prose. Use 1 to 3 short paragraphs, no headings, no bullet points, and no more than 15 sentences total."
+                ),
+                parser=lambda raw: _parse_plain_recap_response(raw, min_chars=90, max_paragraphs=3, max_sentences=15),
             )
-            coverage_doc, coverage_rounds = self._reduce_coverage_documents(
+            active_store.save_recap_artifact("stage1_summary.md", stage_one)
+            active_store.save_recap_artifact("final_draft.md", stage_one)
+            active_store.save_recap_checkpoint(stage_one, len(entries), model)
+            self._ensure_recap_generation_active(active_store, generation)
+            stage_two = self._run_validated_recap_stage(
                 active_store,
                 host,
                 model,
-                coverage_docs,
-                generation=generation,
+                stage_name="stage2_refine",
+                system_prompt=self._stage_two_recap_system_prompt(),
+                user_prompt=self._build_stage_two_recap_prompt(transcript_text, stage_one, transcript_tokens),
+                format_requirements=(
+                    "Return only the refined recap gist in plain prose. Use 1 to 3 short paragraphs, no headings, no bullet points, no more than 15 sentences total, keep only the most important developments, and remove anything not clearly supported by the transcript."
+                ),
+                parser=lambda raw: _parse_plain_recap_response(raw, min_chars=90, max_paragraphs=3, max_sentences=15),
             )
-            active_store.update_recap_progress(
-                merge_rounds=max(narrative_rounds, coverage_rounds),
-                processed_chunk_count=len(entries),
-            )
-            final_draft = self._build_final_recap_draft(
-                active_store,
-                host,
-                model,
-                narrative_doc,
-                coverage_doc,
-            )
-            active_store.save_recap_artifact("final_draft.md", final_draft)
-            final_recap = self._audit_final_recap(
-                active_store,
-                host,
-                model,
-                final_draft,
-                narrative_doc,
-                coverage_doc,
-            )
+            active_store.save_recap_artifact("stage2_refined.md", stage_two)
+            final_text = stage_two
+            active_store.save_recap_checkpoint(final_text, len(entries), model)
+            active_store.update_recap_progress(windows=2, merge_rounds=0, processed_chunk_count=len(entries))
         except Exception as exc:
+            if str(exc) == "Recap halted by user.":
+                self._finish_recap_stream("", clear_reasoning=True)
+                active_store.stop_recap(model)
+                if generation is None or generation == self._session_generation:
+                    self.stateChanged.emit()
+                return False
+            self._finish_recap_stream(str(exc))
             active_store.mark_recap_failed(str(exc), model)
             return False
+        final_recap = self._compose_final_recap_markdown(final_text, {}, {})
         active_store.save_final_recap(final_recap, model)
+        self._finish_recap_stream("Final recap is ready.")
         if generation is None or generation == self._session_generation:
             self.recapChanged.emit(active_store.recap_text())
             self.stateChanged.emit()
         return True
+
+    def _reset_recap_stream(
+        self,
+        *,
+        running: bool = False,
+        host: str = "",
+        model: str = "",
+        message: str = "",
+    ) -> None:
+        with self._recap_stream_lock:
+            self._recap_stream_state = _new_recap_stream_snapshot()
+            self._recap_stream_last_stage_by_channel = {"thinking": "", "response": ""}
+            self._recap_stream_state.update(
+                {
+                    "running": bool(running),
+                    "host": str(host or "").strip(),
+                    "model": str(model or "").strip(),
+                    "message": str(message or "").strip(),
+                }
+            )
+            snapshot = dict(self._recap_stream_state)
+        self.recapStreamChanged.emit(snapshot)
+
+    def _ensure_recap_stream_stage_locked(self, stage_name: str) -> None:
+        clean_stage_name = str(stage_name or "").strip()
+        if self._recap_stream_state.get("stage_name") == clean_stage_name:
+            return
+        self._recap_stream_state["stage_name"] = clean_stage_name
+
+    def _append_recap_stream_chunk(self, stage_name: str, channel: str, text: str) -> None:
+        chunk = str(text or "")
+        if not chunk:
+            return
+        normalized_channel = "thinking" if str(channel or "").strip().lower() == "thinking" else "response"
+        target_key = "thinking_log" if normalized_channel == "thinking" else "response_log"
+        with self._recap_stream_lock:
+            self._ensure_recap_stream_stage_locked(stage_name)
+            existing = str(self._recap_stream_state.get(target_key) or "")
+            if self._recap_stream_last_stage_by_channel.get(normalized_channel) != str(stage_name or "").strip():
+                header = f"=== {str(stage_name or '').strip()} ===\n"
+                existing = f"{existing}\n\n{header}" if existing else header
+                self._recap_stream_last_stage_by_channel[normalized_channel] = str(stage_name or "").strip()
+            self._recap_stream_state[target_key] = f"{existing}{chunk}"
+            snapshot = dict(self._recap_stream_state)
+        self.recapStreamChanged.emit(snapshot)
+
+    def _finish_recap_stream(self, message: str, *, clear_reasoning: bool = False) -> None:
+        with self._recap_stream_lock:
+            self._recap_stream_state["running"] = False
+            self._recap_stream_state["message"] = str(message or "").strip()
+            if clear_reasoning:
+                self._recap_stream_state["thinking_log"] = ""
+            snapshot = dict(self._recap_stream_state)
+        self.recapStreamChanged.emit(snapshot)
+
+    def _mark_recap_stream_stage(self, stage_name: str) -> None:
+        with self._recap_stream_lock:
+            self._ensure_recap_stream_stage_locked(stage_name)
+            snapshot = dict(self._recap_stream_state)
+        self.recapStreamChanged.emit(snapshot)
 
     def _ensure_recap_generation_active(
         self,
@@ -2152,24 +2942,151 @@ class TranscriptSessionController(QObject):
             "# Recap Prompt Chain",
             "",
             f"- Strategy: `{RECAP_PIPELINE_VERSION}`",
-            f"- Target input budget per model call: `{RECAP_TARGET_INPUT_TOKENS}` estimated tokens",
-            f"- Hard ceiling enforced in-app: `{RECAP_MAX_INPUT_TOKENS}` estimated tokens",
-            "- Window extraction, coverage tracking, merge rounds, and markdown section formatting are assembled in code.",
-            "- The local model only receives compact structured notes and is used for the executive summary paragraph.",
+            f"- Automatic recap is refused above `{RECAP_AUTO_GENERATE_MAX_TOKENS}` estimated transcript tokens.",
+            f"- Hard ceiling enforced per Ollama call: `{RECAP_MAX_INPUT_TOKENS}` estimated tokens.",
+            "- Stage 1 writes a gist recap from the full transcript.",
+            "- Stage 2 refines and compresses that gist against the full transcript.",
+            "- Final recap target is 15 sentences or fewer.",
+            "- Each model stage is format-validated in code and retried up to three times on invalid output.",
+            "- If a stage still fails validation, recap generation stops and debug artifacts are written under `recap/debug/`.",
             "",
-            "## Code-First Stages",
+            "## Stage 1",
             "",
-            "1. Slice the transcript into bounded windows.",
-            "2. Extract chronology, facts, decisions, tasks, open threads, rulings, and continuity notes in code.",
-            "3. Merge window dossiers and coverage cards in code until they fit the final prompt budget.",
-            "4. Ask the local model for one plain-text executive summary paragraph from the merged notes.",
+            self._stage_one_recap_system_prompt().strip(),
             "",
-            "## Final Recap Writer",
+            "## Stage 2",
             "",
-            self._final_recap_system_prompt().strip(),
+            self._stage_two_recap_system_prompt().strip(),
             "",
         ]
         return "\n".join(lines).strip()
+
+    def _stage_one_recap_system_prompt(self) -> str:
+        return (
+            "You are writing a gist recap of a DnD session transcript.\n"
+            "Write in the language of the transcript and use past tense.\n"
+            "Capture only the biggest developments, major decisions, important discoveries, and the ending state.\n"
+            "Omit minor tactical detail unless it changes the outcome.\n"
+            "Keep reasoning brief and decisive. Make one pass and do not loop or restate the same point.\n"
+            "Return only plain prose in 1 to 3 short paragraphs and no more than 15 sentences total.\n"
+            "Do not use headings or bullet points.\n"
+        )
+
+    def _stage_two_recap_system_prompt(self) -> str:
+        return (
+            "You are refining a gist recap of a DnD session.\n"
+            "Use the transcript as the source of truth.\n"
+            "Refine and compress the recap in the language of the transcript and use past tense.\n"
+            "Remove things which cannot be clearly derived from transcript context.\n"
+            "Keep only the most important developments, decisions, discoveries, and ending-state facts.\n"
+            "Prefer gist over detail.\n"
+            "Keep reasoning brief and decisive. Make one pass and do not loop or restate the same point.\n"
+            "Return only plain prose in 1 to 3 short paragraphs and no more than 15 sentences total.\n"
+            "Do not use headings or bullet points.\n"
+        )
+
+    def _build_stage_one_recap_prompt(self, transcript_text: str, transcript_tokens: int) -> str:
+        return (
+            f"Session: {self._session_name or 'Unnamed Session'}\n"
+            f"Estimated transcript tokens: {transcript_tokens}\n\n"
+            "Transcript:\n"
+            f"{transcript_text.strip()}\n"
+        )
+
+    def _build_stage_two_recap_prompt(self, transcript_text: str, stage_one_summary: str, transcript_tokens: int) -> str:
+        return (
+            f"Session: {self._session_name or 'Unnamed Session'}\n"
+            f"Estimated transcript tokens: {transcript_tokens}\n\n"
+            "Stage 1 recap draft:\n"
+            f"{stage_one_summary.strip()}\n\n"
+            "Transcript:\n"
+            f"{transcript_text.strip()}\n"
+        )
+
+    def _stage_three_audit_system_prompt(self) -> str:
+        return (
+            "You are checking whether a DnD session recap missed any important facts from the transcript.\n"
+            "Use the transcript as the source of truth.\n"
+            "Respond in English.\n"
+            "In 2 to 4 short sentences, write plain prose audit notes for the repair pass.\n"
+            "Focus on final decisions, ending state, named leads, recovered items, and unresolved hooks that still matter.\n"
+            "Only call out material omissions or underemphasized facts that change a reader's understanding of the outcome.\n"
+            "Ignore wording-only differences and facts already covered with different phrasing.\n"
+            "If no material omissions stand out, say so once in plain prose and stop.\n"
+            "Keep your reasoning brief and decisive.\n"
+            "Make one pass over the evidence and do not loop, restate earlier conclusions, or revisit the same point unless new transcript evidence changes it.\n"
+            "Do not repeat the same candidate omission, second-guess yourself out loud, or list more than two candidate omissions.\n"
+            "Do not use sentinel phrases, bullets, headings, JSON, or status prefixes.\n"
+            "Do not rewrite the recap.\n"
+        )
+
+    def _stage_three_repair_system_prompt(self) -> str:
+        return (
+            "You are repairing a DnD session recap.\n"
+            "Use the transcript as the source of truth and the audit notes as required coverage.\n"
+            "Treat the current recap as the baseline and revise it with the smallest possible edits.\n"
+            "Keep it relatively short.\n"
+            "Preserve all supported facts, names, decisions, end-state details, and unresolved hooks already present in the current recap unless the transcript contradicts them.\n"
+            "Only add the audit-noted missing points that the transcript supports.\n"
+            "If the audit notes say the recap is already complete, return the current recap unchanged.\n"
+            "Keep your reasoning brief and decisive.\n"
+            "Make one pass over the transcript and audit notes and do not loop, restate earlier conclusions, or revisit the same point unless new transcript evidence changes it.\n"
+            "Do not drop supported end-state facts just to make room for new ones.\n"
+            "Return only plain prose in 1 to 3 short paragraphs, ideally keeping the existing paragraph structure.\n"
+            "Do not use headings or bullet points.\n"
+        )
+
+    def _build_stage_three_audit_prompt(self, transcript_text: str, recap_text: str, transcript_tokens: int) -> str:
+        return (
+            f"Session: {self._session_name or 'Unnamed Session'}\n"
+            f"Estimated transcript tokens: {transcript_tokens}\n\n"
+            "Current recap:\n"
+            f"{recap_text.strip()}\n\n"
+            "Transcript:\n"
+            f"{transcript_text.strip()}\n"
+        )
+
+    def _build_stage_three_repair_prompt(
+        self,
+        transcript_text: str,
+        recap_text: str,
+        audit_notes: str,
+        transcript_tokens: int,
+    ) -> str:
+        return (
+            f"Session: {self._session_name or 'Unnamed Session'}\n"
+            f"Estimated transcript tokens: {transcript_tokens}\n\n"
+            "Current recap:\n"
+            f"{recap_text.strip()}\n\n"
+            "Audit notes:\n"
+            f"{audit_notes.strip()}\n\n"
+            "Transcript:\n"
+            f"{transcript_text.strip()}\n"
+        )
+
+    def _run_stage_three_audit(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        *,
+        stage_name: str,
+        transcript_text: str,
+        recap_text: str,
+        transcript_tokens: int,
+    ) -> str:
+        return self._run_validated_recap_stage(
+            active_store,
+            host,
+            model,
+            stage_name=stage_name,
+            system_prompt=self._stage_three_audit_system_prompt(),
+            user_prompt=self._build_stage_three_audit_prompt(transcript_text, recap_text, transcript_tokens),
+            format_requirements=(
+                "Return plain prose audit notes in English. Use 1 or 2 short paragraphs, no bullets, headings, JSON, sentinel phrases, or status prefixes."
+            ),
+            parser=_parse_plain_audit_notes_response,
+        )
 
     def _build_investigation_windows(self, entries: list[dict]) -> list[dict[str, object]]:
         slices: list[dict[str, object]] = []
@@ -2259,6 +3176,7 @@ class TranscriptSessionController(QObject):
                 f"{user_prompt.strip()}\n"
             ),
         )
+        self._mark_recap_stream_stage(stage_name)
         result = self._recap_runner.generate(
             host,
             model,
@@ -2266,8 +3184,16 @@ class TranscriptSessionController(QObject):
             user_prompt,
             format_hint=format_hint,
             num_predict=num_predict,
+            stream_callback=lambda channel, chunk: self._append_recap_stream_chunk(stage_name, channel, chunk),
         )
         active_store.save_recap_artifact(f"debug/{stage_name}_response.txt", result.text)
+        if result.thinking_text:
+            active_store.save_recap_artifact(f"debug/{stage_name}_thinking.txt", result.thinking_text)
+        if result.thinking_truncated:
+            active_store.append_event(
+                "warn",
+                f"Stage '{stage_name}' reasoning stream was truncated after about {RECAP_REASONING_BUDGET_TOKENS} estimated tokens.",
+            )
         active_store.update_recap_progress(prompt_eval_max=result.prompt_eval_count)
         if result.prompt_eval_count > RECAP_MAX_INPUT_TOKENS:
             active_store.append_event(
@@ -2276,16 +3202,602 @@ class TranscriptSessionController(QObject):
             )
         return result.text
 
-    def _final_recap_system_prompt(self) -> str:
-        return (
-            "You are the final session summary writer.\n"
-            "Use only the supplied session notes.\n"
-            "Write one short plain-text paragraph, factual and concise, without inventing details.\n"
-            "Do not mention windows, slice ranges, prompts, or metadata.\n"
-            "Do not use markdown headings or bullet lists."
+    def _run_validated_recap_stage(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        *,
+        stage_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        format_requirements: str,
+        parser: Callable[[str], tuple[bool, object, str]],
+        num_predict: int = 0,
+    ):
+        attempt_errors: list[str] = []
+        raw_attempts: list[str] = []
+        base_prompt = str(user_prompt or "").strip()
+        for attempt in range(1, RECAP_STAGE_MAX_ATTEMPTS + 1):
+            repair_prompt = base_prompt
+            if attempt_errors:
+                repair_prompt = (
+                    f"{base_prompt}\n\n"
+                    "FORMAT REQUIREMENTS:\n"
+                    f"{format_requirements.strip()}\n\n"
+                    "LAST RESPONSE WAS INVALID:\n"
+                    f"{attempt_errors[-1]}\n\n"
+                    "Return only a valid answer in the exact required format.\n"
+                )
+            attempt_stage_name = f"{stage_name}_attempt_{attempt:02d}"
+            raw = self._call_recap_model(
+                active_store,
+                host,
+                model,
+                stage_name=attempt_stage_name,
+                system_prompt=system_prompt,
+                user_prompt=repair_prompt,
+                num_predict=num_predict,
+            )
+            raw_attempts.append(raw)
+            ok, parsed, error_message = parser(raw)
+            validation_report = [
+                f"# {attempt_stage_name}",
+                "",
+                f"Valid: {ok}",
+                "",
+                "## Format Requirements",
+                "",
+                format_requirements.strip(),
+                "",
+                "## Raw Response",
+                "",
+                _normalize_model_output(raw) or "<empty>",
+                "",
+            ]
+            if error_message:
+                validation_report.extend(("## Validation Error", "", error_message.strip(), ""))
+            active_store.save_recap_artifact(
+                f"debug/{attempt_stage_name}_validation.md",
+                "\n".join(validation_report).strip(),
+            )
+            if ok:
+                return parsed
+            attempt_errors.append(str(error_message or "Unknown validation failure.").strip())
+        failure_lines = [
+            f"# {stage_name} Failure",
+            "",
+            f"Stage failed after {RECAP_STAGE_MAX_ATTEMPTS} invalid responses.",
+            "",
+            "## Format Requirements",
+            "",
+            format_requirements.strip(),
+            "",
+        ]
+        for index, raw in enumerate(raw_attempts, start=1):
+            failure_lines.extend(
+                (
+                    f"## Attempt {index}",
+                    "",
+                    f"Validation Error: {attempt_errors[index - 1]}",
+                    "",
+                    "Raw Response:",
+                    "",
+                    _normalize_model_output(raw) or "<empty>",
+                    "",
+                )
+            )
+        active_store.save_recap_artifact(f"debug/{stage_name}_failure.md", "\n".join(failure_lines).strip())
+        raise RuntimeError(
+            f"Recap stage '{stage_name}' failed after {RECAP_STAGE_MAX_ATTEMPTS} invalid responses. "
+            f"See recap/debug/{stage_name}_failure.md for details."
         )
 
-    def _build_final_draft_prompt(
+    def _render_turn_line(self, turn: dict[str, str]) -> str:
+        speaker = str(turn.get("speaker") or "").strip()
+        text = _normalize_line_item(str(turn.get("text") or ""), max_chars=520)
+        if not text:
+            return ""
+        if _is_mechanics_only_text(text):
+            return ""
+        if speaker:
+            return f"{speaker}: {text}"
+        return text
+
+    def _build_window_micro_blocks(self, window: dict[str, object]) -> list[dict[str, object]]:
+        turns = _split_dialogue_turns(str(window.get("text") or ""))
+        blocks: list[dict[str, object]] = []
+        current_lines: list[str] = []
+        current_tokens = 0
+        start_turn_index = 1
+        last_turn_index = 0
+        for turn_index, turn in enumerate(turns, start=1):
+            line = self._render_turn_line(turn)
+            if not line:
+                continue
+            line_tokens = _estimate_text_tokens(line)
+            if current_lines and current_tokens + line_tokens > RECAP_MICRO_BLOCK_TOKENS:
+                block_text = "\n".join(current_lines).strip()
+                blocks.append(
+                    {
+                        "block_index": len(blocks) + 1,
+                        "turn_range": f"{start_turn_index}-{last_turn_index or turn_index - 1}",
+                        "text": block_text,
+                        "estimated_tokens": _estimate_text_tokens(block_text),
+                    }
+                )
+                current_lines = []
+                current_tokens = 0
+                start_turn_index = turn_index
+            current_lines.append(line)
+            current_tokens += line_tokens
+            last_turn_index = turn_index
+        if current_lines:
+            block_text = "\n".join(current_lines).strip()
+            blocks.append(
+                {
+                    "block_index": len(blocks) + 1,
+                    "turn_range": f"{start_turn_index}-{last_turn_index or start_turn_index}",
+                    "text": block_text,
+                    "estimated_tokens": _estimate_text_tokens(block_text),
+                }
+            )
+        if blocks:
+            return blocks
+        clean_text = _normalize_model_output(str(window.get("text") or ""))
+        if not clean_text:
+            return []
+        return [
+            {
+                "block_index": 1,
+                "turn_range": "1-1",
+                "text": clean_text,
+                "estimated_tokens": _estimate_text_tokens(clean_text),
+            }
+        ]
+
+    def _block_mode_system_prompt(self) -> str:
+        return (
+            "You are the Block Mode Classifier.\n"
+            "Read only the supplied transcript block.\n"
+            "Answer with exactly one lowercase word from this list and nothing else:\n"
+            "setup investigation combat interrogation loot planning travel aftermath other\n"
+            "Choose the dominant mode of the block.\n"
+        )
+
+    def _block_flags_system_prompt(self) -> str:
+        return (
+            "You are the Block Boundary Classifier.\n"
+            "Read only the supplied transcript block.\n"
+            "Return exactly two lines and nothing else in this exact order:\n"
+            "IMPORTANCE: low|medium|high\n"
+            "BOUNDARY: split|keep\n"
+            "Use split only if the block ends at a natural scene boundary.\n"
+        )
+
+    def _block_summary_system_prompt(self) -> str:
+        return (
+            "You are the Block Summary Extractor.\n"
+            "Read only the supplied transcript block.\n"
+            "Return either exactly one line starting with 'SUMMARY: ' followed by one sentence, or the single word 'none'.\n"
+            "Write one neutral narrator sentence about what materially changed in this block.\n"
+            "Do not quote speakers. Do not copy tactical chatter. Ignore dice, confirmations, and filler.\n"
+            "Do not infer attacks, wounds, motives, or consequences that are not explicitly stated.\n"
+        )
+
+    def _prefixed_extractor_system_prompt(self, label: str, description: str, max_items: int) -> str:
+        return (
+            f"You are the {label.title()} Extractor.\n"
+            "Read only the supplied transcript block.\n"
+            f"Return either the single word 'none' or up to {max_items} lines, each starting with '{label}: '.\n"
+            f"Extract only {description}.\n"
+            "Convert raw dialogue into concise factual statements.\n"
+            "Ignore jokes, proposals that were not accepted, dice chatter, and repeated setup.\n"
+            "Do not infer unseen attacks, wounds, motives, relationships, or future plans.\n"
+            "Do not include any other text.\n"
+        )
+
+    def _scene_writer_system_prompt(self) -> str:
+        return (
+            "You are the Scene Weaver.\n"
+            "Use only the supplied structured scene notes.\n"
+            "Return exactly one line starting with 'SCENE: ' followed by 3 to 5 sentences of coherent prose.\n"
+            "Write neutral recap prose with clear cause and effect.\n"
+            "Prefer anchors, outcomes, unresolved threads, and how the scene ends.\n"
+            "Do not quote transcript lines or repeat the same setup twice.\n"
+        )
+
+    def _build_block_prompt(
+        self,
+        window: dict[str, object],
+        block: dict[str, object],
+    ) -> str:
+        return (
+            f"Session: {self._session_name or 'Unnamed Session'}\n"
+            f"Window: {int(window.get('window_index') or 1)}\n"
+            f"Slice range: {window.get('slice_range')}\n"
+            f"Block: {int(block.get('block_index') or 1)}\n"
+            f"Turns: {block.get('turn_range')}\n\n"
+            "Transcript block:\n"
+            f"{str(block.get('text') or '').strip()}\n"
+        )
+
+    def _build_scene_writer_prompt(self, scene: dict[str, object]) -> str:
+        sections = [
+            f"Session: {self._session_name or 'Unnamed Session'}",
+            f"Scene: {int(scene.get('scene_index') or 1)}",
+            f"Mode: {scene.get('mode') or 'other'}",
+            "",
+            "Block Summaries:",
+        ]
+        for value in list(scene.get("summaries", []))[:6]:
+            sections.append(f"- {value}")
+        sections.extend(("", "Anchors:"))
+        for value in list(scene.get("anchors", []))[:8]:
+            sections.append(f"- {value}")
+        sections.extend(("", "Outcomes:"))
+        for value in list(scene.get("outcomes", []))[:6]:
+            sections.append(f"- {value}")
+        sections.extend(("", "Decisions:"))
+        for value in list(scene.get("decisions", []))[:6]:
+            sections.append(f"- {value}")
+        sections.extend(("", "Entities:"))
+        for value in list(scene.get("entities", []))[:8]:
+            sections.append(f"- {value}")
+        sections.extend(("", "Open Threads:"))
+        for value in list(scene.get("open_threads", []))[:4]:
+            sections.append(f"- {value}")
+        return "\n".join(sections).strip()
+
+    def _classify_block_mode(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        window: dict[str, object],
+        block: dict[str, object],
+    ) -> str:
+        return self._run_validated_recap_stage(
+            active_store,
+            host,
+            model,
+            stage_name=f"window_{int(window.get('window_index') or 1):04d}_block_{int(block.get('block_index') or 1):02d}_mode",
+            system_prompt=self._block_mode_system_prompt(),
+            user_prompt=self._build_block_prompt(window, block),
+            format_requirements="Return exactly one lowercase word from: setup investigation combat interrogation loot planning travel aftermath other",
+            parser=lambda raw: _parse_choice_response(raw, RECAP_ALLOWED_BLOCK_MODES),
+            num_predict=24,
+        )
+
+    def _classify_block_flags(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        window: dict[str, object],
+        block: dict[str, object],
+    ) -> dict[str, str]:
+        required_keys = {
+            "IMPORTANCE": ("low", "medium", "high"),
+            "BOUNDARY": ("split", "keep"),
+        }
+        return self._run_validated_recap_stage(
+            active_store,
+            host,
+            model,
+            stage_name=f"window_{int(window.get('window_index') or 1):04d}_block_{int(block.get('block_index') or 1):02d}_flags",
+            system_prompt=self._block_flags_system_prompt(),
+            user_prompt=self._build_block_prompt(window, block),
+            format_requirements=(
+                "Return exactly two lines in this order:\n"
+                "IMPORTANCE: low|medium|high\n"
+                "BOUNDARY: split|keep"
+            ),
+            parser=lambda raw: _parse_flag_lines_response(raw, required_keys),
+            num_predict=64,
+        )
+
+    def _extract_block_summary(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        window: dict[str, object],
+        block: dict[str, object],
+        *,
+        mode: str,
+        flags: dict[str, str],
+    ) -> str:
+        prompt = (
+            f"{self._build_block_prompt(window, block)}\n\n"
+            f"Mode: {mode}\n"
+            f"Importance: {flags.get('IMPORTANCE', 'medium')}\n"
+            "Focus on the most important net-new development in this block.\n"
+        )
+        return self._run_validated_recap_stage(
+            active_store,
+            host,
+            model,
+            stage_name=f"window_{int(window.get('window_index') or 1):04d}_block_{int(block.get('block_index') or 1):02d}_summary",
+            system_prompt=self._block_summary_system_prompt(),
+            user_prompt=prompt,
+            format_requirements="Return either 'none' or exactly one line starting with 'SUMMARY: '.",
+            parser=lambda raw: _parse_single_prefixed_line_response(raw, prefix="SUMMARY: ", allow_none=True),
+            num_predict=120,
+        )
+
+    def _extract_block_prefixed_items(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        *,
+        window: dict[str, object],
+        block: dict[str, object],
+        stage_suffix: str,
+        label: str,
+        description: str,
+        max_items: int,
+        num_predict: int,
+    ) -> list[str]:
+        return self._run_validated_recap_stage(
+            active_store,
+            host,
+            model,
+            stage_name=f"window_{int(window.get('window_index') or 1):04d}_block_{int(block.get('block_index') or 1):02d}_{stage_suffix}",
+            system_prompt=self._prefixed_extractor_system_prompt(label, description, max_items),
+            user_prompt=self._build_block_prompt(window, block),
+            format_requirements=f"Return either 'none' or up to {max_items} lines, each starting with '{label}: '.",
+            parser=lambda raw: _parse_prefixed_lines_response(raw, prefix=f"{label}: ", max_items=max_items, allow_none=True),
+            num_predict=num_predict,
+        )
+
+    def _scene_mode_break(self, previous_mode: str, next_mode: str) -> bool:
+        prev = str(previous_mode or "other").strip().lower() or "other"
+        nxt = str(next_mode or "other").strip().lower() or "other"
+        if prev == nxt:
+            return False
+        hard_breaks = {
+            ("setup", "combat"),
+            ("investigation", "combat"),
+            ("combat", "loot"),
+            ("combat", "planning"),
+            ("combat", "aftermath"),
+            ("interrogation", "planning"),
+            ("travel", "setup"),
+            ("loot", "planning"),
+        }
+        return (prev, nxt) in hard_breaks
+
+    def _group_block_dossiers_into_scenes(self, block_dossiers: list[dict[str, object]]) -> list[dict[str, object]]:
+        scenes: list[list[dict[str, object]]] = []
+        current_scene: list[dict[str, object]] = []
+        current_tokens = 0
+        for dossier in block_dossiers:
+            mode = str(dossier.get("mode") or "other")
+            block_tokens = max(1, int(dossier.get("estimated_tokens") or 0))
+            if current_scene:
+                previous = current_scene[-1]
+                previous_flags = dict(previous.get("flags") or {})
+                previous_mode = str(previous.get("mode") or "other")
+                needs_split = (
+                    str(previous_flags.get("BOUNDARY") or "keep") == "split"
+                    or self._scene_mode_break(previous_mode, mode)
+                    or current_tokens + block_tokens > RECAP_SCENE_TARGET_TOKENS
+                )
+                if needs_split:
+                    scenes.append(current_scene)
+                    current_scene = []
+                    current_tokens = 0
+            current_scene.append(dossier)
+            current_tokens += block_tokens
+        if current_scene:
+            scenes.append(current_scene)
+        scene_payloads: list[dict[str, object]] = []
+        for scene_index, blocks in enumerate(scenes, start=1):
+            all_modes = [str(block.get("mode") or "other") for block in blocks]
+            dominant_mode = max(set(all_modes), key=all_modes.count) if all_modes else "other"
+            scene_payloads.append(
+                {
+                    "scene_index": scene_index,
+                    "mode": dominant_mode,
+                    "blocks": copy.deepcopy(blocks),
+                    "summaries": _dedupe_preserve_order([str(block.get("summary") or "") for block in blocks if str(block.get("summary") or "").strip()]),
+                    "anchors": _dedupe_preserve_order([item for block in blocks for item in list(block.get("anchors", []))]),
+                    "outcomes": _dedupe_preserve_order([item for block in blocks for item in list(block.get("outcomes", []))]),
+                    "decisions": _dedupe_preserve_order([item for block in blocks for item in list(block.get("decisions", []))]),
+                    "entities": _dedupe_preserve_order([item for block in blocks for item in list(block.get("entities", []))]),
+                    "open_threads": _dedupe_preserve_order([item for block in blocks for item in list(block.get("open_threads", []))]),
+                }
+            )
+        return scene_payloads
+
+    def _write_scene_paragraph(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        scene: dict[str, object],
+    ) -> str:
+        return self._run_validated_recap_stage(
+            active_store,
+            host,
+            model,
+            stage_name=f"scene_{int(scene.get('scene_index') or 1):02d}_writer",
+            system_prompt=self._scene_writer_system_prompt(),
+            user_prompt=self._build_scene_writer_prompt(scene),
+            format_requirements="Return exactly one line starting with 'SCENE: ' followed by prose.",
+            parser=lambda raw: _parse_single_prefixed_line_response(raw, prefix="SCENE: ", allow_none=False),
+            num_predict=220,
+        )
+
+    def _window_model_chain_analysis(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        window: dict[str, object],
+    ) -> dict[str, object]:
+        block_dossiers: list[dict[str, object]] = []
+        for block in self._build_window_micro_blocks(window):
+            mode = self._classify_block_mode(active_store, host, model, window, block)
+            flags = self._classify_block_flags(active_store, host, model, window, block)
+            summary = self._extract_block_summary(active_store, host, model, window, block, mode=mode, flags=flags)
+            anchors = self._extract_block_prefixed_items(
+                active_store,
+                host,
+                model,
+                window=window,
+                block=block,
+                stage_suffix="anchors",
+                label="ANCHOR",
+                description="must-keep facts, named people/items/places, end-state changes, or reveals that must survive the recap even if wording changes",
+                max_items=4,
+                num_predict=180,
+            )
+            outcomes = self._extract_block_prefixed_items(
+                active_store,
+                host,
+                model,
+                window=window,
+                block=block,
+                stage_suffix="outcomes",
+                label="OUTCOME",
+                description="concrete results, discoveries, state changes, recovered items, reveals, captures, escapes, or final consequences from this block",
+                max_items=5,
+                num_predict=180,
+            )
+            decisions = self._extract_block_prefixed_items(
+                active_store,
+                host,
+                model,
+                window=window,
+                block=block,
+                stage_suffix="decisions",
+                label="DECISION",
+                description="decisions that were actually made, agreed, or chosen by the end of this block",
+                max_items=3,
+                num_predict=160,
+            )
+            open_threads = self._extract_block_prefixed_items(
+                active_store,
+                host,
+                model,
+                window=window,
+                block=block,
+                stage_suffix="open_threads",
+                label="OPEN",
+                description="unresolved questions, missing information, escaped threats, or loose ends still open at the end of this block",
+                max_items=3,
+                num_predict=160,
+            )
+            entities = self._extract_block_prefixed_items(
+                active_store,
+                host,
+                model,
+                window=window,
+                block=block,
+                stage_suffix="entities",
+                label="ENTITY",
+                description="named people, places, factions, items, or terms that matter later in the recap",
+                max_items=4,
+                num_predict=180,
+            )
+            block_dossiers.append(
+                {
+                    "block_index": int(block.get("block_index") or len(block_dossiers) + 1),
+                    "turn_range": str(block.get("turn_range") or ""),
+                    "text": str(block.get("text") or ""),
+                    "estimated_tokens": int(block.get("estimated_tokens") or 0),
+                    "mode": mode,
+                    "flags": flags,
+                    "summary": summary,
+                    "anchors": anchors,
+                    "outcomes": outcomes,
+                    "decisions": decisions,
+                    "entities": entities,
+                    "open_threads": open_threads,
+                }
+            )
+        if not block_dossiers:
+            raise RuntimeError(f"Window {int(window.get('window_index') or 1)} produced no recap blocks.")
+        active_store.save_recap_json_artifact(
+            f"investigations/window_{int(window.get('window_index') or 1):04d}_blocks.json",
+            {"blocks": block_dossiers},
+        )
+        scenes = self._group_block_dossiers_into_scenes(block_dossiers)
+        scene_paragraphs: list[str] = []
+        for scene in scenes:
+            scene_text = self._write_scene_paragraph(active_store, host, model, scene)
+            scene["scene_text"] = scene_text
+            scene_paragraphs.append(scene_text)
+        active_store.save_recap_json_artifact(
+            f"investigations/window_{int(window.get('window_index') or 1):04d}_scenes.json",
+            {"scenes": scenes},
+        )
+        summary_candidates = scene_paragraphs + [str(block.get("summary") or "") for block in block_dossiers]
+        return {
+            "window_index": int(window.get("window_index") or 1),
+            "slice_range": str(window.get("slice_range") or ""),
+            "summary": _compose_summary_sentences(summary_candidates, max_sentences=4, max_chars=620),
+            "key_beats": _dedupe_preserve_order(scene_paragraphs + [str(block.get("summary") or "") for block in block_dossiers if str(block.get("summary") or "").strip()])[:RECAP_MAX_CHRONOLOGY_ITEMS],
+            "anchors": _dedupe_preserve_order([item for scene in scenes for item in list(scene.get("anchors", []))])[:RECAP_MAX_FACT_ITEMS],
+            "important_facts": _dedupe_preserve_order(
+                [item for scene in scenes for item in list(scene.get("anchors", []))]
+                + [item for scene in scenes for item in list(scene.get("outcomes", []))]
+                + [item for scene in scenes for item in list(scene.get("entities", []))]
+            )[:RECAP_MAX_FACT_ITEMS],
+            "evidence_gaps": _dedupe_preserve_order([item for scene in scenes for item in list(scene.get("open_threads", []))])[:RECAP_MAX_RULING_ITEMS],
+            "decisions": _dedupe_preserve_order([item for scene in scenes for item in list(scene.get("decisions", []))])[:RECAP_MAX_DECISION_ITEMS],
+            "tasks": [],
+            "open_threads": _dedupe_preserve_order([item for scene in scenes for item in list(scene.get("open_threads", []))])[:RECAP_MAX_OPEN_THREAD_ITEMS],
+            "rulings": [],
+            "follow_ups": _dedupe_preserve_order([item for scene in scenes for item in list(scene.get("open_threads", []))])[:RECAP_MAX_FOLLOW_UP_ITEMS],
+            "continuity_notes": _dedupe_preserve_order([item for scene in scenes for item in list(scene.get("outcomes", []))] + scene_paragraphs[-2:])[:RECAP_MAX_CONTINUITY_ITEMS],
+            "scene_paragraphs": scene_paragraphs,
+        }
+
+    def _final_recap_system_prompt(self) -> str:
+        return (
+            "You are the Final Session Weaver.\n"
+            "Use only the supplied scene notes and required facts.\n"
+            "Return exactly 2 or 3 lines and nothing else in this format:\n"
+            "P1: <paragraph>\n"
+            "P2: <paragraph>\n"
+            "Optional P3: <paragraph>\n"
+            "Each line must be one prose paragraph.\n"
+            "Write a coherent recap, not bullet points, not metadata, and not raw transcript quotes.\n"
+            "Do not invent any fact, location, custody detail, motive, or consequence that is not explicitly supported by the supplied notes.\n"
+            "Avoid repetition. Cover setup, major developments, resulting state, and unresolved hooks.\n"
+        )
+
+    def _session_keep_system_prompt(self) -> str:
+        return (
+            "You are the Session Keep Selector.\n"
+            "Use only the supplied scene notes and extracted recap facts.\n"
+            "Return either the single word 'none' or up to 8 lines, each starting with 'KEEP: '.\n"
+            "Choose the facts that must survive into the final recap even if wording changes.\n"
+            "Prefer named people, places, items, revealed connections, final decisions, and ending state.\n"
+            "If later scenes contain named reveals or ending-state facts, prioritize those over early setup details.\n"
+            "Ignore dice, micro-tactics, minor injuries, and incidental table chatter.\n"
+        )
+
+    def _final_recap_audit_system_prompt(self) -> str:
+        return (
+            "You are the Final Recap Auditor.\n"
+            "Compare the supplied final recap against the supplied required facts and unresolved hooks.\n"
+            "Return exactly one line 'STATUS: pass' if the recap covers them adequately.\n"
+            "Otherwise return one line 'STATUS: fail' followed by up to 6 lines starting with 'MISSING: '.\n"
+            "Each MISSING line must name one factual point or unresolved hook that should be added or clarified.\n"
+            "Only fail for major omissions involving named reveals, final decisions, ending state, or unresolved hooks that still matter at session end.\n"
+            "Ignore incidental tactics, minor injuries, and setup details that do not matter later.\n"
+            "Do not rewrite the recap.\n"
+        )
+
+    def _ordered_session_points(self, values: list[str], *, limit: int) -> list[str]:
+        return _dedupe_preserve_order([str(value or "") for value in values])[:limit]
+
+    def _build_session_keep_prompt(
         self,
         narrative_doc: dict[str, object],
         coverage_doc: dict[str, object],
@@ -2295,27 +3807,145 @@ class TranscriptSessionController(QObject):
         sections = [
             f"Session: {self._session_name or 'Unnamed Session'}",
             "",
-            "Key Beats:",
+            "Scene Notes:",
         ]
-        for value in self._normalize_json_list(narrative_payload, "key_beats")[:8]:
+        for value in self._ordered_session_points(
+            self._normalize_json_list(narrative_payload, "scene_paragraphs")
+            or self._normalize_json_list(narrative_payload, "key_beats"),
+            limit=8,
+        ):
             sections.append(f"- {value}")
-        sections.extend(("", "Important Facts:"))
-        for value in self._normalize_json_list(narrative_payload, "important_facts")[:6]:
+        sections.extend(("", "Anchors And Outcomes:"))
+        for value in self._ordered_session_points(
+            self._normalize_json_list(narrative_payload, "anchors")
+            + self._normalize_json_list(narrative_payload, "important_facts")
+            + self._normalize_json_list(narrative_payload, "continuity_notes"),
+            limit=14,
+        ):
             sections.append(f"- {value}")
-        sections.extend(("", "Decisions And Outcomes:"))
-        for value in self._normalize_json_list(narrative_payload, "decisions")[:6]:
+        sections.extend(("", "Late Session Anchors:"))
+        for value in self._ordered_session_points(self._normalize_json_list(narrative_payload, "anchors")[-6:], limit=6):
             sections.append(f"- {value}")
-        sections.extend(("", "Action Items:"))
-        for value in self._normalize_json_list(coverage_payload, "tasks")[:6]:
+        sections.extend(("", "Decisions:"))
+        for value in self._ordered_session_points(self._normalize_json_list(narrative_payload, "decisions"), limit=8):
             sections.append(f"- {value}")
         sections.extend(("", "Open Threads:"))
-        for value in self._normalize_json_list(coverage_payload, "open_threads")[:6]:
+        for value in self._ordered_session_points(
+            self._normalize_json_list(narrative_payload, "open_threads")
+            + self._normalize_json_list(coverage_payload, "open_threads"),
+            limit=8,
+        ):
             sections.append(f"- {value}")
-        sections.extend(("", "Continuity Notes:"))
-        for value in self._normalize_json_list(narrative_payload, "continuity_notes")[:4]:
-            sections.append(f"- {value}")
-        sections.extend(("", "Write one short recap paragraph."))
         return "\n".join(sections).strip()
+
+    def _select_session_keep_points(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        narrative_doc: dict[str, object],
+        coverage_doc: dict[str, object],
+    ) -> list[str]:
+        return self._run_validated_recap_stage(
+            active_store,
+            host,
+            model,
+            stage_name="session_keep",
+            system_prompt=self._session_keep_system_prompt(),
+            user_prompt=self._build_session_keep_prompt(narrative_doc, coverage_doc),
+            format_requirements="Return either 'none' or up to 8 lines, each starting with 'KEEP: '.",
+            parser=lambda raw: _parse_prefixed_lines_response(raw, prefix="KEEP: ", max_items=8, allow_none=False),
+            num_predict=220,
+        )
+
+    def _build_final_draft_prompt(
+        self,
+        narrative_doc: dict[str, object],
+        coverage_doc: dict[str, object],
+        keep_points: list[str],
+        *,
+        missing_points: Optional[list[str]] = None,
+    ) -> str:
+        narrative_payload = dict(narrative_doc.get("payload") or {})
+        coverage_payload = dict(coverage_doc.get("payload") or {})
+        anchors = self._normalize_json_list(narrative_payload, "anchors")
+        if not anchors:
+            anchors = self._normalize_json_list(narrative_payload, "important_facts")
+        open_threads = self._ordered_session_points(
+            self._normalize_json_list(narrative_payload, "open_threads")
+            + self._normalize_json_list(coverage_payload, "open_threads"),
+            limit=4,
+        )
+        continuity = self._ordered_session_points(
+            self._normalize_json_list(narrative_payload, "continuity_notes")[-4:],
+            limit=4,
+        )
+        late_anchors = self._ordered_session_points(self._normalize_json_list(narrative_payload, "anchors")[-6:], limit=6)
+        required_facts = self._ordered_session_points(keep_points + late_anchors, limit=10)
+        opening_facts = self._ordered_session_points(anchors[:4], limit=4)
+        middle_facts = self._ordered_session_points(anchors[4:10] + self._normalize_json_list(narrative_payload, "important_facts")[:4], limit=6)
+        ending_facts = self._ordered_session_points(
+            late_anchors
+            + self._normalize_json_list(narrative_payload, "decisions")[-4:]
+            + continuity,
+            limit=8,
+        )
+        sections = [
+            f"Session: {self._session_name or 'Unnamed Session'}",
+            "",
+            "Opening Facts:",
+        ]
+        for value in opening_facts:
+            sections.append(f"- {value}")
+        sections.extend(("", "Confrontation And Discovery Facts:"))
+        for value in middle_facts:
+            sections.append(f"- {value}")
+        sections.extend(("", "Ending Facts:"))
+        for value in ending_facts:
+            sections.append(f"- {value}")
+        sections.extend(("", "Required Facts To Cover:"))
+        for point in required_facts:
+            sections.append(f"- {point}")
+        sections.extend(("", "Remaining Hooks:"))
+        for value in open_threads:
+            sections.append(f"- {value}")
+        sections.extend(
+            (
+                "",
+                "Writing Plan:",
+                "- P1 should cover the setup and initial approach.",
+                "- P2 should cover the main confrontation and discoveries.",
+                "- P3, if used, should cover the final decision, resulting state, and unresolved hooks.",
+                "- Only mention unresolved hooks that are still open at the end of the session.",
+                "- Do not quote raw dialogue or repeat the same setup twice.",
+            )
+        )
+        if missing_points:
+            sections.extend(("", "Repair Requirements:"))
+            for value in self._ordered_session_points(list(missing_points), limit=6):
+                sections.append(f"- {value}")
+        return "\n".join(sections).strip()
+
+    def _validate_final_recap_paragraphs(
+        self,
+        paragraphs: list[str],
+    ) -> tuple[bool, str]:
+        if len(set(paragraph.casefold() for paragraph in paragraphs)) != len(paragraphs):
+            return False, "Paragraphs repeated the same content."
+        first_sentences = [
+            _strip_sentence_ending((_split_text_sentences(paragraph) or [paragraph])[0]).casefold()
+            for paragraph in paragraphs
+        ]
+        if len(set(first_sentences)) != len(first_sentences):
+            return False, "Multiple paragraphs opened with the same sentence."
+        combined = " ".join(paragraphs).lower()
+        forbidden_tokens = ("slice range", "coverage window", "prompt", "metadata")
+        for token in forbidden_tokens:
+            if token in combined:
+                return False, f"Final recap contained forbidden metadata token {token!r}."
+        if any(len(paragraph) < 90 for paragraph in paragraphs[:2]):
+            return False, "Final recap paragraphs were too short to be useful."
+        return True, ""
 
     def _normalize_json_list(self, payload: dict, key: str) -> list[str]:
         raw_values = payload.get(key, [])
@@ -2580,6 +4210,7 @@ class TranscriptSessionController(QObject):
             "window_index": int(window_payload.get("window_index") or 1),
             "slice_range": str(window_payload.get("slice_range") or ""),
             "summary": _normalize_line_item(str(window_payload.get("summary") or ""), max_chars=480),
+            "anchors": self._normalize_json_list(window_payload, "anchors")[:RECAP_MAX_FACT_ITEMS],
             "key_beats": self._normalize_json_list(window_payload, "key_beats")[:RECAP_MAX_CHRONOLOGY_ITEMS],
             "important_facts": self._normalize_json_list(window_payload, "important_facts")[:RECAP_MAX_FACT_ITEMS],
             "evidence_gaps": self._normalize_json_list(window_payload, "evidence_gaps")[:RECAP_MAX_RULING_ITEMS],
@@ -2589,6 +4220,7 @@ class TranscriptSessionController(QObject):
             "rulings": self._normalize_json_list(window_payload, "rulings")[:RECAP_MAX_RULING_ITEMS],
             "follow_ups": self._normalize_json_list(window_payload, "follow_ups")[:RECAP_MAX_FOLLOW_UP_ITEMS],
             "continuity_notes": self._normalize_json_list(window_payload, "continuity_notes")[:RECAP_MAX_CONTINUITY_ITEMS],
+            "scene_paragraphs": self._normalize_json_list(window_payload, "scene_paragraphs")[:8],
         }
 
     def _format_window_dossier_text(self, dossier: dict) -> str:
@@ -2601,6 +4233,8 @@ class TranscriptSessionController(QObject):
             "",
         ]
         section_map = (
+            ("Scene Paragraphs", dossier.get("scene_paragraphs", [])),
+            ("Anchors", dossier.get("anchors", [])),
             ("Key Beats", dossier.get("key_beats", [])),
             ("Important Facts", dossier.get("important_facts", [])),
             ("Decisions", dossier.get("decisions", [])),
@@ -2657,7 +4291,7 @@ class TranscriptSessionController(QObject):
         total_windows: int,
     ) -> tuple[dict[str, object], dict[str, object]]:
         window_index = int(window.get("window_index") or 1)
-        window_payload = self._window_code_analysis(window)
+        window_payload = self._window_model_chain_analysis(active_store, host, model, window)
         chronology_payload = {
             "summary": str(window_payload.get("summary") or ""),
             "key_beats": list(window_payload.get("key_beats", [])),
@@ -2728,6 +4362,8 @@ class TranscriptSessionController(QObject):
     def _build_narrative_brief_payload(self, payload: dict) -> dict:
         return {
             "summary": _normalize_line_item(str(payload.get("summary") or ""), max_chars=520),
+            "scene_paragraphs": self._normalize_json_list(payload, "scene_paragraphs")[:10],
+            "anchors": self._normalize_json_list(payload, "anchors")[:14],
             "key_beats": self._normalize_json_list(payload, "key_beats")[:16],
             "decisions": self._normalize_json_list(payload, "decisions")[:16],
             "tasks": self._normalize_json_list(payload, "tasks")[:16],
@@ -2739,6 +4375,8 @@ class TranscriptSessionController(QObject):
     def _format_narrative_brief_text(self, payload: dict, *, title: str) -> str:
         sections = [f"### {title}", "", "Summary:", str(payload.get("summary") or ""), ""]
         for section_title, key in (
+            ("Scene Paragraphs", "scene_paragraphs"),
+            ("Anchors", "anchors"),
             ("Key Beats", "key_beats"),
             ("Important Facts", "important_facts"),
             ("Decisions", "decisions"),
@@ -2781,6 +4419,12 @@ class TranscriptSessionController(QObject):
     def _merge_narrative_payloads(self, payloads: list[dict]) -> dict:
         merged = {
             "summary": "",
+            "scene_paragraphs": _dedupe_preserve_order(
+                [item for payload in payloads for item in self._normalize_json_list(payload, "scene_paragraphs")]
+            )[:10],
+            "anchors": _dedupe_preserve_order(
+                [item for payload in payloads for item in self._normalize_json_list(payload, "anchors")]
+            )[:14],
             "key_beats": _dedupe_preserve_order(
                 [item for payload in payloads for item in self._normalize_json_list(payload, "key_beats")]
             )[:18],
@@ -2807,6 +4451,8 @@ class TranscriptSessionController(QObject):
         ]
         merged["summary"] = _compose_summary_sentences(
             summary_candidates
+            + merged["scene_paragraphs"][:2]
+            + merged["anchors"][:2]
             + merged["key_beats"][:3]
             + merged["important_facts"][:2]
             + merged["decisions"][:1]
@@ -3025,25 +4671,101 @@ class TranscriptSessionController(QObject):
         model: str,
         narrative_doc: dict[str, object],
         coverage_doc: dict[str, object],
-    ) -> str:
-        deterministic_summary = self._deterministic_final_summary(narrative_doc, coverage_doc)
-        text = self._call_recap_model(
+    ) -> tuple[str, list[str]]:
+        keep_points = self._select_session_keep_points(active_store, host, model, narrative_doc, coverage_doc)
+        paragraphs = self._run_validated_recap_stage(
             active_store,
             host,
             model,
             stage_name="final_draft",
             system_prompt=self._final_recap_system_prompt(),
-            user_prompt=self._build_final_draft_prompt(narrative_doc, coverage_doc),
-            num_predict=360,
+            user_prompt=self._build_final_draft_prompt(narrative_doc, coverage_doc, keep_points),
+            format_requirements=(
+                "Return exactly 2 or 3 lines in this format:\n"
+                "P1: <paragraph>\n"
+                "P2: <paragraph>\n"
+                "Optional P3: <paragraph>\n"
+                "Each paragraph must be prose and not bullets."
+            ),
+            parser=self._parse_and_validate_final_recap,
+            num_predict=420,
         )
-        cleaned = self._sanitize_model_summary(text)
-        if cleaned:
-            return cleaned
-        active_store.append_event(
-            "warn",
-            "Final recap model response was low-signal. Using the deterministic recap summary paragraph.",
+        return "\n\n".join(paragraphs).strip(), keep_points
+
+    def _parse_and_validate_final_recap(
+        self,
+        raw: str,
+    ) -> tuple[bool, list[str], str]:
+        ok, paragraphs, error_message = _parse_paragraph_lines_response(raw)
+        if not ok:
+            return False, [], error_message
+        valid, validation_error = self._validate_final_recap_paragraphs(paragraphs)
+        if not valid:
+            return False, [], validation_error
+        return True, paragraphs, ""
+
+    def _build_final_audit_prompt(
+        self,
+        final_draft: str,
+        keep_points: list[str],
+        narrative_doc: dict[str, object],
+        coverage_doc: dict[str, object],
+    ) -> str:
+        narrative_payload = dict(narrative_doc.get("payload") or {})
+        coverage_payload = dict(coverage_doc.get("payload") or {})
+        sections = [
+            f"Session: {self._session_name or 'Unnamed Session'}",
+            "",
+            "Final Recap:",
+            final_draft.strip(),
+            "",
+            "Required Facts:",
+        ]
+        for value in self._ordered_session_points(
+            keep_points + self._normalize_json_list(narrative_payload, "anchors")[-6:],
+            limit=10,
+        ):
+            sections.append(f"- {value}")
+        sections.extend(("", "Unresolved Hooks:"))
+        for value in self._ordered_session_points(
+            (self._normalize_json_list(narrative_payload, "open_threads")
+            + self._normalize_json_list(coverage_payload, "open_threads"))[-4:],
+            limit=4,
+        ):
+            sections.append(f"- {value}")
+        sections.extend(("", "Ending State:"))
+        for value in self._ordered_session_points(
+            self._normalize_json_list(narrative_payload, "continuity_notes")[-4:],
+            limit=4,
+        ):
+            sections.append(f"- {value}")
+        return "\n".join(sections).strip()
+
+    def _audit_final_recap_stage(
+        self,
+        active_store: SessionTranscriptStore,
+        host: str,
+        model: str,
+        *,
+        stage_name: str,
+        final_draft: str,
+        keep_points: list[str],
+        narrative_doc: dict[str, object],
+        coverage_doc: dict[str, object],
+    ) -> dict[str, object]:
+        return self._run_validated_recap_stage(
+            active_store,
+            host,
+            model,
+            stage_name=stage_name,
+            system_prompt=self._final_recap_audit_system_prompt(),
+            user_prompt=self._build_final_audit_prompt(final_draft, keep_points, narrative_doc, coverage_doc),
+            format_requirements=(
+                "Return either exactly 'STATUS: pass' or 'STATUS: fail' followed by one or more 'MISSING: ' lines."
+            ),
+            parser=_parse_status_missing_response,
+            num_predict=220,
         )
-        return deterministic_summary
 
     def _audit_final_recap(
         self,
@@ -3051,10 +4773,49 @@ class TranscriptSessionController(QObject):
         host: str,
         model: str,
         final_draft: str,
+        keep_points: list[str],
         narrative_doc: dict[str, object],
         coverage_doc: dict[str, object],
     ) -> str:
-        return self._compose_final_recap_markdown(final_draft, narrative_doc, coverage_doc)
+        active_text = str(final_draft or "").strip()
+        for round_index in range(1, 3):
+            audit = self._audit_final_recap_stage(
+                active_store,
+                host,
+                model,
+                stage_name=f"final_audit_round_{round_index:02d}",
+                final_draft=active_text,
+                keep_points=keep_points,
+                narrative_doc=narrative_doc,
+                coverage_doc=coverage_doc,
+            )
+            if str(audit.get("status") or "") == "pass":
+                return self._compose_final_recap_markdown(active_text, narrative_doc, coverage_doc)
+            missing = list(audit.get("missing") or [])
+            active_text = "\n\n".join(
+                self._run_validated_recap_stage(
+                    active_store,
+                    host,
+                    model,
+                    stage_name=f"final_repair_round_{round_index:02d}",
+                    system_prompt=self._final_recap_system_prompt(),
+                    user_prompt=self._build_final_draft_prompt(
+                        narrative_doc,
+                        coverage_doc,
+                        keep_points,
+                        missing_points=missing,
+                    ),
+                    format_requirements=(
+                        "Return exactly 2 or 3 lines in this format:\n"
+                        "P1: <paragraph>\n"
+                        "P2: <paragraph>\n"
+                        "Optional P3: <paragraph>"
+                    ),
+                    parser=self._parse_and_validate_final_recap,
+                    num_predict=420,
+                )
+            ).strip()
+        raise RuntimeError("Final recap audit still failed after 2 repair attempts.")
 
     def _compose_final_recap_markdown(
         self,
@@ -3062,9 +4823,10 @@ class TranscriptSessionController(QObject):
         narrative_doc: dict[str, object],
         coverage_doc: dict[str, object],
     ) -> str:
-        summary = self._sanitize_model_summary(final_draft) or self._deterministic_final_summary(narrative_doc, coverage_doc)
-        body = self._compose_recap_body(narrative_doc, coverage_doc, summary)
-        return "\n\n".join(("## Session Recap", body or "No summary was generated.")).strip()
+        body = _normalize_model_output(final_draft)
+        if not body:
+            raise RuntimeError("Final recap draft was empty after validation.")
+        return "\n\n".join(("## Session Recap", body)).strip()
 
 
 class TranscriptSessionPanel(QWidget):
@@ -3090,8 +4852,21 @@ class TranscriptSessionPanel(QWidget):
 
         config_group = QGroupBox("Transcript Capture")
         config_group.setObjectName("TransparentContainer")
-        config_layout = QFormLayout(config_group)
-        config_layout.setContentsMargins(8, 8, 8, 8)
+        config_group_layout = QVBoxLayout(config_group)
+        config_group_layout.setContentsMargins(8, 8, 8, 8)
+        config_group_layout.setSpacing(8)
+
+        config_header_row = QWidget(config_group)
+        config_header_row.setObjectName("TransparentContainer")
+        config_header_layout = QHBoxLayout(config_header_row)
+        config_header_layout.setContentsMargins(0, 0, 0, 0)
+        config_header_layout.setSpacing(0)
+        config_header_layout.addStretch(1)
+
+        config_form_host = QWidget(config_group)
+        config_form_host.setObjectName("TransparentContainer")
+        config_layout = QFormLayout(config_form_host)
+        config_layout.setContentsMargins(0, 0, 0, 0)
         config_layout.setSpacing(8)
         config_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
@@ -3111,25 +4886,20 @@ class TranscriptSessionPanel(QWidget):
         self.import_source_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         config_layout.addRow("Import As", self.import_source_combo)
 
-        device_row = QWidget(config_group)
-        device_row.setObjectName("TransparentContainer")
-        device_row_layout = QHBoxLayout(device_row)
-        device_row_layout.setContentsMargins(0, 0, 0, 0)
-        device_row_layout.setSpacing(6)
         self.audio_note_label = _make_hint_label(
-            "Refresh the microphone and system device lists before capture.",
-            device_row,
+            "",
+            config_group,
         )
+        self.audio_note_label.setVisible(False)
         self.refresh_devices_btn = _make_icon_tool_button(
-            device_row,
+            config_group,
             "reset.svg",
-            "Refresh audio devices",
+            "Refresh devices",
             object_name="SecondaryButton",
+            button_size=ACTION_TEXT_BUTTON_HEIGHT,
         )
         self.refresh_devices_btn.clicked.connect(self._refresh_audio_devices)
-        device_row_layout.addWidget(self.audio_note_label, 1)
-        device_row_layout.addWidget(self.refresh_devices_btn, 0, Qt.AlignmentFlag.AlignTop)
-        config_layout.addRow("Devices", device_row)
+        config_header_layout.addWidget(self.refresh_devices_btn, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
 
         self.mic_device_combo = QComboBox(config_group)
         self.mic_device_combo.setFixedHeight(FIELD_HEIGHT)
@@ -3142,188 +4912,118 @@ class TranscriptSessionPanel(QWidget):
         self.system_device_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.system_device_combo.currentIndexChanged.connect(self._on_capture_preferences_changed)
         config_layout.addRow("System Input", self.system_device_combo)
+        config_layout.addRow("", self.audio_note_label)
 
-        self.whisper_cli_edit, self.whisper_cli_browse_btn, whisper_cli_row = self._build_path_row(
-            config_group,
-            "Browse Whisper.cpp CLI",
-            self._browse_whisper_cli,
-        )
-        config_layout.addRow("Whisper CLI", whisper_cli_row)
-
-        self.whisper_model_edit, self.whisper_model_browse_btn, whisper_model_row = self._build_path_row(
-            config_group,
-            "Browse Whisper.cpp Model",
-            self._browse_whisper_model,
-        )
-        config_layout.addRow("Whisper Model", whisper_model_row)
-
+        config_group_layout.addWidget(config_header_row)
+        config_group_layout.addWidget(config_form_host)
         layout.addWidget(config_group)
 
         control_row = QWidget(self)
         control_row.setObjectName("TransparentContainer")
+        control_row.setMinimumHeight(ACTION_ROW_HEIGHT)
         control_layout = QHBoxLayout(control_row)
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(6)
-        self.capture_actions_label = _make_section_label("Capture Actions", control_row)
-        control_layout.addWidget(self.capture_actions_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        control_layout.addStretch(1)
-
         self.start_btn = _make_icon_tool_button(
             control_row,
-            "lightning.svg",
+            "ping.svg",
             "Start capture",
             object_name="PrimaryButton",
+            button_size=ACTION_TEXT_BUTTON_HEIGHT,
         )
-        self.start_btn.clicked.connect(self._start_capture)
-        self.halt_btn = _make_icon_tool_button(control_row, "stop.svg", "Halt", object_name="DestructiveButton")
+        self.start_btn.clicked.connect(self._toggle_capture)
+        self.halt_btn = _make_icon_tool_button(control_row, "stop.svg", "Stop", object_name="DestructiveButton")
         self.halt_btn.clicked.connect(self._halt_processing)
+        self.halt_btn.setVisible(False)
         self.import_btn = _make_icon_tool_button(
             control_row,
             "folder_open.svg",
-            "Import audio files",
+            "Import audio",
             object_name="SecondaryButton",
+            button_size=ACTION_TEXT_BUTTON_HEIGHT,
         )
         self.import_btn.clicked.connect(self._import_audio)
         self.run_pending_btn = _make_icon_tool_button(
             control_row,
             "play.svg",
-            "Run pending transcription",
+            "Transcribe pending",
             object_name="SecondaryButton",
+            button_size=ACTION_TEXT_BUTTON_HEIGHT,
         )
         self.run_pending_btn.clicked.connect(lambda: self._controller.request_processing(run_recap=False))
         self.retry_failed_btn = _make_icon_tool_button(
             control_row,
             "redo.svg",
-            "Retry failed chunks",
+            "Retry failed",
             object_name="SecondaryButton",
+            button_size=ACTION_TEXT_BUTTON_HEIGHT,
         )
         self.retry_failed_btn.clicked.connect(self._controller.retry_failed_chunks)
         control_layout.addWidget(self.start_btn)
-        control_layout.addWidget(self.halt_btn)
         control_layout.addWidget(self.import_btn)
         control_layout.addWidget(self.run_pending_btn)
         control_layout.addWidget(self.retry_failed_btn)
+        control_layout.addStretch(1)
+        self.editor_state_label = _make_hint_label("Edit transcript text here.", control_row)
+        self.editor_state_label.setVisible(False)
+        control_layout.addWidget(self.editor_state_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        self.save_editor_btn = _make_icon_tool_button(
+            control_row,
+            "save.svg",
+            "Save transcript text",
+            object_name="PrimaryButton",
+            button_size=ACTION_TEXT_BUTTON_HEIGHT,
+        )
+        self.save_editor_btn.clicked.connect(self._save_editor_text)
+        self.reload_editor_btn = _make_icon_tool_button(
+            control_row,
+            "undo.svg",
+            "Discard editor changes",
+            object_name="SecondaryButton",
+            button_size=ACTION_TEXT_BUTTON_HEIGHT,
+        )
+        self.reload_editor_btn.clicked.connect(self._reload_editor_text)
+        self.use_generated_btn = _make_icon_tool_button(
+            control_row,
+            "reset.svg",
+            "Use generated transcript",
+            object_name="SecondaryButton",
+            button_size=ACTION_TEXT_BUTTON_HEIGHT,
+        )
+        self.use_generated_btn.clicked.connect(self._use_generated_transcript)
+        control_layout.addWidget(self.save_editor_btn)
+        control_layout.addWidget(self.reload_editor_btn)
+        control_layout.addWidget(self.use_generated_btn)
         layout.addWidget(control_row)
 
         self.status_label = _make_hint_label("Create or select a session first.", self)
         layout.addWidget(self.status_label)
 
         self.event_label = _make_hint_label("", self)
+        self.event_label.setVisible(False)
         layout.addWidget(self.event_label)
-
-        editor_actions_row = QWidget(self)
-        editor_actions_row.setObjectName("TransparentContainer")
-        editor_actions_layout = QHBoxLayout(editor_actions_row)
-        editor_actions_layout.setContentsMargins(0, 0, 0, 0)
-        editor_actions_layout.setSpacing(6)
-        self.editor_actions_label = _make_section_label("Transcript Editor", editor_actions_row)
-        editor_actions_layout.addWidget(self.editor_actions_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.editor_state_label = _make_hint_label("Paste transcript text or edit generated text here.", editor_actions_row)
-        editor_actions_layout.addWidget(self.editor_state_label, 1, Qt.AlignmentFlag.AlignVCenter)
-        self.save_editor_btn = _make_icon_tool_button(
-            editor_actions_row,
-            "save.svg",
-            "Save editor text as the active transcript",
-            object_name="PrimaryButton",
-        )
-        self.save_editor_btn.clicked.connect(self._save_editor_text)
-        self.reload_editor_btn = _make_icon_tool_button(
-            editor_actions_row,
-            "undo.svg",
-            "Reload the active transcript and discard unsaved editor changes",
-            object_name="SecondaryButton",
-        )
-        self.reload_editor_btn.clicked.connect(self._reload_editor_text)
-        self.use_generated_btn = _make_icon_tool_button(
-            editor_actions_row,
-            "reset.svg",
-            "Use the generated chunk transcript instead of the saved manual text",
-            object_name="SecondaryButton",
-        )
-        self.use_generated_btn.clicked.connect(self._use_generated_transcript)
-        editor_actions_layout.addWidget(self.save_editor_btn)
-        editor_actions_layout.addWidget(self.reload_editor_btn)
-        editor_actions_layout.addWidget(self.use_generated_btn)
-        layout.addWidget(editor_actions_row)
 
         self.transcript_editor = QPlainTextEdit(self)
         self.transcript_editor.setReadOnly(False)
-        self.transcript_editor.setPlaceholderText("Paste or edit transcript text here, then save it as the active transcript.")
+        self.transcript_editor.setPlaceholderText("Paste or edit transcript text here.")
         self.transcript_editor.textChanged.connect(self._on_editor_text_changed)
         layout.addWidget(self.transcript_editor, 1)
 
         self._populate_device_combo(self.mic_device_combo, [], "Refresh audio devices")
         self._populate_device_combo(self.system_device_combo, [], "Refresh audio devices")
 
-    def _build_path_row(self, parent: QWidget, tooltip: str, callback) -> tuple[QLineEdit, QToolButton, QWidget]:
-        row = QWidget(parent)
-        row.setObjectName("TransparentContainer")
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(6)
-        edit = QLineEdit(row)
-        edit.setFixedHeight(FIELD_HEIGHT)
-        edit.setMinimumWidth(0)
-        edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        edit.editingFinished.connect(self._save_runtime_settings)
-        browse_button = _make_icon_tool_button(
-            row,
-            "folder_open.svg",
-            tooltip,
-            object_name="SecondaryButton",
-        )
-        browse_button.clicked.connect(callback)
-        row_layout.addWidget(edit, 1)
-        row_layout.addWidget(browse_button, 0)
-        return edit, browse_button, row
-
-    def _browse_whisper_cli(self) -> None:
-        current = str(self.whisper_cli_edit.text() or "").strip()
-        start_dir = str(Path(current).parent) if current else str(Path.home())
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Whisper.cpp CLI",
-            start_dir,
-            "Executables (*)",
-        )
-        if path:
-            self.whisper_cli_edit.setText(path)
-            self._save_runtime_settings()
-
-    def _browse_whisper_model(self) -> None:
-        current = str(self.whisper_model_edit.text() or "").strip()
-        start_dir = str(Path(current).parent) if current else str(Path.home())
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Whisper.cpp Model",
-            start_dir,
-            "Model Files (*)",
-        )
-        if path:
-            self.whisper_model_edit.setText(path)
-            self._save_runtime_settings()
-
     def _save_runtime_settings(self) -> None:
         if self._syncing_fields:
             return
         self._controller.update_runtime_settings(
-            self.whisper_cli_edit.text(),
-            self.whisper_model_edit.text(),
+            "",
+            "",
             self._controller.snapshot().get("runtime", {}).get("ollama_host", DEFAULT_OLLAMA_HOST),
             self._controller.snapshot().get("runtime", {}).get("ollama_model", DEFAULT_OLLAMA_MODEL),
         )
 
     def _refresh_runtime_fields(self) -> None:
-        snapshot = self._controller.snapshot()
-        runtime = snapshot.get("runtime", {})
-        self._syncing_fields = True
-        try:
-            if not self.whisper_cli_edit.hasFocus():
-                self.whisper_cli_edit.setText(str(runtime.get("whisper_cli_path") or ""))
-            if not self.whisper_model_edit.hasFocus():
-                self.whisper_model_edit.setText(str(runtime.get("whisper_model_path") or ""))
-        finally:
-            self._syncing_fields = False
+        return
 
     def _refresh_audio_devices(self, *, show_error: bool = True) -> None:
         mic_devices, mic_error = self._controller.list_mic_inputs(force_refresh=True)
@@ -3400,6 +5100,12 @@ class TranscriptSessionPanel(QWidget):
             system_name=self._current_device_name(self.system_device_combo),
         )
 
+    def _toggle_capture(self) -> None:
+        if bool(self._controller.snapshot().get("recording")):
+            self._halt_processing()
+            return
+        self._start_capture()
+
     def _halt_processing(self) -> None:
         self._controller.halt()
 
@@ -3459,14 +5165,15 @@ class TranscriptSessionPanel(QWidget):
             has_session and (bool(manual_meta.get("enabled")) or bool(generated_text.strip()))
         )
         if not has_session:
-            self.editor_state_label.setText("Paste transcript text or edit generated text here.")
+            self.editor_state_label.setText("")
+            self.editor_state_label.setVisible(False)
             return
-        source_mode = "manual override" if bool(manual_meta.get("enabled")) else "generated transcript"
-        dirty_state = "unsaved edits" if self._editor_dirty else "synced"
-        token_count = _estimate_text_tokens(self.transcript_editor.toPlainText())
-        self.editor_state_label.setText(
-            f"Source: {source_mode} | Editor: {dirty_state} | Visible tokens: {token_count}"
-        )
+        if self._editor_dirty:
+            self.editor_state_label.setText("Unsaved transcript edits")
+            self.editor_state_label.setVisible(True)
+        else:
+            self.editor_state_label.setText("")
+            self.editor_state_label.setVisible(False)
 
     def _on_transcript_changed(self, text: str) -> None:
         current_text = self.transcript_editor.toPlainText()
@@ -3525,10 +5232,6 @@ class TranscriptSessionPanel(QWidget):
             self.refresh_devices_btn,
             self.mic_device_combo,
             self.system_device_combo,
-            self.whisper_cli_edit,
-            self.whisper_cli_browse_btn,
-            self.whisper_model_edit,
-            self.whisper_model_browse_btn,
             self.start_btn,
             self.halt_btn,
             self.import_btn,
@@ -3547,9 +5250,10 @@ class TranscriptSessionPanel(QWidget):
         has_system_choice = bool(self.system_device_combo.currentData())
         self.start_btn.setEnabled(
             controls_enabled
-            and not snapshot.get("recording")
-            and (not needs_mic or has_mic_choice)
-            and (not needs_system or has_system_choice)
+            and (
+                snapshot.get("recording")
+                or ((not needs_mic or has_mic_choice) and (not needs_system or has_system_choice))
+            )
         )
         self.halt_btn.setEnabled(
             controls_enabled
@@ -3566,44 +5270,42 @@ class TranscriptSessionPanel(QWidget):
             self._bound_session_dir = ""
             self._editor_dirty = False
             self.status_label.setText("Create or select a session first.")
+            self.status_label.setVisible(True)
             self.event_label.setText("")
+            self.event_label.setVisible(False)
             self._load_editor_text("")
             return
-        runtime = snapshot.get("runtime", {})
-        whisper_cli = str(runtime.get("whisper_cli_path") or "").strip()
-        whisper_model = str(runtime.get("whisper_model_path") or "").strip()
-        transcript_mode = "manual" if bool(manual_meta.get("enabled")) else "generated"
-        editor_state = "dirty" if self._editor_dirty else "synced"
-        summary = (
-            f"State: {state} | "
-            f"Committed: {int(counts.get('completed', 0))} | "
-            f"Pending: {int(counts.get('pending', 0))} | "
-            f"Failed: {int(counts.get('failed', 0))}"
+        recording = bool(snapshot.get("recording"))
+        _set_icon_tool_button_state(
+            self.start_btn,
+            "stop.svg" if recording else "ping.svg",
+            "Stop capture" if recording else "Start capture",
+            object_name="DestructiveButton" if recording else "PrimaryButton",
         )
-        runtime_summary = (
-            f"Whisper CLI: {'set' if whisper_cli else 'missing'} | "
-            f"Whisper model: {'set' if whisper_model else 'missing'}"
-        )
-        transcript_summary = (
-            f"Transcript mode: {transcript_mode} | "
-            f"Editor: {editor_state} | "
-            f"Manual tokens: {int(manual_meta.get('estimated_tokens') or 0)}"
-        )
-        self.status_label.setText(f"{summary}\n{runtime_summary}\n{transcript_summary}")
+        status_text = ""
+        if recording:
+            status_text = "Recording"
+        elif int(counts.get("pending", 0)) > 0:
+            status_text = f"{int(counts.get('pending', 0))} pending"
+        elif int(counts.get("failed", 0)) > 0:
+            status_text = f"{int(counts.get('failed', 0))} failed"
+        self.status_label.setText(status_text)
+        self.status_label.setVisible(bool(status_text))
         event_message = str(last_event.get("message") or "").strip()
-        if event_message:
-            level = str(last_event.get("level") or "info").upper()
-            self.event_label.setText(f"{level}: {event_message}")
+        event_level = str(last_event.get("level") or "info").lower()
+        if event_level == "error" and event_message and "recap" not in event_message.lower():
+            self.event_label.setText(event_message)
+            self.event_label.setVisible(True)
         else:
-            self.event_label.setText(f"Transcript store: {snapshot.get('session_dir', '')}")
+            self.event_label.setText("")
+            self.event_label.setVisible(False)
         audio_error = str(snapshot.get("audio_devices_error") or "").strip()
-        self.audio_note_label.setText(
-            audio_error
-            or (
-                "Microphone capture uses Qt. System audio capture uses the local SoundCard loopback backend. "
-                "Point Whisper at a local whisper.cpp binary and model before running transcription."
-            )
-        )
+        if audio_error:
+            self.audio_note_label.setText(audio_error)
+            self.audio_note_label.setVisible(True)
+        else:
+            self.audio_note_label.setText("")
+            self.audio_note_label.setVisible(False)
 
 
 class RecapSessionPanel(QWidget):
@@ -3611,9 +5313,17 @@ class RecapSessionPanel(QWidget):
         super().__init__(parent)
         self._controller = controller
         self._syncing_fields = False
+        self._recap_editor_loading = False
+        self._recap_editor_dirty = False
+        self._showing_stream_preview = False
+        self._recap_save_timer = QTimer(self)
+        self._recap_save_timer.setSingleShot(True)
+        self._recap_save_timer.setInterval(400)
+        self._recap_save_timer.timeout.connect(self._commit_recap_editor_text)
         self._init_ui()
         self._controller.stateChanged.connect(self._refresh_from_controller)
         self._controller.recapChanged.connect(self._on_recap_changed)
+        self._controller.recapStreamChanged.connect(self._on_recap_stream_changed)
         self._refresh_runtime_fields()
         self._refresh_from_controller()
 
@@ -3643,55 +5353,41 @@ class RecapSessionPanel(QWidget):
         self.ollama_model_edit.editingFinished.connect(self._save_runtime_settings)
         runtime_layout.addRow("Ollama Model", self.ollama_model_edit)
 
-        note = _make_hint_label(
-            "Recap uses the local Ollama server, defaults to gpt-oss:20b, keeps each model call under a bounded input budget, and expects the model to be pulled locally first with 'ollama pull gpt-oss:20b'.",
-            runtime_group,
-        )
-        runtime_layout.addRow("Notes", note)
         layout.addWidget(runtime_group)
 
         buttons_row = QWidget(self)
         buttons_row.setObjectName("TransparentContainer")
+        buttons_row.setMinimumHeight(ACTION_ROW_HEIGHT)
         buttons_layout = QHBoxLayout(buttons_row)
         buttons_layout.setContentsMargins(0, 0, 0, 0)
         buttons_layout.setSpacing(6)
-        self.recap_actions_label = _make_section_label("Recap Actions", buttons_row)
-        buttons_layout.addWidget(self.recap_actions_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.recap_actions_note = _make_hint_label(
-            "Runs the local summary model on compact code-extracted notes.",
-            buttons_row,
-        )
-        buttons_layout.addWidget(self.recap_actions_note, 1, Qt.AlignmentFlag.AlignVCenter)
+        buttons_layout.addStretch(1)
 
-        self.generate_btn = _make_icon_tool_button(
+        self.generate_btn = _make_action_button(
             buttons_row,
-            "lightbulb.svg",
+            "add_items.svg",
+            "AutoRecap",
             "Generate recap",
             object_name="PrimaryButton",
+            minimum_width=148,
         )
-        self.generate_btn.clicked.connect(self._controller.request_recap)
-
-        self.halt_btn = _make_icon_tool_button(
-            buttons_row,
-            "stop.svg",
-            "Halt recap or transcript work",
-            object_name="DestructiveButton",
-        )
-        self.halt_btn.clicked.connect(self._controller.halt)
+        self.generate_btn.clicked.connect(self._toggle_recap)
 
         buttons_layout.addWidget(self.generate_btn)
-        buttons_layout.addWidget(self.halt_btn)
         layout.addWidget(buttons_row)
 
-        self.status_label = _make_hint_label("Create or select a session first.", self)
+        self.recap_heading_label = _make_section_label("Recap", self)
+        self.recap_heading_label.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(self.recap_heading_label)
+
+        self.status_label = _make_hint_label("", self)
+        self.status_label.setVisible(False)
         layout.addWidget(self.status_label)
 
-        self.event_label = _make_hint_label("", self)
-        layout.addWidget(self.event_label)
-
         self.recap_editor = QPlainTextEdit(self)
-        self.recap_editor.setReadOnly(True)
-        self.recap_editor.setPlaceholderText("Recap output will appear here.")
+        self.recap_editor.setReadOnly(False)
+        self.recap_editor.setPlaceholderText("Generate or write recap text here.")
+        self.recap_editor.textChanged.connect(self._on_recap_editor_text_changed)
         layout.addWidget(self.recap_editor, 1)
 
     def _save_runtime_settings(self) -> None:
@@ -3719,10 +5415,153 @@ class RecapSessionPanel(QWidget):
             self._syncing_fields = False
 
     def _on_recap_changed(self, text: str) -> None:
-        current_text = self.recap_editor.toPlainText()
-        if current_text == str(text or ""):
+        if self._showing_stream_preview or self._recap_editor_dirty:
             return
-        self.recap_editor.setPlainText(str(text or ""))
+        self._load_recap_text(str(text or ""))
+
+    def _on_generate_clicked(self) -> None:
+        if self._recap_save_timer.isActive():
+            self._recap_save_timer.stop()
+            self._commit_recap_editor_text()
+        allowed, _, error_message = self._controller.recap_generation_preflight()
+        if not allowed:
+            QMessageBox.warning(self, "Cannot Auto Generate Recap", error_message)
+            return
+        self._controller.request_recap()
+
+    def _toggle_recap(self) -> None:
+        recap_status = str(self._controller.snapshot().get("recap", {}).get("status") or "idle")
+        if recap_status == "running":
+            self._controller.halt()
+            return
+        self._on_generate_clicked()
+
+    def _load_recap_text(self, text: str) -> None:
+        self._recap_editor_loading = True
+        try:
+            self.recap_editor.setPlainText(str(text or ""))
+        finally:
+            self._recap_editor_loading = False
+        self._recap_editor_dirty = False
+
+    @staticmethod
+    def _display_recap_body(text: str) -> str:
+        clean_text = str(text or "").strip()
+        if clean_text.startswith("## "):
+            parts = clean_text.split("\n", 2)
+            if len(parts) >= 2 and not parts[1].strip():
+                return parts[2] if len(parts) >= 3 else ""
+        return clean_text
+
+    def _on_recap_editor_text_changed(self) -> None:
+        if self._recap_editor_loading or self._showing_stream_preview:
+            return
+        snapshot = self._controller.snapshot()
+        if not bool(snapshot.get("has_session")):
+            return
+        if str(snapshot.get("recap", {}).get("status") or "idle") == "running":
+            return
+        self._recap_editor_dirty = True
+        self._recap_save_timer.start()
+
+    def _commit_recap_editor_text(self) -> None:
+        if self._recap_editor_loading or self._showing_stream_preview:
+            return
+        snapshot = self._controller.snapshot()
+        if not bool(snapshot.get("has_session")):
+            return
+        if str(snapshot.get("recap", {}).get("status") or "idle") == "running":
+            return
+        self._controller.save_recap_text(self.recap_editor.toPlainText())
+        self._recap_editor_dirty = False
+
+    @staticmethod
+    def _extract_stage_section(log_text: str, stage_name: str) -> str:
+        clean_log = str(log_text or "")
+        clean_stage = str(stage_name or "").strip()
+        if not clean_log or not clean_stage:
+            return ""
+        header = f"=== {clean_stage} ===\n"
+        start = clean_log.rfind(header)
+        if start < 0:
+            return ""
+        section = clean_log[start + len(header):]
+        next_header = section.find("\n\n=== ")
+        if next_header >= 0:
+            section = section[:next_header]
+        return section.strip()
+
+    @staticmethod
+    def _latest_stage_name_from_log(log_text: str) -> str:
+        matches = re.findall(r"===\s*([^\n=]+?)\s*===", str(log_text or ""))
+        return matches[-1].strip() if matches else ""
+
+    @staticmethod
+    def _stream_goal_and_heading(stage_name: str) -> tuple[str, str]:
+        clean_stage = str(stage_name or "").strip().lower()
+        if clean_stage.startswith("stage1_summary"):
+            return "Write the first short recap draft from the transcript.", "Draft Recap"
+        if clean_stage.startswith("stage2_refine"):
+            return "Refine the draft into the final recap.", "Final Recap"
+        return "Work on the current recap.", "Recap"
+
+    @staticmethod
+    def _collapse_preview(text: str, *, max_chars: int = 160) -> str:
+        clean_text = " ".join(str(text or "").split())
+        if len(clean_text) <= max_chars:
+            return clean_text
+        return clean_text[: max_chars - 1].rstrip() + "…"
+
+    def _render_stream_preview(self, snapshot: dict[str, object]) -> None:
+        stage_name = str(snapshot.get("stage_name") or "").strip()
+        goal_text, output_heading = self._stream_goal_and_heading(stage_name)
+        self.recap_heading_label.setText(output_heading)
+        response_text = self._extract_stage_section(str(snapshot.get("response_log") or ""), stage_name)
+        thinking_text = self._extract_stage_section(str(snapshot.get("thinking_log") or ""), stage_name)
+        message = str(snapshot.get("message") or "").strip()
+        stage_one_preview = ""
+        if stage_name.startswith("stage2_"):
+            draft_text = self._extract_stage_section(str(snapshot.get("response_log") or ""), "stage1_summary_attempt_01")
+            if draft_text:
+                stage_one_preview = f"Draft recap minimized\n{self._collapse_preview(draft_text)}\n\n"
+        if response_text:
+            preview_text = f"{stage_one_preview}{response_text}".strip()
+        else:
+            reasoning_text = thinking_text or message or "Waiting for model output."
+            preview_text = (
+                f"{stage_one_preview}Current goal\n\n"
+                f"{goal_text}\n\n"
+                "Reasoning\n\n"
+                f"{reasoning_text}"
+            ).strip()
+        self._showing_stream_preview = True
+        self._load_recap_text(preview_text)
+        self._showing_stream_preview = True
+
+    def _on_recap_stream_changed(self, payload: object) -> None:
+        snapshot = dict(payload or {})
+        running = bool(snapshot.get("running"))
+        if running:
+            self._showing_stream_preview = True
+            self._render_stream_preview(snapshot)
+            return
+        if self._showing_stream_preview:
+            self._showing_stream_preview = False
+            if not self._recap_editor_dirty:
+                recap_text = self._controller.recap_text()
+                if recap_text.strip():
+                    self.recap_heading_label.setText("Final Recap")
+                    self._load_recap_text(self._display_recap_body(recap_text))
+                else:
+                    response_stage = self._latest_stage_name_from_log(str(snapshot.get("response_log") or ""))
+                    if response_stage:
+                        halted_snapshot = dict(snapshot)
+                        halted_snapshot["stage_name"] = response_stage
+                        self._render_stream_preview(halted_snapshot)
+                        self._showing_stream_preview = False
+                    else:
+                        self.recap_heading_label.setText("Recap")
+                        self._load_recap_text("")
 
     def _refresh_from_controller(self) -> None:
         snapshot = self._controller.snapshot()
@@ -3730,34 +5569,40 @@ class RecapSessionPanel(QWidget):
         has_session = bool(snapshot.get("has_session"))
         recap = snapshot.get("recap", {})
         last_event = snapshot.get("last_event", {})
-        for widget in (self.ollama_host_edit, self.ollama_model_edit, self.generate_btn, self.halt_btn, self.recap_editor):
+        for widget in (
+            self.ollama_host_edit,
+            self.ollama_model_edit,
+            self.generate_btn,
+            self.recap_editor,
+        ):
             widget.setEnabled(has_session)
         if not has_session:
+            self.recap_heading_label.setText("Recap")
             self.status_label.setText("Create or select a session first.")
-            self.event_label.setText("")
-            self.recap_editor.setPlainText("")
+            self.status_label.setVisible(True)
+            self._load_recap_text("")
+            self.recap_editor.setReadOnly(True)
             return
         recap_status = str(recap.get("status") or "idle")
-        checkpoint_count = int(recap.get("checkpoint_count") or 0)
-        processed_count = int(recap.get("processed_chunk_count") or 0)
-        merge_rounds = int(recap.get("merge_rounds") or 0)
-        window_count = int(recap.get("investigation_windows") or 0)
-        prompt_eval_max = int(recap.get("prompt_eval_max") or 0)
-        strategy = str(recap.get("strategy") or RECAP_PIPELINE_VERSION)
         last_error = str(recap.get("last_error") or "").strip()
-        runtime = snapshot.get("runtime", {})
-        status_line = (
-            f"Status: {recap_status} | Checkpoints: {checkpoint_count} | "
-            f"Chunks summarized: {processed_count} | Model: {runtime.get('ollama_model', DEFAULT_OLLAMA_MODEL)}\n"
-            f"Strategy: {strategy} | Windows: {window_count} | Merge rounds: {merge_rounds} | "
-            f"Peak prompt tokens: {prompt_eval_max}"
+        _set_action_button_state(
+            self.generate_btn,
+            "stop.svg" if recap_status == "running" else "add_items.svg",
+            "Stop" if recap_status == "running" else "AutoRecap",
+            "Stop recap" if recap_status == "running" else "Generate recap",
+            object_name="DestructiveButton" if recap_status == "running" else "PrimaryButton",
         )
-        if last_error:
-            status_line = f"{status_line}\nLast error: {last_error}"
-        self.status_label.setText(status_line)
-        event_message = str(last_event.get("message") or "").strip()
-        if event_message:
-            level = str(last_event.get("level") or "info").upper()
-            self.event_label.setText(f"{level}: {event_message}")
+        self.recap_editor.setReadOnly(recap_status == "running")
+        if recap_status == "running":
+            self.status_label.setText("Generating recap")
+            self.status_label.setVisible(True)
+        elif last_error and "halted by user" not in last_error.lower():
+            self.status_label.setText(last_error)
+            self.status_label.setVisible(True)
         else:
-            self.event_label.setText(f"Recap store: {snapshot.get('session_dir', '')}")
+            self.status_label.setText("")
+            self.status_label.setVisible(False)
+        if recap_status != "running" and not self._recap_editor_dirty and not self._showing_stream_preview:
+            recap_text = self._controller.recap_text()
+            self.recap_heading_label.setText("Final Recap" if recap_text.strip() else "Recap")
+            self._load_recap_text(self._display_recap_body(recap_text))
