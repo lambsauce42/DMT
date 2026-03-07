@@ -298,6 +298,21 @@ def read_character_inventory(archive_path: Path) -> dict[str, Any]:
     return normalize_inventory_payload(payload)
 
 
+def read_character_inventory_bytes(archive_bytes: bytes | None) -> dict[str, Any]:
+    if not archive_bytes:
+        return normalize_inventory_payload({})
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as zf:
+            if INVENTORY_ENTRY_NAME not in zf.namelist():
+                return normalize_inventory_payload({})
+            payload = json.loads(zf.read(INVENTORY_ENTRY_NAME).decode("utf-8"))
+    except Exception:
+        return normalize_inventory_payload({})
+    if not isinstance(payload, dict):
+        return normalize_inventory_payload({})
+    return normalize_inventory_payload(payload)
+
+
 def read_character_meta(archive_path: Path) -> dict[str, Any]:
     if not archive_path.exists():
         return {}
