@@ -2540,6 +2540,7 @@ def test_host_link_character_sync_allows_duplicate_active_assignment_for_same_pl
             linked_sheet_id="sheet-1",
             linked_sheet_name="Hero",
             linked_character_id="character-1",
+            linked_sheet_archive_b64=_valid_archive_b64(),
             linked_inventory={"inventory": []},
         ),
         _entity_state("e2", "player-1", pos=(1.0, 1.0)),
@@ -3638,10 +3639,12 @@ def test_takeover_filter_keeps_items_that_exist_in_dm_library(
     entity = dungeon_widget._find_entity_by_id("entity-1")
     assert entity is not None
 
-    dungeon_widget._apply_takeover_filter_for_entity(entity)
+    filtered_inventory, _content_hash = dungeon_widget._takeover_filtered_inventory_for_player(
+        dungeon_widget._dungeons[0]["state"]["items"][0],
+        player_id="player-1",
+    )
 
-    linked_inventory = dungeon_widget._dungeons[0]["state"]["items"][0]["linked_inventory"]
-    assert linked_inventory["inventory"][0]["item_id"] == "item_unknown"
+    assert filtered_inventory["inventory"][0]["item_id"] == "item_unknown"
 
 
 def test_build_collection_payload_preserves_linked_inventory_item_documents(monkeypatch, dungeon_widget):
@@ -6059,114 +6062,16 @@ def test_snapshot_missing_local_character_forwards_entity_context_to_local_sync(
     assert kwargs["dungeon_id"] == "d1"
 
 
-def test_missing_local_character_replace_dispatches_link_request(dungeon_widget, monkeypatch):
-    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
-    dungeon_widget._player_connection_ready = True
-    dungeon_widget._local_player_id = "player-local"
-
-    def _resolve_local(character_id):
-        if character_id == "character-host":
-            return None
-        if character_id == "character-local":
-            return {
-                "sheet_id": "sheet-local",
-                "sheet_name": "Local Hero",
-                "character_id": "character-local",
-                "save_revision": 7,
-                "last_saved_at": "2026-03-05T10:00:00Z",
-                "content_hash": "local-hash",
-                "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
-                "stats": {"name": "Local Hero", "ac": 13},
-                "archive_b64": "YXJjaGl2ZQ==",
-            }
-        return None
-
-    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", _resolve_local)
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_local_character_replace_options",
-        lambda: [{"sheet_id": "sheet-local", "sheet_name": "Local Hero", "label": "Local Hero (sheet-local)"}],
-    )
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_prompt_missing_local_linked_character_resolution",
-        lambda **_kwargs: ("replace", "sheet-local"),
-    )
-
-    sent_payloads = []
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_dispatch_player_link_character_request",
-        lambda payload: sent_payloads.append(dict(payload)) or True,
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "player_sheets",
-        types.SimpleNamespace(character_id_for_sheet_id=lambda sheet_id: "character-local" if sheet_id == "sheet-local" else ""),
-    )
-
-    ok, _message = dungeon_widget._sync_local_sheet_inventory_from_host(
-        "character-host",
-        {"inventory": [{"item_id": "item-host", "quantity": 1}]},
-        sheet_name="Host Hero",
-        sheet_id="sheet-host",
-        entity_id="entity-1",
-        dungeon_id="d1",
-    )
-
-    assert ok is True
-    assert len(sent_payloads) == 1
-    sent = sent_payloads[0]
-    assert sent["entity_id"] == "entity-1"
-    assert sent["sheet_id"] == "sheet-local"
-    assert sent["character_id"] == "character-local"
-    assert sent["dungeon_id"] == "d1"
-
-
-def test_missing_local_character_unlink_dispatches_unlink_request(dungeon_widget, monkeypatch):
+def test_missing_local_character_auto_saves_locally_without_prompt(dungeon_widget, monkeypatch):
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._player_connection_ready = True
     dungeon_widget._local_player_id = "player-local"
 
     monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
-    monkeypatch.setattr(dungeon_widget, "_local_character_replace_options", lambda: [])
     monkeypatch.setattr(
         dungeon_widget,
         "_prompt_missing_local_linked_character_resolution",
-        lambda **_kwargs: ("unlink", ""),
-    )
-
-    unlink_payloads = []
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_dispatch_player_unlink_character_request",
-        lambda payload: unlink_payloads.append(dict(payload)) or True,
-    )
-
-    ok, _message = dungeon_widget._sync_local_sheet_inventory_from_host(
-        "character-host",
-        {"inventory": []},
-        sheet_name="Host Hero",
-        sheet_id="sheet-host",
-        entity_id="entity-1",
-        dungeon_id="d1",
-    )
-
-    assert ok is True
-    assert unlink_payloads == [{"entity_id": "entity-1", "dungeon_id": "d1"}]
-
-
-def test_missing_local_character_save_locally_continues_sync(dungeon_widget, monkeypatch):
-    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
-    dungeon_widget._player_connection_ready = True
-    dungeon_widget._local_player_id = "player-local"
-
-    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
-    monkeypatch.setattr(dungeon_widget, "_local_character_replace_options", lambda: [])
-    monkeypatch.setattr(
-        dungeon_widget,
-        "_prompt_missing_local_linked_character_resolution",
-        lambda **_kwargs: ("save_local", ""),
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("missing local sync should not prompt")),
     )
 
     applied = {}
@@ -6198,6 +6103,63 @@ def test_missing_local_character_save_locally_continues_sync(dungeon_widget, mon
     assert ok is True
     assert applied["character_id"] == "character-host"
     assert applied["sheet_name"] == "Host Hero"
+    assert applied["inventory"]["inventory"] == [
+        {"item_id": "item-host", "normalized_item_name": "item-host", "quantity": 1}
+    ]
+
+
+def test_sync_local_sheet_inventory_does_not_map_character_id_as_sheet_id(dungeon_widget, monkeypatch):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._local_player_id = "player-local"
+
+    def _resolve_local(character_id):
+        if character_id == "remote-character-id":
+            return None
+        return {
+            "sheet_id": "sheet-local",
+            "sheet_name": "Local Hero",
+            "character_id": character_id,
+            "save_revision": 3,
+            "last_saved_at": "2026-03-07T10:00:00Z",
+            "content_hash": "local-hash",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Local Hero"},
+            "archive_b64": "YXJjaGl2ZQ==",
+        }
+
+    applied = {}
+
+    def _apply_remote(character_id, sheet_name, inventory_payload, **_kwargs):
+        applied["character_id"] = character_id
+        applied["sheet_name"] = sheet_name
+        applied["inventory"] = inventory_payload
+        return True, "Character synchronized.", inventory_payload
+
+    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", _resolve_local)
+    monkeypatch.setitem(
+        sys.modules,
+        "player_sheets",
+        types.SimpleNamespace(
+            character_id_for_sheet_id=lambda sheet_id: (
+                "unrelated-character-id" if sheet_id == "remote-character-id" else ""
+            ),
+            apply_remote_character_package_for_character_id=_apply_remote,
+        ),
+    )
+
+    ok, message = dungeon_widget._sync_local_sheet_inventory_from_host(
+        "remote-character-id",
+        {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+        sheet_name="Remote Hero",
+        sheet_id="remote-sheet",
+        entity_id="entity-1",
+        dungeon_id="d1",
+    )
+
+    assert ok is True
+    assert message == "Inventory synchronized."
+    assert applied["character_id"] == "remote-character-id"
 
 def test_player_state_update_is_queued_when_send_fails_and_flushed_after_snapshot(
     dungeon_widget, monkeypatch

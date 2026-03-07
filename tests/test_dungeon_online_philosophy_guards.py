@@ -521,14 +521,15 @@ def test_host_link_character_sync_triggers_managed_cleanup(dungeon_widget, monke
     dungeon_widget._handle_host_link_character_entity(
         "player-1",
         {
-            "entity_id": "entity-2",
-            "sheet_id": "sheet-1",
-            "sheet_name": "Hero",
-            "character_id": "character-1",
-            "inventory": {"inventory": []},
-            "stats": {"name": "Hero"},
-            "dungeon_id": "players-dungeon",
-        },
+        "entity_id": "entity-2",
+        "sheet_id": "sheet-1",
+        "sheet_name": "Hero",
+        "character_id": "character-1",
+        "inventory": {"inventory": []},
+        "stats": {"name": "Hero"},
+        "archive_b64": _valid_archive_b64(),
+        "dungeon_id": "players-dungeon",
+    },
         request_id="req-link-cleanup",
     )
 
@@ -777,6 +778,65 @@ def test_host_sync_character_inventory_requires_archive_payload(dungeon_widget):
             "archive_b64": "",
         },
         request_id="missing-archive-sync",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is False
+    assert "archive payload is required" in str(result.get("message") or "").lower()
+
+
+def test_host_link_character_entity_requires_archive_payload_when_no_authoritative_copy_exists(
+    dungeon_widget,
+):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "",
+                        "linked_character_id": "",
+                        "linked_sheet_archive_b64": "",
+                        "linked_inventory": {"inventory": []},
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        {
+            "entity_id": "entity-1",
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": "character-1",
+            "inventory": {"inventory": []},
+            "stats": {"name": "Hero"},
+        },
+        request_id="missing-archive-link",
     )
 
     result = dungeon_widget._host_controller.results[-1][1]
