@@ -9,9 +9,11 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from app import APPLET_DEFINITIONS, MainLauncherWindow
+from app import APPLET_DEFINITIONS, MainLauncherWindow, HomeCard
 
 
 class HomeTabBehaviorTests(unittest.TestCase):
@@ -19,20 +21,21 @@ class HomeTabBehaviorTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
-    def test_single_click_opens_in_background_and_focuses_existing(self) -> None:
-        window = MainLauncherWindow()
-        applet = next(a for a in APPLET_DEFINITIONS if a["key"] == "dungeon_creator")
+    def test_home_card_single_click_requests_focused_open(self) -> None:
+        requested_focus: list[bool] = []
 
-        window.open_applet(applet, focus_if_new=False)
-        self.assertEqual(window.tabs.currentIndex(), 0)
+        card = HomeCard(
+            title="Dungeon",
+            subtitle="Open dungeon applet",
+            icon_path=None,
+            on_open=lambda focus: requested_focus.append(bool(focus)),
+        )
+        card.show()
+        self._app.processEvents()
 
-        widget = window._tab_by_key["dungeon_creator"]
-        tab_index = window.tabs.indexOf(widget)
-        self.assertNotEqual(tab_index, -1)
+        QTest.mouseClick(card, Qt.MouseButton.LeftButton)
 
-        window.open_applet(applet, focus_if_new=False)
-        self.assertEqual(window.tabs.currentIndex(), tab_index)
-        window.close()
+        self.assertEqual(requested_focus, [True])
 
     def test_world_selector_opens_home_dropdown(self) -> None:
         window = MainLauncherWindow()

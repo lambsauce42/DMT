@@ -35,12 +35,9 @@ def test_host_online_builds_online_host_applet(monkeypatch, qapp, tmp_path):
     collection_path.write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(
-        "app.QFileDialog.getOpenFileName",
-        lambda *args, **kwargs: (str(collection_path), "Dungeon Collection (*.json)"),
-    )
-    monkeypatch.setattr(
-        "app.QInputDialog.getInt",
-        lambda *args, **kwargs: (8765, True),
+        HomeWidget,
+        "_prompt_host_dungeon_collection_details",
+        lambda self: {"collection_path": str(collection_path), "port": 8765},
     )
 
     widget = HomeWidget(APPLET_DEFINITIONS, _on_open)
@@ -60,19 +57,10 @@ def test_join_online_builds_online_join_applet(monkeypatch, qapp):
     def _on_open(applet, focus):
         opened.append((applet, focus))
 
-    text_answers = iter(
-        [
-            ("192.168.1.10", True),  # host ip
-            ("Mira", True),  # player name
-        ]
-    )
     monkeypatch.setattr(
-        "app.QInputDialog.getText",
-        lambda *args, **kwargs: next(text_answers),
-    )
-    monkeypatch.setattr(
-        "app.QInputDialog.getInt",
-        lambda *args, **kwargs: (8765, True),
+        HomeWidget,
+        "_prompt_join_online_details",
+        lambda self: {"host_ip": "192.168.1.10", "port": 8765, "player_name": "Mira"},
     )
 
     widget = HomeWidget(APPLET_DEFINITIONS, _on_open)
@@ -87,19 +75,16 @@ def test_join_online_builds_online_join_applet(monkeypatch, qapp):
     assert applet["online"]["player_name"] == "Mira"
 
 
-def test_host_online_cancelled_file_dialog_does_not_open_applet(monkeypatch, qapp):
+def test_host_online_cancelled_dialog_does_not_open_applet(monkeypatch, qapp):
     opened = []
 
     def _on_open(applet, focus):
         opened.append((applet, focus))
 
     monkeypatch.setattr(
-        "app.QFileDialog.getOpenFileName",
-        lambda *args, **kwargs: ("", ""),
-    )
-    monkeypatch.setattr(
-        "app.QInputDialog.getInt",
-        lambda *args, **kwargs: pytest.fail("port prompt should not be shown when no file was chosen"),
+        HomeWidget,
+        "_prompt_host_dungeon_collection_details",
+        lambda self: None,
     )
 
     widget = HomeWidget(APPLET_DEFINITIONS, _on_open)
@@ -108,28 +93,28 @@ def test_host_online_cancelled_file_dialog_does_not_open_applet(monkeypatch, qap
     assert opened == []
 
 
-def test_host_online_cancelled_port_does_not_open_applet(monkeypatch, qapp, tmp_path):
+def test_host_online_invalid_collection_does_not_open_applet(monkeypatch, qapp, tmp_path):
     opened = []
 
     def _on_open(applet, focus):
         opened.append((applet, focus))
 
-    collection_path = tmp_path / "collection.json"
-    collection_path.write_text("{}", encoding="utf-8")
-
     monkeypatch.setattr(
-        "app.QFileDialog.getOpenFileName",
-        lambda *args, **kwargs: (str(collection_path), "Dungeon Collection (*.json)"),
+        HomeWidget,
+        "_prompt_host_dungeon_collection_details",
+        lambda self: {"collection_path": str(tmp_path / "missing.dmtcollection"), "port": 8765},
     )
+    warnings = []
     monkeypatch.setattr(
-        "app.QInputDialog.getInt",
-        lambda *args, **kwargs: (8765, False),
+        "app.QMessageBox.warning",
+        lambda *args, **kwargs: warnings.append((args, kwargs)),
     )
 
     widget = HomeWidget(APPLET_DEFINITIONS, _on_open)
     widget._host_dungeon_collection()
 
     assert opened == []
+    assert len(warnings) == 1
 
 
 def test_join_online_rejects_blank_host_ip(monkeypatch, qapp):
@@ -140,13 +125,11 @@ def test_join_online_rejects_blank_host_ip(monkeypatch, qapp):
         opened.append((applet, focus))
 
     monkeypatch.setattr(
-        "app.QInputDialog.getText",
-        lambda *args, **kwargs: ("   ", True),
+        HomeWidget,
+        "_prompt_join_online_details",
+        lambda self: {"host_ip": "   ", "port": 8765, "player_name": "Player"},
     )
-    monkeypatch.setattr(
-        "app.QMessageBox.warning",
-        lambda *args, **kwargs: warnings.append((args, kwargs)),
-    )
+    monkeypatch.setattr("app.QMessageBox.warning", lambda *args, **kwargs: warnings.append((args, kwargs)))
 
     widget = HomeWidget(APPLET_DEFINITIONS, _on_open)
     widget._join_dungeon_by_ip()
@@ -162,24 +145,12 @@ def test_join_online_rejects_blank_player_name(monkeypatch, qapp):
     def _on_open(applet, focus):
         opened.append((applet, focus))
 
-    text_answers = iter(
-        [
-            ("192.168.1.10", True),
-            ("   ", True),
-        ]
-    )
     monkeypatch.setattr(
-        "app.QInputDialog.getText",
-        lambda *args, **kwargs: next(text_answers),
+        HomeWidget,
+        "_prompt_join_online_details",
+        lambda self: {"host_ip": "192.168.1.10", "port": 8765, "player_name": "   "},
     )
-    monkeypatch.setattr(
-        "app.QInputDialog.getInt",
-        lambda *args, **kwargs: (8765, True),
-    )
-    monkeypatch.setattr(
-        "app.QMessageBox.warning",
-        lambda *args, **kwargs: warnings.append((args, kwargs)),
-    )
+    monkeypatch.setattr("app.QMessageBox.warning", lambda *args, **kwargs: warnings.append((args, kwargs)))
 
     widget = HomeWidget(APPLET_DEFINITIONS, _on_open)
     widget._join_dungeon_by_ip()

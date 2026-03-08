@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import traceback
 from typing import Callable, Iterable, List, Optional, Sequence
 import logging
 
@@ -603,6 +604,8 @@ EQUIPMENT_SLOT_LABELS = {
 }
 EQUIPMENT_SLOT_IDS = list(EQUIPMENT_SLOT_LABELS.keys())
 _equipment_slot_background_cache: dict[tuple[str, str, int, int], QPixmap] = {}
+_equipment_slot_source_pixmap_cache: dict[str, QPixmap] = {}
+_equipment_slot_source_icon_cache: dict[str, QIcon] = {}
 
 
 def _equipment_silhouette_pixmap() -> QPixmap:
@@ -913,6 +916,70 @@ def compute_cursor_preview_position(
     if best_overlap is not None:
         return best_overlap[2]
     return _clamp_preview_point(cursor_pos + QPoint(gap, gap), preview_size, screen_rect)
+
+
+def _compute_equipment_layout_metrics(panel_width: int, panel_height: int) -> dict[str, int]:
+    panel_height = max(1, int(panel_height))
+    panel_width = max(1, int(panel_width))
+    row_spacing = 24
+    column_spacing = 10
+    top_row_spacing = 12
+    side_column_pad = 7
+    min_misc_spacing = 9
+    min_slot_size = 20
+    slot_scale = 1.35
+    slot_max_size = 180
+    center_factor = 1.8
+    slots_per_column = len(EQUIPMENT_SLOTS_LEFT)
+    misc_slots_count = max(1, len(EQUIPMENT_SLOTS_MISC))
+
+    height_limit = (
+        panel_height
+        - row_spacing
+        - side_column_pad
+        - (column_spacing * (slots_per_column - 1))
+    ) / (slots_per_column + 1)
+    top_width_limit = (panel_width - (top_row_spacing * 2)) / (2 + center_factor)
+    misc_width_limit = (
+        panel_width - (min_misc_spacing * (misc_slots_count - 1))
+    ) / misc_slots_count
+    base_slot_size = max(
+        min_slot_size,
+        min(height_limit, top_width_limit, misc_width_limit, slot_max_size),
+    )
+    slot_size = int(
+        max(min_slot_size, min(slot_max_size, round(base_slot_size * slot_scale)))
+    )
+    slot_size = min(slot_size, max(min_slot_size, int(height_limit)))
+
+    if misc_slots_count > 1:
+        while slot_size > min_slot_size:
+            free = panel_width - (slot_size * misc_slots_count)
+            if free >= (min_misc_spacing * (misc_slots_count - 1)):
+                break
+            slot_size -= 1
+        free = max(0, panel_width - (slot_size * misc_slots_count))
+        if free >= (min_misc_spacing * (misc_slots_count - 1)):
+            misc_spacing = max(min_misc_spacing, free // (misc_slots_count - 1))
+        else:
+            misc_spacing = max(0, free // (misc_slots_count - 1))
+        misc_left_margin = max(0, free - (misc_spacing * (misc_slots_count - 1)))
+    else:
+        misc_spacing = 0
+        misc_left_margin = 0
+
+    side_column_height = (
+        (slot_size * slots_per_column)
+        + (column_spacing * (slots_per_column - 1))
+        + side_column_pad
+    )
+    return {
+        "slot_size": slot_size,
+        "misc_spacing": misc_spacing,
+        "misc_left_margin": misc_left_margin,
+        "side_column_height": side_column_height,
+        "figure_min_width": int(slot_size * center_factor),
+    }
 
 
 def _renderer_rarity_key(rarity: str) -> str:
@@ -1318,17 +1385,26 @@ def _equipment_slot_background_pixmap(
     safe = max(1, int(size))
     pixel_size, effective_dpr = _dpr_fitted_pixel_size(safe, dpr)
     source_path = _resolve_equipment_slot_background_path(slot_id)
-    cache_key = (str(source_path), slot_id or "", safe, pixel_size)
+    cache_key = (str(source_path), "", safe, pixel_size)
     cached = _equipment_slot_background_cache.get(cache_key)
     if cached is not None:
         return cached
 
     source: QPixmap
+    source_key = str(source_path)
     if source_path.suffix.lower() == ".svg":
         # Render vectors directly at target size to avoid low-res SVG rasterization.
-        source = QIcon(str(source_path)).pixmap(QSize(pixel_size, pixel_size))
+        icon = _equipment_slot_source_icon_cache.get(source_key)
+        if icon is None:
+            icon = QIcon(source_key)
+            _equipment_slot_source_icon_cache[source_key] = icon
+        source = icon.pixmap(QSize(pixel_size, pixel_size))
     else:
-        source = QPixmap(str(source_path))
+        cached_source = _equipment_slot_source_pixmap_cache.get(source_key)
+        if cached_source is None:
+            cached_source = QPixmap(source_key)
+            _equipment_slot_source_pixmap_cache[source_key] = cached_source
+        source = cached_source
     if source.isNull():
         fallback = QPixmap(pixel_size, pixel_size)
         fallback.fill(Qt.GlobalColor.transparent)
@@ -1361,7 +1437,6 @@ def _equipment_slot_background_pixmap(
     y = (pixel_size - scaled.height()) // 2
     painter.drawPixmap(x, y, scaled)
     painter.end()
-
     image = canvas.toImage().convertToFormat(QImage.Format.Format_ARGB32)
     for py in range(image.height()):
         for px in range(image.width()):
@@ -3725,6 +3800,7 @@ class EquipmentSlotWidget(QFrame):
         self._canvas_inset = 1
         self._selected = False
         self._drag_over = False
+        self._slot_pixmap_dirty = True
         self._drag_start_pos = QPoint()
         self.setObjectName("EquipmentSlot")
         self.setToolTip(label)
@@ -3769,15 +3845,25 @@ class EquipmentSlotWidget(QFrame):
         self._item_id = item_id
         self._pixmap = pixmap if item_id and pixmap is not None else None
         self.setToolTip("" if self._item_id else self._label)
-        self._rebuild_slot_pixmap()
+        self._queue_slot_pixmap_rebuild()
 
     def set_icon_size(self, size: int) -> None:
         safe = max(1, size)
+        current_size = self._inner_frame.size()
+        current_label_size = self._slot_canvas.size()
         self._inner_frame.setFixedSize(safe, safe)
         # Keep a 1px inset so selection/drag border does not clip.
         label_size = max(1, safe - (self._canvas_inset * 2))
         self._slot_canvas.setFixedSize(label_size, label_size)
-        self._rebuild_slot_pixmap()
+        if (
+            current_size.width() == safe
+            and current_size.height() == safe
+            and current_label_size.width() == label_size
+            and current_label_size.height() == label_size
+            and not self._slot_pixmap_dirty
+        ):
+            return
+        self._queue_slot_pixmap_rebuild()
 
     def set_canvas_inset(self, inset: int) -> None:
         safe = max(0, int(inset))
@@ -3792,6 +3878,11 @@ class EquipmentSlotWidget(QFrame):
         if self._selected:
             return QColor("#58a6ff")
         return QColor("#30363d")
+
+    def _queue_slot_pixmap_rebuild(self) -> None:
+        self._slot_pixmap_dirty = True
+        if self.isVisible():
+            self._rebuild_slot_pixmap()
 
     def _rebuild_slot_pixmap(self) -> None:
         target = self._slot_canvas.size()
@@ -3815,13 +3906,20 @@ class EquipmentSlotWidget(QFrame):
             logical_size, dpr=requested_dpr, slot_id=self._slot_id
         )
         if not background.isNull():
-            background_scaled = background.scaled(
-                pixel_size,
-                pixel_size,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(0, 0, background_scaled)
+            if (
+                background.width() == pixel_size
+                and background.height() == pixel_size
+                and abs(float(background.devicePixelRatio()) - effective_dpr) <= 0.01
+            ):
+                painter.drawPixmap(0, 0, background)
+            else:
+                background_scaled = background.scaled(
+                    pixel_size,
+                    pixel_size,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                painter.drawPixmap(0, 0, background_scaled)
 
         if self._pixmap is not None and not self._pixmap.isNull():
             icon_scaled = self._pixmap.scaled(
@@ -3844,6 +3942,7 @@ class EquipmentSlotWidget(QFrame):
 
         composed.setDevicePixelRatio(effective_dpr)
         self._slot_canvas.setPixmap(composed)
+        self._slot_pixmap_dirty = False
 
     def set_selected(self, selected: bool) -> None:
         new_selected = bool(selected)
@@ -3851,7 +3950,7 @@ class EquipmentSlotWidget(QFrame):
             return
         self._selected = new_selected
         self.setProperty("selected", new_selected)
-        self._rebuild_slot_pixmap()
+        self._queue_slot_pixmap_rebuild()
         self.update()
 
     def _set_drag_over(self, active: bool) -> None:
@@ -3860,12 +3959,17 @@ class EquipmentSlotWidget(QFrame):
             return
         self._drag_over = new_active
         self.setProperty("dragover", new_active)
-        self._rebuild_slot_pixmap()
+        self._queue_slot_pixmap_rebuild()
         self.update()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._rebuild_slot_pixmap()
+        self._queue_slot_pixmap_rebuild()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._slot_pixmap_dirty:
+            self._rebuild_slot_pixmap()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -3941,11 +4045,31 @@ class EquipmentSlotWidget(QFrame):
         self.itemDropped.emit(self._slot_id, payload)
 
 class PlayerSheetsWidget(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    startupFinished = Signal()
+    startupStatusChanged = Signal(str)
+    startupFailed = Signal(str)
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        initial_world_data: Optional[list] = None,
+        initial_entries: Optional[List[PlayerSheetEntry]] = None,
+        defer_startup: bool = False,
+    ) -> None:
         super().__init__(parent)
-        self._world_data = load_navigation_data()
+        self._defer_startup = bool(defer_startup)
+        self._startup_started = False
+        self._startup_in_progress = self._defer_startup
+        self._world_data = (
+            list(initial_world_data)
+            if isinstance(initial_world_data, list)
+            else load_navigation_data()
+        )
         self._storage_path = player_sheets_storage_path()
-        self._manager = PlayerSheetsManager(entries=self._load_entries())
+        self._manager = PlayerSheetsManager(
+            entries=list(initial_entries) if initial_entries is not None else self._load_entries()
+        )
         self._current_entry: Optional[PlayerSheetEntry] = None
         self._initial_pdf_loaded = False
         self._pending_switch_item: Optional[QListWidgetItem] = None
@@ -3979,6 +4103,7 @@ class PlayerSheetsWidget(QWidget):
         self._equipment_preview_slot_id: Optional[str] = None
         self._equipment_preview_item_id: Optional[str] = None
         self._equipment_preview_top_left: Optional[QPoint] = None
+        self._equipment_view_prewarmed = False
         self._inventory_backpack_button: Optional[QToolButton] = None
         self._inventory_equipment_button: Optional[QToolButton] = None
         self._inventory_notes_row: Optional[QWidget] = None
@@ -4006,6 +4131,8 @@ class PlayerSheetsWidget(QWidget):
         self._collapsed_rect: Optional[QRect] = None
         self._detail_splitter_attached = False
         self._right_layout: Optional[QVBoxLayout] = None
+        self._details_layout: Optional[QVBoxLayout] = None
+        self._sheet_panel_placeholder: Optional[QLabel] = None
 
         self._stack = QStackedLayout(self)
         self._stack.setContentsMargins(0, 0, 0, 0)
@@ -4024,6 +4151,11 @@ class PlayerSheetsWidget(QWidget):
 
         self._stack.addWidget(self._content_root)
         self._stack.addWidget(self._overlay_root)
+        self._equipment_background_prewarm_timer = QTimer(self)
+        self._equipment_background_prewarm_timer.setSingleShot(True)
+        self._equipment_background_prewarm_timer.timeout.connect(
+            self._prewarm_equipment_view
+        )
 
         filter_bar = QFrame(self)
         filter_bar.setObjectName("Panel")
@@ -4249,25 +4381,25 @@ class PlayerSheetsWidget(QWidget):
         details_panel.setObjectName("PanelTransparent")
         details_panel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         details_layout = QVBoxLayout(details_panel)
+        self._details_layout = details_layout
         details_layout.setContentsMargins(10, 10, 10, 10)
         details_layout.setSpacing(8)
 
         self._sheet_panel: Optional[CharacterSheetPanel] = None
-        if PDFIUM_VIEW_AVAILABLE:
-            self._sheet_panel = CharacterSheetPanel(self)
-            self._sheet_panel.unsavedChanged.connect(self._on_sheet_unsaved_changed)
-            self._sheet_panel.statusMessage.connect(self._show_sheet_status)
-            self._sheet_panel.pdfPathSelected.connect(self._on_sheet_pdf_selected)
-            self._sheet_panel.expandToggled.connect(self._on_sheet_expand_toggled)
-            details_layout.addWidget(self._sheet_panel, 1)
+        if PDFIUM_VIEW_AVAILABLE and not self._defer_startup:
+            self._build_sheet_panel()
         else:
             message = "PDF viewer requires pypdfium2. Install it to enable in-app edits."
             if PDFIUM_VIEW_ERROR:
                 message = f"{message}\n\nImport error: {PDFIUM_VIEW_ERROR}"
+            if self._defer_startup and PDFIUM_VIEW_AVAILABLE:
+                message = "Character sheet preview is still loading."
             hint = QLabel(message)
             hint.setObjectName("PanelPlaceholder")
             hint.setWordWrap(True)
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             details_layout.addWidget(hint)
+            self._sheet_panel_placeholder = hint
         detail_splitter.addWidget(details_panel)
 
         inventory_panel = QFrame(self)
@@ -4734,9 +4866,68 @@ class PlayerSheetsWidget(QWidget):
         self._group_combo.currentIndexChanged.connect(self._apply_filters)
         self._tag_input.textChanged.connect(self._apply_filters)
 
-        self._refresh_inventory_library()
-        self._apply_filters()
         PLAYER_SHEET_EVENTS.inventorySaved.connect(self._on_external_inventory_saved)
+        if self._defer_startup:
+            self._update_header_mode()
+        else:
+            self._refresh_inventory_library()
+            self._apply_filters()
+            QTimer.singleShot(0, self._schedule_equipment_background_prewarm)
+
+    def begin_startup(self) -> None:
+        if not self._defer_startup or self._startup_started:
+            return
+        self._startup_started = True
+        self.startupStatusChanged.emit("Preparing character list...")
+        QTimer.singleShot(0, self._startup_phase_inventory)
+
+    def startup_in_progress(self) -> bool:
+        return bool(self._startup_in_progress)
+
+    def _startup_phase_inventory(self) -> None:
+        try:
+            self._refresh_inventory_library()
+            self._apply_filters()
+        except Exception:
+            self._startup_failed(traceback.format_exc())
+            return
+        self.startupStatusChanged.emit("Preparing character sheet...")
+        QTimer.singleShot(0, self._startup_phase_sheet_panel)
+
+    def _startup_phase_sheet_panel(self) -> None:
+        try:
+            self._build_sheet_panel()
+            if self._current_entry is not None:
+                self._load_pdf_preview(self._current_entry)
+            self._schedule_equipment_background_prewarm()
+        except Exception:
+            self._startup_failed(traceback.format_exc())
+            return
+        self._startup_in_progress = False
+        self.startupFinished.emit()
+
+    def _startup_failed(self, error_text: str) -> None:
+        self._startup_in_progress = False
+        self.startupFailed.emit(str(error_text or ""))
+
+    def _build_sheet_panel(self) -> None:
+        if self._sheet_panel is not None or not PDFIUM_VIEW_AVAILABLE or self._details_layout is None:
+            return
+        panel = CharacterSheetPanel(self)
+        panel.unsavedChanged.connect(self._on_sheet_unsaved_changed)
+        panel.statusMessage.connect(self._show_sheet_status)
+        panel.pdfPathSelected.connect(self._on_sheet_pdf_selected)
+        panel.expandToggled.connect(self._on_sheet_expand_toggled)
+        placeholder = self._sheet_panel_placeholder
+        if placeholder is not None:
+            self._details_layout.replaceWidget(placeholder, panel)
+            placeholder.hide()
+            placeholder.deleteLater()
+            self._sheet_panel_placeholder = None
+        else:
+            self._details_layout.addWidget(panel, 1)
+        self._sheet_panel = panel
+        self._sync_sheet_toolbar_title()
 
     def _make_reset_button(self, tooltip: str) -> QToolButton:
         btn = QToolButton(self)
@@ -4756,6 +4947,42 @@ class PlayerSheetsWidget(QWidget):
         self._detail_splitter_attached = True
         self._apply_fixed_detail_splitter_ratio()
         self._schedule_splitter_restore()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._schedule_equipment_background_prewarm()
+
+    def _schedule_equipment_background_prewarm(self) -> None:
+        if self._equipment_view_prewarmed:
+            return
+        if not self.isVisible() or not self._equipment_slot_widgets or self._inventory_stack is None:
+            if not self._equipment_background_prewarm_timer.isActive():
+                self._equipment_background_prewarm_timer.start(16)
+            return
+        if self._equipment_background_prewarm_timer.isActive():
+            return
+        self._equipment_background_prewarm_timer.start(0)
+
+    def _prewarm_equipment_view(self) -> None:
+        if self._equipment_view_prewarmed:
+            return
+        if not self.isVisible() or self._inventory_stack is None or self._equipment_panel is None:
+            self._equipment_background_prewarm_timer.start(16)
+            return
+        previous_index = int(self._inventory_stack.currentIndex())
+        updates_were_enabled = self.updatesEnabled()
+        self.setUpdatesEnabled(False)
+        try:
+            self._inventory_stack.setCurrentIndex(1)
+            self._update_equipment_layout_sizes()
+            for slot in self._equipment_slot_widgets.values():
+                slot._rebuild_slot_pixmap()
+        finally:
+            self._inventory_stack.setCurrentIndex(previous_index)
+            self.setUpdatesEnabled(updates_were_enabled)
+        self._equipment_view_prewarmed = True
+        self._sync_inventory_notepad_visibility()
+        self._sync_inventory_controls()
 
     def _build_filter_field(
         self,
@@ -5217,55 +5444,11 @@ class PlayerSheetsWidget(QWidget):
         panel_rect = self._equipment_panel.contentsRect()
         panel_height = max(1, panel_rect.height())
         panel_width = max(1, panel_rect.width())
-        row_spacing = 24
-        column_spacing = 10
-        top_row_spacing = 12
-        side_column_pad = 7
-        min_misc_spacing = 9
-        min_slot_size = 20
-        slot_scale = 1.35
-        slot_max_size = 180
-        center_factor = 1.8
         slot_canvas_inset = 0
-        slots_per_column = len(EQUIPMENT_SLOTS_LEFT)
-        misc_slots_count = max(1, len(EQUIPMENT_SLOTS_MISC))
-        height_limit = (
-            panel_height
-            - row_spacing
-            - side_column_pad
-            - (column_spacing * (slots_per_column - 1))
-        ) / (
-            slots_per_column + 1
-        )
-        top_width_limit = (panel_width - (top_row_spacing * 2)) / (2 + center_factor)
-        misc_width_limit = (
-            panel_width - (min_misc_spacing * (misc_slots_count - 1))
-        ) / misc_slots_count
-        base_slot_size = max(
-            min_slot_size,
-            min(height_limit, top_width_limit, misc_width_limit, slot_max_size),
-        )
-        slot_size = int(
-            max(min_slot_size, min(slot_max_size, round(base_slot_size * slot_scale)))
-        )
-        # Never exceed vertical capacity; avoids misc-row overlap with upper section.
-        slot_size = min(slot_size, max(min_slot_size, int(height_limit)))
-
-        if misc_slots_count > 1:
-            while slot_size > min_slot_size:
-                free = panel_width - (slot_size * misc_slots_count)
-                if free >= (min_misc_spacing * (misc_slots_count - 1)):
-                    break
-                slot_size -= 1
-            free = max(0, panel_width - (slot_size * misc_slots_count))
-            if free >= (min_misc_spacing * (misc_slots_count - 1)):
-                misc_spacing = max(min_misc_spacing, free // (misc_slots_count - 1))
-            else:
-                misc_spacing = max(0, free // (misc_slots_count - 1))
-            misc_left_margin = max(0, free - (misc_spacing * (misc_slots_count - 1)))
-        else:
-            misc_spacing = 0
-            misc_left_margin = 0
+        metrics = _compute_equipment_layout_metrics(panel_width, panel_height)
+        slot_size = int(metrics["slot_size"])
+        misc_spacing = int(metrics["misc_spacing"])
+        misc_left_margin = int(metrics["misc_left_margin"])
         if self._equipment_misc_row_layout is not None:
             self._equipment_misc_row_layout.setSpacing(misc_spacing)
             self._equipment_misc_row_layout.setAlignment(
@@ -5283,11 +5466,7 @@ class PlayerSheetsWidget(QWidget):
             widget.set_icon_size(slot_size)
             widget.set_canvas_inset(slot_canvas_inset)
 
-        side_column_height = (
-            (slot_size * slots_per_column)
-            + (column_spacing * (slots_per_column - 1))
-            + side_column_pad
-        )
+        side_column_height = int(metrics["side_column_height"])
         if self._equipment_left_container is not None:
             self._equipment_left_container.setFixedWidth(slot_size)
             self._equipment_left_container.setFixedHeight(side_column_height)
@@ -5295,7 +5474,7 @@ class PlayerSheetsWidget(QWidget):
             self._equipment_right_container.setFixedWidth(slot_size)
             self._equipment_right_container.setFixedHeight(side_column_height)
         if self._equipment_figure_frame is not None:
-            self._equipment_figure_frame.setMinimumWidth(int(slot_size * center_factor))
+            self._equipment_figure_frame.setMinimumWidth(int(metrics["figure_min_width"]))
             self._equipment_figure_frame.setFixedHeight(side_column_height)
         self._update_equipment_figure_pixmap()
         if self._equipment_weapon_strip is not None:

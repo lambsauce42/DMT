@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import os
 import sys
+import traceback
 from pathlib import Path
 import shutil
 from typing import Iterable, List, Optional
@@ -277,6 +278,55 @@ class MapsManager:
             group=self.filters.group,
             tag_query=self.filters.tag_query,
         )
+
+
+def load_map_entries_from_storage() -> tuple[List[MapAsset], str]:
+    entries: List[MapAsset] = []
+    load_error = ""
+    try:
+        maps_images_dir().mkdir(parents=True, exist_ok=True)
+        maps_thumbs_dir().mkdir(parents=True, exist_ok=True)
+        for path in sorted(maps_storage_dir().glob(f"*{MAP_FILE_EXTENSION}")):
+            info = read_dmt_package_info(path)
+            if not isinstance(info, dict):
+                continue
+            if str(info.get("format") or "") != MAP_FILE_FORMAT:
+                continue
+            payload = info.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            payload = dict(payload)
+            object_id = str(info.get("object_id") or payload.get("id") or "").strip()
+            if not object_id:
+                continue
+            payload["id"] = object_id
+            image_asset = str(info.get("image_asset") or "").strip()
+            thumb_asset = str(info.get("thumbnail_asset") or "").strip()
+            if image_asset:
+                raw = read_dmt_package_asset(path, image_asset)
+                if raw:
+                    image_suffix = Path(image_asset).suffix.lower() or ".png"
+                    image_target = maps_images_dir() / f"{sanitize_filename(object_id)}{image_suffix}"
+                    try:
+                        image_target.write_bytes(raw)
+                        payload["image_path"] = str(image_target)
+                    except OSError:
+                        continue
+            if thumb_asset:
+                raw_thumb = read_dmt_package_asset(path, thumb_asset)
+                if raw_thumb:
+                    thumb_target = maps_thumbs_dir() / f"{sanitize_filename(object_id)}.png"
+                    try:
+                        thumb_target.write_bytes(raw_thumb)
+                        payload["thumbnail_path"] = str(thumb_target)
+                    except OSError:
+                        pass
+            entry = entry_from_dict(payload)
+            if entry:
+                entries.append(entry)
+    except Exception as exc:
+        load_error = str(exc)
+    return entries, load_error
 
 
 def matches_filters(
@@ -885,12 +935,34 @@ class MapViewPanel(QGraphicsView):
 
 
 class MapsWidget(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    startupFinished = Signal()
+    startupStatusChanged = Signal(str)
+    startupFailed = Signal(str)
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        initial_world_data: Optional[list] = None,
+        initial_entries: Optional[List[MapAsset]] = None,
+        load_entries_error: str = "",
+        defer_startup: bool = False,
+    ) -> None:
         super().__init__(parent)
-        self._world_data = load_navigation_data()
+        self._defer_startup = bool(defer_startup)
+        self._startup_started = False
+        self._startup_in_progress = self._defer_startup
+        self._world_data = (
+            list(initial_world_data)
+            if isinstance(initial_world_data, list)
+            else load_navigation_data()
+        )
         self._storage_path = maps_storage_path()
-        self._load_entries_error = ""
-        self._manager = MapsManager(entries=self._load_entries())
+        self._load_entries_error = str(load_entries_error or "")
+        if initial_entries is None:
+            self._manager = MapsManager(entries=self._load_entries())
+        else:
+            self._manager = MapsManager(entries=list(initial_entries))
         self._current_entry: Optional[MapAsset] = None
 
         layout = QVBoxLayout(self)
@@ -1109,8 +1181,12 @@ class MapsWidget(QWidget):
 
         preview_layout.addWidget(preview_header)
 
-        self._preview_panel = MapViewPanel(self)
-        preview_layout.addWidget(self._preview_panel, 1)
+        self._preview_panel: Optional[MapViewPanel] = None
+        self._preview_placeholder = QLabel("Map preview is still loading.", preview_panel)
+        self._preview_placeholder.setObjectName("Subheader")
+        self._preview_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_placeholder.setWordWrap(True)
+        preview_layout.addWidget(self._preview_placeholder, 1)
 
         right_layout.addWidget(preview_panel, 1)
 
@@ -1128,21 +1204,11 @@ class MapsWidget(QWidget):
         self._group_combo.currentIndexChanged.connect(self._apply_filters)
         self._tag_input.textChanged.connect(self._apply_filters)
 
-        self._apply_filters()
-
-        self._zoom_out_button.clicked.connect(self._preview_panel.zoom_out)
-        self._zoom_in_button.clicked.connect(self._preview_panel.zoom_in)
-        self._reset_view_button.clicked.connect(self._preview_panel.reset_view)
-        self._preview_panel.zoomChanged.connect(self._on_zoom_changed)
-        if self._load_entries_error and not self._is_test_env():
-            QTimer.singleShot(
-                0,
-                lambda msg=self._load_entries_error: QMessageBox.warning(
-                    self,
-                    "Maps Load Failed",
-                    msg,
-                ),
-            )
+        if self._defer_startup:
+            self._set_preview_controls_enabled(False)
+        else:
+            self._build_preview_panel()
+            self._complete_initial_setup()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -1173,6 +1239,75 @@ class MapsWidget(QWidget):
             for combo in (self._world_combo, self._campaign_combo, self._group_combo):
                 combo.blockSignals(False)
         self._apply_filters()
+
+    def begin_startup(self) -> None:
+        if not self._defer_startup or self._startup_started:
+            return
+        self._startup_started = True
+        self.startupStatusChanged.emit("Preparing map list...")
+        QTimer.singleShot(0, self._startup_phase_filters)
+
+    def startup_in_progress(self) -> bool:
+        return bool(self._startup_in_progress)
+
+    def _startup_phase_filters(self) -> None:
+        try:
+            self._apply_filters()
+        except Exception:
+            self._startup_failed(traceback.format_exc())
+            return
+        self.startupStatusChanged.emit("Preparing map preview...")
+        QTimer.singleShot(0, self._startup_phase_preview)
+
+    def _startup_phase_preview(self) -> None:
+        try:
+            self._build_preview_panel()
+            self._complete_initial_setup(refresh_filters=False)
+        except Exception:
+            self._startup_failed(traceback.format_exc())
+            return
+        self._startup_in_progress = False
+        self.startupFinished.emit()
+
+    def _startup_failed(self, error_text: str) -> None:
+        self._startup_in_progress = False
+        self.startupFailed.emit(str(error_text or ""))
+
+    def _complete_initial_setup(self, *, refresh_filters: bool = True) -> None:
+        if refresh_filters:
+            self._apply_filters()
+        elif self._current_entry is None:
+            self._set_details(None)
+        elif self._preview_panel is not None:
+            self._load_map_preview(self._current_entry)
+        if self._load_entries_error and not self._is_test_env():
+            QTimer.singleShot(
+                0,
+                lambda msg=self._load_entries_error: QMessageBox.warning(
+                    self,
+                    "Maps Load Failed",
+                    msg,
+                ),
+            )
+
+    def _build_preview_panel(self) -> None:
+        if self._preview_panel is not None:
+            return
+        self._preview_panel = MapViewPanel(self)
+        parent_layout = self._preview_placeholder.parentWidget().layout()
+        if parent_layout is not None:
+            parent_layout.replaceWidget(self._preview_placeholder, self._preview_panel)
+        self._preview_placeholder.hide()
+        self._preview_placeholder.deleteLater()
+        self._zoom_out_button.clicked.connect(self._preview_panel.zoom_out)
+        self._zoom_in_button.clicked.connect(self._preview_panel.zoom_in)
+        self._reset_view_button.clicked.connect(self._preview_panel.reset_view)
+        self._preview_panel.zoomChanged.connect(self._on_zoom_changed)
+        self._set_preview_controls_enabled(True)
+
+    def _set_preview_controls_enabled(self, enabled: bool) -> None:
+        for button in (self._zoom_out_button, self._zoom_in_button, self._reset_view_button):
+            button.setEnabled(bool(enabled))
 
     def _make_reset_button(self, tooltip: str) -> QToolButton:
         btn = QToolButton(self)
@@ -1211,47 +1346,8 @@ class MapsWidget(QWidget):
         return container
 
     def _load_entries(self) -> List[MapAsset]:
-        entries: List[MapAsset] = []
-        maps_images_dir().mkdir(parents=True, exist_ok=True)
-        maps_thumbs_dir().mkdir(parents=True, exist_ok=True)
-        for path in sorted(maps_storage_dir().glob(f"*{MAP_FILE_EXTENSION}")):
-            info = read_dmt_package_info(path)
-            if not isinstance(info, dict):
-                continue
-            if str(info.get("format") or "") != MAP_FILE_FORMAT:
-                continue
-            payload = info.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            payload = dict(payload)
-            object_id = str(info.get("object_id") or payload.get("id") or "").strip()
-            if not object_id:
-                continue
-            payload["id"] = object_id
-            image_asset = str(info.get("image_asset") or "").strip()
-            thumb_asset = str(info.get("thumbnail_asset") or "").strip()
-            if image_asset:
-                raw = read_dmt_package_asset(path, image_asset)
-                if raw:
-                    image_suffix = Path(image_asset).suffix.lower() or ".png"
-                    image_target = maps_images_dir() / f"{sanitize_filename(object_id)}{image_suffix}"
-                    try:
-                        image_target.write_bytes(raw)
-                        payload["image_path"] = str(image_target)
-                    except OSError:
-                        continue
-            if thumb_asset:
-                raw_thumb = read_dmt_package_asset(path, thumb_asset)
-                if raw_thumb:
-                    thumb_target = maps_thumbs_dir() / f"{sanitize_filename(object_id)}.png"
-                    try:
-                        thumb_target.write_bytes(raw_thumb)
-                        payload["thumbnail_path"] = str(thumb_target)
-                    except OSError:
-                        pass
-            entry = entry_from_dict(payload)
-            if entry:
-                entries.append(entry)
+        entries, load_error = load_map_entries_from_storage()
+        self._load_entries_error = str(load_error or "")
         return entries
 
     def _save_entries(self) -> None:
@@ -1431,7 +1527,8 @@ class MapsWidget(QWidget):
             self._edit_button.setEnabled(False)
             self._delete_button.setEnabled(False)
             self._disintegrate_button.setEnabled(False)
-            self._preview_panel.load_image(None)
+            if self._preview_panel is not None:
+                self._preview_panel.load_image(None)
             return
 
         self._header_name.setText(f"Map: {entry.name}")
@@ -1478,6 +1575,8 @@ class MapsWidget(QWidget):
         return bool(self._current_entry and self._current_entry.id == clean_id)
 
     def _load_map_preview(self, entry: Optional[MapAsset]) -> None:
+        if self._preview_panel is None:
+            return
         if not entry:
             self._preview_panel.load_image(None)
             return

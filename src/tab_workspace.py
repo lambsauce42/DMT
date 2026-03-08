@@ -209,6 +209,9 @@ class WorkspaceWindow(Protocol):
     def end_applet_load(self, key: str) -> None:
         ...
 
+    def update_applet_load_status(self, key: str, message: str) -> None:
+        ...
+
     def build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
         ...
 
@@ -1096,6 +1099,14 @@ class TabWorkspaceController(QObject):
                 self.focus_widget(owner, existing)
             return
 
+        if self.loading_keys:
+            self._debug_log(
+                "open_applet_blocked_loading",
+                key=key,
+                loading_keys=",".join(sorted(self.loading_keys)),
+            )
+            return
+
         if key in self.loading_keys:
             self._debug_log("open_applet_skip_loading", key=key)
             return
@@ -1103,6 +1114,7 @@ class TabWorkspaceController(QObject):
         self._debug_log("open_applet_begin", key=key)
 
         widget: Optional[QWidget] = None
+        deferred_loading = False
         try:
             window.begin_applet_load(key, str(applet.get("title", "applet")))
             widget = window.build_applet_widget(key, applet)
@@ -1120,11 +1132,66 @@ class TabWorkspaceController(QObject):
             )
             if focus_if_new:
                 host.setCurrentIndex(index)
-            self._debug_log("open_applet_ready", key=key)
+            deferred_loading = bool(
+                callable(getattr(widget, "is_loading", None)) and widget.is_loading()
+            )
+            if deferred_loading:
+                self._watch_loading_applet(key, window, widget, focus_if_new)
+                self._debug_log("open_applet_deferred", key=key)
+            else:
+                self.loading_keys.discard(key)
+                self._debug_log("open_applet_ready", key=key)
         finally:
-            self.loading_keys.discard(key)
-            window.end_applet_load(key)
+            if not deferred_loading:
+                window.end_applet_load(key)
+            if not deferred_loading:
+                self.loading_keys.discard(key)
             self._debug_log("open_applet_end", key=key, opened=widget is not None)
+
+    def _watch_loading_applet(
+        self,
+        key: str,
+        window: WorkspaceWindow,
+        widget: QWidget,
+        focus_if_new: bool,
+    ) -> None:
+        ready_signal = getattr(widget, "appletReady", None)
+        failed_signal = getattr(widget, "appletFailed", None)
+        status_signal = getattr(widget, "appletStatusChanged", None)
+        if ready_signal is not None and hasattr(ready_signal, "connect"):
+            ready_signal.connect(
+                lambda key=key, window=window, widget=widget, focus_if_new=focus_if_new: self._on_loading_applet_ready(
+                    key, window, widget, focus_if_new
+                )
+            )
+        if failed_signal is not None and hasattr(failed_signal, "connect"):
+            failed_signal.connect(
+                lambda _error, key=key, window=window: self._on_loading_applet_failed(key, window)
+            )
+        if status_signal is not None and hasattr(status_signal, "connect"):
+            status_signal.connect(
+                lambda message, key=key, window=window: window.update_applet_load_status(
+                    key, str(message or "")
+                )
+            )
+
+    def _on_loading_applet_ready(
+        self,
+        key: str,
+        window: WorkspaceWindow,
+        widget: QWidget,
+        focus_if_new: bool,
+    ) -> None:
+        self.loading_keys.discard(str(key or ""))
+        window.end_applet_load(str(key or ""))
+        if focus_if_new:
+            self.focus_widget(window, widget)
+        self._debug_log("open_applet_ready", key=str(key or ""))
+
+    def _on_loading_applet_failed(self, key: str, window: WorkspaceWindow) -> None:
+        self.loading_keys.discard(str(key or ""))
+        window.end_applet_load(str(key or ""))
+        self._debug_log("open_applet_failed", key=str(key or ""))
 
     def focus_widget(self, window: WorkspaceWindow, widget: QWidget) -> None:
         host = window.workspace_host()

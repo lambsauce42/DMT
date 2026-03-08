@@ -5,14 +5,14 @@ import json
 import os
 import traceback
 import sys
-import time
 import faulthandler
 import threading
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QIcon,
@@ -52,7 +52,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
     QWidget,
-    QInputDialog,
 )
 
 import re
@@ -60,13 +59,18 @@ import re
 from item_creator import ItemCreatorWidget
 from dungeon_applet import DungeonAppletWidget
 from loot_applet import LootAppletWidget
-from maps_applet import MapsWidget
+from maps_applet import MapsWidget, load_map_entries_from_storage
 from ui.widgets import TerminalWidget
 
 from compact_nav_tree import CompactNavTree
+from navigation_repository import load_navigation_data
 from npc_database import NPCDatabaseWidget
-from player_sheets import PlayerSheetsWidget, refresh_character_sheet_index_cache
-from session_creator import SessionCreatorWidget
+from player_sheets import (
+    PlayerSheetsWidget,
+    load_entries_from_storage,
+    refresh_character_sheet_index_cache,
+)
+from session_creator import SessionCreatorWidget, SessionManager, _navigation_world_data
 from save_paths import (
     dungeon_collections_dir,
     clear_all_online_runtime_caches,
@@ -1219,7 +1223,7 @@ class HomeCard(QFrame):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._on_open(False)
+            self._on_open(True)
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -1370,6 +1374,276 @@ class AppletLoadingOverlay(QWidget):
         self._position_card()
 
 
+def _async_applet_loading_enabled() -> bool:
+    if os.environ.get("DMT_TEST_MODE") == "1":
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    if "pytest" in sys.modules:
+        return False
+    return True
+
+
+def _external_loading_indicator_enabled() -> bool:
+    if os.environ.get("DMT_DISABLE_EXTERNAL_LOADING_INDICATOR") == "1":
+        return False
+    if os.environ.get("DMT_TEST_EXTERNAL_LOADING_INDICATOR") == "1":
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    return "pytest" not in sys.modules
+
+
+class ExternalLoadingIndicatorController:
+    def __init__(self) -> None:
+        self._process: Optional[subprocess.Popen[bytes]] = None
+
+    def show(self, host: QWidget, message: str) -> bool:
+        if not _external_loading_indicator_enabled():
+            return False
+        helper_path = Path(__file__).resolve().with_name("loading_indicator_process.py")
+        if not helper_path.exists():
+            print(f"[WARN] Loading indicator helper missing: {helper_path}", file=sys.stderr)
+            return False
+        self.hide()
+        global_top_left = host.mapToGlobal(host.rect().topLeft())
+        rect = host.rect()
+        cmd = [
+            sys.executable,
+            str(helper_path),
+            "--message",
+            str(message or "Loading applet..."),
+            "--x",
+            str(int(global_top_left.x())),
+            "--y",
+            str(int(global_top_left.y())),
+            "--width",
+            str(max(1, int(rect.width()))),
+            "--height",
+            str(max(1, int(rect.height()))),
+        ]
+        heartbeat_path = os.environ.get("DMT_LOADING_INDICATOR_HEARTBEAT_PATH", "").strip()
+        if heartbeat_path:
+            cmd.extend(["--heartbeat-path", heartbeat_path])
+        try:
+            self._process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            self._process = None
+            print(f"[WARN] Failed to launch external loading indicator: {exc}", file=sys.stderr)
+            return False
+        return True
+
+    def hide(self) -> None:
+        process = self._process
+        self._process = None
+        if process is None:
+            return
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=1.0)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+
+def _safe_navigation_world_data() -> list[dict]:
+    loaded = load_navigation_data()
+    return list(loaded) if isinstance(loaded, list) else []
+
+
+class DeferredAppletHost(QWidget):
+    _load_finished = Signal(object, str)
+    appletReady = Signal()
+    appletFailed = Signal(str)
+    appletStatusChanged = Signal(str)
+
+    def __init__(
+        self,
+        title: str,
+        load_fn: Callable[[], object],
+        build_fn: Callable[[QWidget, object], QWidget],
+        parent: Optional[QWidget] = None,
+        *,
+        use_internal_overlay: bool = True,
+    ) -> None:
+        super().__init__(parent)
+        self._title = str(title or "Applet")
+        self._load_fn = load_fn
+        self._build_fn = build_fn
+        self._closed = False
+        self._ready_emitted = False
+        self._inner_widget: Optional[QWidget] = None
+        self._startup_connected = False
+        self._overlay: Optional[AppletLoadingOverlay] = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self._layout = layout
+
+        self._content_root = QWidget(self)
+        self._content_layout = QVBoxLayout(self._content_root)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        layout.addWidget(self._content_root, 1)
+
+        if use_internal_overlay:
+            self._overlay = AppletLoadingOverlay(self)
+            self._overlay.show_loading(f"Loading {self._title}...")
+
+        self._load_finished.connect(self._on_load_finished)
+        self._loader_thread = threading.Thread(
+            target=self._run_loader,
+            name=f"dmt-load-{self._title.lower().replace(' ', '-')}",
+            daemon=True,
+        )
+        self._loader_thread.start()
+
+    def is_loading(self) -> bool:
+        return (not self._closed) and (not self._ready_emitted)
+
+    def _run_loader(self) -> None:
+        try:
+            payload = self._load_fn()
+        except Exception:
+            if self._closed:
+                return
+            self._load_finished.emit(None, traceback.format_exc())
+            return
+        if self._closed:
+            return
+        self._load_finished.emit(payload, "")
+
+    def _on_load_finished(self, payload: object, error_text: str) -> None:
+        if self._closed:
+            return
+        if error_text:
+            self._set_status_message("Failed to load applet.")
+            print(
+                f"[WARN] Deferred applet load failed for {self._title}: {error_text}",
+                file=sys.stderr,
+            )
+            QMessageBox.warning(
+                self,
+                f"{self._title} Load Failed",
+                "The applet could not be prepared. See terminal output for details.",
+            )
+            self.appletFailed.emit(error_text)
+            return
+        self._set_status_message("Building interface...")
+        QTimer.singleShot(0, lambda payload=payload: self._build_loaded_widget(payload))
+
+    def _build_loaded_widget(self, payload: object) -> None:
+        if self._closed:
+            return
+        try:
+            widget = self._build_fn(self, payload)
+        except Exception:
+            self._set_status_message("Failed to build applet.")
+            error_text = traceback.format_exc()
+            print(f"[WARN] Deferred applet build failed for {self._title}: {error_text}", file=sys.stderr)
+            QMessageBox.warning(
+                self,
+                f"{self._title} Build Failed",
+                "The applet UI could not be created. See terminal output for details.",
+            )
+            self.appletFailed.emit(error_text)
+            return
+        self._inner_widget = widget
+        while self._content_layout.count():
+            item = self._content_layout.takeAt(0)
+            child_widget = item.widget()
+            if child_widget is not None:
+                child_widget.deleteLater()
+        self._content_layout.addWidget(widget, 1)
+        self._attach_widget_startup(widget)
+        self._start_widget_startup(widget)
+        if not self._widget_startup_in_progress(widget):
+            self._finish_ready()
+
+    def _attach_widget_startup(self, widget: QWidget) -> None:
+        if self._startup_connected:
+            return
+        finished_signal = getattr(widget, "startupFinished", None)
+        if finished_signal is not None and hasattr(finished_signal, "connect"):
+            finished_signal.connect(self._finish_ready)
+        status_signal = getattr(widget, "startupStatusChanged", None)
+        if status_signal is not None and hasattr(status_signal, "connect"):
+            status_signal.connect(self._set_status_message)
+        failed_signal = getattr(widget, "startupFailed", None)
+        if failed_signal is not None and hasattr(failed_signal, "connect"):
+            failed_signal.connect(self._on_widget_startup_failed)
+        self._startup_connected = True
+
+    def _start_widget_startup(self, widget: QWidget) -> None:
+        begin_startup = getattr(widget, "begin_startup", None)
+        if not callable(begin_startup):
+            return
+        try:
+            begin_startup()
+        except Exception:
+            self._on_widget_startup_failed(traceback.format_exc())
+
+    def _widget_startup_in_progress(self, widget: QWidget) -> bool:
+        startup_pending = getattr(widget, "startup_in_progress", None)
+        if callable(startup_pending):
+            try:
+                return bool(startup_pending())
+            except Exception:
+                return False
+        return False
+
+    def _on_widget_startup_failed(self, error_text: str) -> None:
+        if self._closed:
+            return
+        self._set_status_message("Failed to finish applet startup.")
+        print(f"[WARN] Deferred applet startup failed for {self._title}: {error_text}", file=sys.stderr)
+        QMessageBox.warning(
+            self,
+            f"{self._title} Startup Failed",
+            "The applet could not finish starting. See terminal output for details.",
+        )
+        self.appletFailed.emit(str(error_text or ""))
+
+    def _finish_ready(self) -> None:
+        if self._closed or self._ready_emitted:
+            return
+        self._ready_emitted = True
+        if self._overlay is not None:
+            self._overlay.hide_loading()
+        self.appletReady.emit()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._overlay is not None:
+            self._overlay.setGeometry(self.rect())
+
+    def _set_status_message(self, message: str) -> None:
+        text = str(message or "Loading applet...")
+        if self._overlay is not None:
+            self._overlay.set_message(text)
+        self.appletStatusChanged.emit(text)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._closed = True
+        inner = self._inner_widget
+        if inner is not None:
+            try:
+                inner.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+
 def build_applet_widget(parent: QWidget, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
     if str(key).startswith("online_host::"):
         widget: Optional[DungeonAppletWidget] = None
@@ -1454,10 +1728,62 @@ def build_applet_widget(parent: QWidget, key: str, applet: Dict[str, object]) ->
     if key == "item_creator":
         return ItemCreatorWidget(parent)
     if key == "map_library":
+        if _async_applet_loading_enabled():
+            return DeferredAppletHost(
+                "Maps",
+                load_fn=lambda: {
+                    "world_data": _safe_navigation_world_data(),
+                    "entries_and_error": load_map_entries_from_storage(),
+                },
+                build_fn=lambda host, payload: MapsWidget(
+                    host,
+                    initial_world_data=list(payload.get("world_data") or []),
+                    initial_entries=list((payload.get("entries_and_error") or ([], ""))[0] or []),
+                    load_entries_error=str((payload.get("entries_and_error") or ([], ""))[1] or ""),
+                    defer_startup=True,
+                ),
+                parent=parent,
+                use_internal_overlay=False,
+            )
         return MapsWidget(parent)
     if key == "player_sheets":
+        if _async_applet_loading_enabled():
+            return DeferredAppletHost(
+                "Characters",
+                load_fn=lambda: {
+                    "world_data": _safe_navigation_world_data(),
+                    "entries": load_entries_from_storage(),
+                },
+                build_fn=lambda host, payload: PlayerSheetsWidget(
+                    host,
+                    initial_world_data=list(payload.get("world_data") or []),
+                    initial_entries=list(payload.get("entries") or []),
+                    defer_startup=True,
+                ),
+                parent=parent,
+                use_internal_overlay=False,
+            )
         return PlayerSheetsWidget(parent)
     if key == "session_creator":
+        if _async_applet_loading_enabled():
+            return DeferredAppletHost(
+                "Sessions",
+                load_fn=lambda: {
+                    "manager": SessionManager(),
+                    "world_data": _navigation_world_data(),
+                },
+                build_fn=lambda host, payload: SessionCreatorWidget(
+                    host,
+                    initial_manager=payload.get("manager")
+                    if isinstance(payload.get("manager"), SessionManager)
+                    else None,
+                    initial_world_data=list(payload.get("world_data") or []),
+                    defer_startup=True,
+                    defer_files_tab=True,
+                ),
+                parent=parent,
+                use_internal_overlay=False,
+            )
         return SessionCreatorWidget(parent)
     if key == "loot_table_generator":
         return LootAppletWidget(parent)
@@ -1505,11 +1831,19 @@ def _append_online_launch_log(event: str, **fields: object) -> None:
             payload[str(key)] = value
         else:
             payload[str(key)] = str(value)
+    shared_path = _online_launch_log_path()
     _append_json_line(
-        _online_launch_log_path(),
+        shared_path,
         payload,
         warn_prefix="Failed to write online launch log",
     )
+    instance_path = _instance_log_path(shared_path)
+    if instance_path != shared_path:
+        _append_json_line(
+            instance_path,
+            payload,
+            warn_prefix="Failed to write instance online launch log",
+        )
 
 
 def _app_crash_log_path() -> Path:
@@ -1623,6 +1957,7 @@ class _WorkspaceTabWindow(QMainWindow):
         self._loading_overlay = AppletLoadingOverlay(self.tabs)
         self._loading_overlay.setGeometry(self.tabs.rect())
         self._loading_overlay.hide()
+        self._external_loading_indicator = ExternalLoadingIndicatorController()
 
         self._workspace_controller.register_window(self, primary=self._workspace_primary)
         self._tab_by_key = self._workspace_controller.tab_by_key
@@ -1647,25 +1982,14 @@ class _WorkspaceTabWindow(QMainWindow):
         _ = key
         self._hide_applet_loading_overlay()
 
-    def build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
-        spinner = self._loading_overlay._spinner
-        if not spinner._timer.isActive():
-            return self._build_applet_widget(key, applet)
-        if self._skip_animation_pump_for_applet(key):
-            return self._build_applet_widget(key, applet)
-        return self._build_applet_widget_with_animation_pump(key, applet)
+    def update_applet_load_status(self, key: str, message: str) -> None:
+        _ = (key, message)
 
-    def _skip_animation_pump_for_applet(self, key: str) -> bool:
-        clean_key = str(key or "")
-        # Avoid re-entrant QApplication.processEvents() while constructing
-        # heavy online dungeon widgets; this has caused native crashes in practice.
-        if clean_key.startswith("online_host::"):
-            return True
-        if clean_key.startswith("online_join::"):
-            return True
-        if clean_key == "dungeon_creator":
-            return True
-        return False
+    def build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
+        # Applet construction is synchronous on the UI thread. Re-entering the
+        # event loop with QApplication.processEvents() while a widget tree is
+        # only partially constructed has caused native Qt access violations.
+        return self._build_applet_widget(key, applet)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -1675,38 +1999,14 @@ class _WorkspaceTabWindow(QMainWindow):
             self._workspace_controller.sync_tab_bar_extent(self)
 
     def _show_applet_loading_overlay(self, message: str) -> None:
+        if self._external_loading_indicator.show(self.tabs, message):
+            self._loading_overlay.hide_loading()
+            return
         self._loading_overlay.show_loading(message)
 
     def _hide_applet_loading_overlay(self) -> None:
+        self._external_loading_indicator.hide()
         self._loading_overlay.hide_loading()
-
-    def _build_applet_widget_with_animation_pump(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
-        previous_profile = sys.getprofile()
-        pump_interval_s = 0.016
-        last_pump = time.perf_counter()
-        reentrant = False
-
-        def _profile(frame, event, arg):  # type: ignore[no-untyped-def]
-            nonlocal last_pump, reentrant
-            if previous_profile is not None:
-                previous_profile(frame, event, arg)
-            if reentrant:
-                return
-            now = time.perf_counter()
-            if now - last_pump < pump_interval_s:
-                return
-            reentrant = True
-            try:
-                QApplication.processEvents()
-            finally:
-                last_pump = now
-                reentrant = False
-
-        sys.setprofile(_profile)
-        try:
-            return self._build_applet_widget(key, applet)
-        finally:
-            sys.setprofile(previous_profile)
 
     def _build_applet_widget(self, key: str, applet: Dict[str, object]) -> Optional[QWidget]:
         return build_applet_widget(self.tabs, key, applet)
@@ -1716,6 +2016,10 @@ class _WorkspaceTabWindow(QMainWindow):
 
     def _close_tab(self, index: int) -> None:
         self._workspace_controller.close_tab_by_index(self, index)
+
+    def closeEvent(self, event) -> None:
+        self._external_loading_indicator.hide()
+        super().closeEvent(event)
 
 
 class DetachedTabWindow(_WorkspaceTabWindow):
@@ -2048,30 +2352,25 @@ class HomeWidget(QWidget):
 
     def _host_dungeon_collection(self) -> None:
         _append_online_launch_log("home_host_prompt_opened")
-        base_dir = dungeon_collections_dir()
-        base_dir.mkdir(parents=True, exist_ok=True)
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Dungeon Collection",
-            str(base_dir),
-            f"Dungeon Collection (*{COLLECTION_FILE_EXTENSION})",
-        )
-        if not filename:
-            _append_online_launch_log("home_host_prompt_cancelled_file")
+        details = self._prompt_host_dungeon_collection_details()
+        if details is None:
+            _append_online_launch_log("home_host_prompt_cancelled")
             return
-        port, ok = QInputDialog.getInt(
-            self,
-            "Host Port",
-            "Port:",
-            8765,
-            1024,
-            65535,
-            1,
-        )
-        if not ok:
+        filename = str(details["collection_path"]).strip()
+        port = int(details["port"])
+        if not filename:
+            _append_online_launch_log("home_host_prompt_rejected_blank_collection")
+            QMessageBox.warning(self, "Host Online Session", "Dungeon collection is required.")
+            return
+        if not Path(filename).is_file():
             _append_online_launch_log(
-                "home_host_prompt_cancelled_port",
-                collection_path=str(filename),
+                "home_host_prompt_rejected_missing_collection",
+                collection_path=filename,
+            )
+            QMessageBox.warning(
+                self,
+                "Host Online Session",
+                "Choose an existing dungeon collection file.",
             )
             return
         collection_name = Path(filename).stem or "Collection"
@@ -2098,57 +2397,24 @@ class HomeWidget(QWidget):
 
     def _join_dungeon_by_ip(self) -> None:
         _append_online_launch_log("home_join_prompt_opened")
-        host_ip, ok = QInputDialog.getText(
-            self,
-            "Join by IP",
-            "Host IP:",
-            text="127.0.0.1",
-        )
-        if not ok:
-            _append_online_launch_log("home_join_prompt_cancelled_host")
+        details = self._prompt_join_online_details()
+        if details is None:
+            _append_online_launch_log("home_join_prompt_cancelled")
             return
-        host_ip = host_ip.strip()
-        if not host_ip:
+        host_ip = str(details["host_ip"]).strip()
+        port = int(details["port"])
+        player_name = str(details["player_name"]).strip()
+        if not host_ip.strip():
             _append_online_launch_log("home_join_prompt_rejected_blank_host")
-            QMessageBox.warning(self, "Join by IP", "Host IP is required.")
+            QMessageBox.warning(self, "Join Online Session", "Host IP is required.")
             return
-        port, ok = QInputDialog.getInt(
-            self,
-            "Join by IP",
-            "Port:",
-            8765,
-            1,
-            65535,
-            1,
-        )
-        if not ok:
-            _append_online_launch_log(
-                "home_join_prompt_cancelled_port",
-                host_ip=host_ip,
-            )
-            return
-        default_name = "Player"
-        player_name, ok = QInputDialog.getText(
-            self,
-            "Join by IP",
-            "Player Name:",
-            text=default_name,
-        )
-        if not ok:
-            _append_online_launch_log(
-                "home_join_prompt_cancelled_name",
-                host_ip=host_ip,
-                port=int(port),
-            )
-            return
-        player_name = player_name.strip()
-        if not player_name:
+        if not player_name.strip():
             _append_online_launch_log(
                 "home_join_prompt_rejected_blank_name",
                 host_ip=host_ip,
                 port=int(port),
             )
-            QMessageBox.warning(self, "Join by IP", "Player name is required.")
+            QMessageBox.warning(self, "Join Online Session", "Player name is required.")
             return
         _append_online_launch_log(
             "home_join_applet_queued",
@@ -2171,6 +2437,163 @@ class HomeWidget(QWidget):
             },
         }
         self._on_open(applet, True)
+
+    def _dialog_action_button(self, text: str, object_name: str) -> QPushButton:
+        button = QPushButton(text, self)
+        button.setObjectName(object_name)
+        button.setMinimumHeight(36)
+        button.setMinimumWidth(110)
+        return button
+
+    def _prompt_host_dungeon_collection_details(self) -> Optional[Dict[str, object]]:
+        base_dir = dungeon_collections_dir()
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        dialog = ModernDialog("Host Online Session", self)
+        dialog.setMinimumWidth(620)
+        dialog.add_text("Choose a collection file and port, then start the host.")
+
+        content = QWidget(dialog)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(10)
+        layout.addLayout(form)
+
+        collection_edit = QLineEdit(dialog)
+        collection_edit.setPlaceholderText("Select a dungeon collection file")
+        collection_edit.setMinimumHeight(36)
+
+        browse_button = QPushButton("Browse", dialog)
+        browse_button.setObjectName("SecondaryButton")
+        browse_button.setMinimumHeight(36)
+        browse_button.setMinimumWidth(110)
+
+        collection_row = QWidget(dialog)
+        collection_row_layout = QHBoxLayout(collection_row)
+        collection_row_layout.setContentsMargins(0, 0, 0, 0)
+        collection_row_layout.setSpacing(8)
+        collection_row_layout.addWidget(collection_edit, 1)
+        collection_row_layout.addWidget(browse_button, 0)
+        form.addRow("Collection", collection_row)
+
+        port_spin = QSpinBox(dialog)
+        port_spin.setRange(1024, 65535)
+        port_spin.setValue(8765)
+        port_spin.setMinimumHeight(36)
+        form.addRow("Port", port_spin)
+
+        def _browse_for_collection() -> None:
+            filename, _ = QFileDialog.getOpenFileName(
+                dialog,
+                "Select Dungeon Collection",
+                str(base_dir),
+                f"Dungeon Collection (*{COLLECTION_FILE_EXTENSION})",
+            )
+            if filename:
+                collection_edit.setText(str(filename))
+
+        browse_button.clicked.connect(_browse_for_collection)
+
+        submit_button = self._dialog_action_button("Host", "PrimaryButton")
+        cancel_button = self._dialog_action_button("Cancel", "SecondaryButton")
+        submit_button.setDefault(True)
+
+        def _accept_if_valid() -> None:
+            filename = collection_edit.text().strip()
+            if not filename:
+                _append_online_launch_log("home_host_prompt_rejected_blank_collection")
+                QMessageBox.warning(dialog, "Host Online Session", "Dungeon collection is required.")
+                return
+            if not Path(filename).is_file():
+                _append_online_launch_log(
+                    "home_host_prompt_rejected_missing_collection",
+                    collection_path=filename,
+                )
+                QMessageBox.warning(
+                    dialog,
+                    "Host Online Session",
+                    "Choose an existing dungeon collection file.",
+                )
+                return
+            dialog.accept()
+
+        submit_button.clicked.connect(_accept_if_valid)
+        cancel_button.clicked.connect(dialog.reject)
+
+        dialog.add_content(content)
+        dialog.add_buttons([cancel_button, submit_button])
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return {
+            "collection_path": collection_edit.text().strip(),
+            "port": int(port_spin.value()),
+        }
+
+    def _prompt_join_online_details(self) -> Optional[Dict[str, object]]:
+        dialog = ModernDialog("Join Online Session", self)
+        dialog.setMinimumWidth(520)
+        dialog.add_text("Enter the host, port, and player name, then join the session.")
+
+        content = QWidget(dialog)
+        form = QFormLayout(content)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(10)
+
+        host_edit = QLineEdit(dialog)
+        host_edit.setText("127.0.0.1")
+        host_edit.setMinimumHeight(36)
+        form.addRow("Host IP", host_edit)
+
+        port_spin = QSpinBox(dialog)
+        port_spin.setRange(1, 65535)
+        port_spin.setValue(8765)
+        port_spin.setMinimumHeight(36)
+        form.addRow("Port", port_spin)
+
+        player_name_edit = QLineEdit(dialog)
+        player_name_edit.setText("Player")
+        player_name_edit.setMinimumHeight(36)
+        form.addRow("Player Name", player_name_edit)
+
+        submit_button = self._dialog_action_button("Join", "PrimaryButton")
+        cancel_button = self._dialog_action_button("Cancel", "SecondaryButton")
+        submit_button.setDefault(True)
+
+        def _accept_if_valid() -> None:
+            host_ip = host_edit.text().strip()
+            if not host_ip:
+                _append_online_launch_log("home_join_prompt_rejected_blank_host")
+                QMessageBox.warning(dialog, "Join Online Session", "Host IP is required.")
+                return
+            player_name = player_name_edit.text().strip()
+            if not player_name:
+                _append_online_launch_log(
+                    "home_join_prompt_rejected_blank_name",
+                    host_ip=host_ip,
+                    port=int(port_spin.value()),
+                )
+                QMessageBox.warning(dialog, "Join Online Session", "Player name is required.")
+                return
+            dialog.accept()
+
+        submit_button.clicked.connect(_accept_if_valid)
+        cancel_button.clicked.connect(dialog.reject)
+
+        dialog.add_content(content)
+        dialog.add_buttons([cancel_button, submit_button])
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return {
+            "host_ip": host_edit.text().strip(),
+            "port": int(port_spin.value()),
+            "player_name": player_name_edit.text().strip(),
+        }
 
     def _show_settings(self) -> None:
         dialog = ModernDialog("Settings", self)

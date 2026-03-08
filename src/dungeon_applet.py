@@ -2292,7 +2292,6 @@ class EntityInspectorPanel(QWidget):
     ownerChanged = Signal(str)
     iconPathSelected = Signal(str)
     linkCharacterRequested = Signal()
-    unlinkCharacterRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2644,18 +2643,12 @@ class EntityInspectorPanel(QWidget):
         """)
         self.connected_player_combo.currentIndexChanged.connect(self._on_owner_combo_changed)
         token_layout.addWidget(self.connected_player_combo)
-        self.link_character_btn = QPushButton("Link Character to Entity")
+        self.link_character_btn = QPushButton("Manage Character Link")
         self.link_character_btn.setObjectName("SecondaryButton")
         self.link_character_btn.setProperty("compact", "true")
         self.link_character_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.link_character_btn.clicked.connect(self.linkCharacterRequested.emit)
         token_layout.addWidget(self.link_character_btn)
-        self.unlink_character_btn = QPushButton("Unlink Character")
-        self.unlink_character_btn.setObjectName("SecondaryButton")
-        self.unlink_character_btn.setProperty("compact", "true")
-        self.unlink_character_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.unlink_character_btn.clicked.connect(self.unlinkCharacterRequested.emit)
-        token_layout.addWidget(self.unlink_character_btn)
         self.linked_character_lbl = QLabel("Linked Character: None")
         self.linked_character_lbl.setWordWrap(True)
         self.linked_character_lbl.setStyleSheet("color: #a1a1aa; font-size: 11px;")
@@ -2736,7 +2729,6 @@ class EntityInspectorPanel(QWidget):
         if not entity:
             self.linked_character_lbl.setText("Linked Character: None")
             self.link_character_btn.setEnabled(False)
-            self.unlink_character_btn.setEnabled(False)
             self.hide()
             return
             
@@ -2811,13 +2803,7 @@ class EntityInspectorPanel(QWidget):
 
     def set_link_character_enabled(self, enabled: bool) -> None:
         self._link_character_enabled = bool(enabled)
-        has_entity = self._entity is not None
-        has_link = bool(
-            self._entity is not None
-            and str(self._entity.data(ROLE_LINKED_SHEET_ID) or "").strip()
-        )
-        self.link_character_btn.setEnabled(self._link_character_enabled and has_entity)
-        self.unlink_character_btn.setEnabled(self._link_character_enabled and has_entity and has_link)
+        self.link_character_btn.setEnabled(self._link_character_enabled and self._entity is not None)
 
     def set_linked_character_info(self, name: str) -> None:
         clean_name = str(name or "").strip()
@@ -2830,18 +2816,11 @@ class EntityInspectorPanel(QWidget):
     def _sync_linked_character_mode(self) -> None:
         actions_text = ""
         desc_text = ""
-        has_link = False
         if self._entity is not None:
             actions_text = str(getattr(self._entity, "actions", "") or "").strip()
             desc_text = str(getattr(self._entity, "description", "") or "").strip()
-            has_link = bool(str(self._entity.data(ROLE_LINKED_SHEET_ID) or "").strip())
         has_actions = bool(actions_text)
         has_desc = bool(desc_text)
-        if getattr(self, "unlink_character_btn", None) is not None:
-            self.unlink_character_btn.setEnabled(
-                self._link_character_enabled and self._entity is not None and has_link
-            )
-
         if getattr(self, "actions_header_lbl", None) is not None:
             self.actions_header_lbl.setVisible(has_actions)
         if getattr(self, "actions_text", None) is not None:
@@ -4834,7 +4813,6 @@ class DungeonAppletWidget(QWidget):
         self.inspector.ownerChanged.connect(self._on_entity_owner_changed)
         self.inspector.iconPathSelected.connect(self._on_deferred_icon_selected)
         self.inspector.linkCharacterRequested.connect(self._on_link_character_requested)
-        self.inspector.unlinkCharacterRequested.connect(self._on_unlink_character_requested)
         self.canvas.undo_stack.indexChanged.connect(self._on_canvas_changed)
         try:
             from player_sheets import PLAYER_SHEET_EVENTS
@@ -15711,6 +15689,64 @@ class DungeonAppletWidget(QWidget):
         entity.linked_sheet_archive_b64 = ""
         entity.linked_inventory = normalize_inventory_payload({})
 
+    def _unlink_character_from_entity(self, entity: EntityItem, *, confirm: bool) -> bool:
+        linked_sheet_id = str(entity.data(ROLE_LINKED_SHEET_ID) or "").strip()
+        linked_name = str(entity.data(ROLE_LINKED_SHEET_NAME) or linked_sheet_id).strip()
+        if not linked_sheet_id:
+            if confirm:
+                QMessageBox.information(
+                    self,
+                    "Unlink Character",
+                    "This entity has no linked character.",
+                )
+            return False
+        if self._online_mode == ONLINE_MODE_PLAYER and not self._is_entity_owned_by_local_player(entity):
+            QMessageBox.information(
+                self,
+                "Unlink Character",
+                "You can only unlink characters from entities assigned to you.",
+            )
+            return False
+        if confirm:
+            prompt_name = linked_name or linked_sheet_id or "this character"
+            choice = QMessageBox.question(
+                self,
+                "Unlink Character",
+                f"Unlink '{prompt_name}' from this entity?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                return False
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            entity_id = str(entity.data(ROLE_ENTITY_ID) or "").strip()
+            if not entity_id:
+                QMessageBox.warning(
+                    self,
+                    "Unlink Character",
+                    "This entity cannot be unlinked because it has no persistent entity id.",
+                )
+                return False
+            request_payload = {
+                "entity_id": entity_id,
+                "dungeon_id": str(self._active_dungeon_id or ""),
+            }
+            self._dispatch_player_unlink_character_request(request_payload)
+            return True
+        cleared_character_id = str(entity.data(ROLE_LINKED_CHARACTER_ID) or "").strip()
+        if cleared_character_id:
+            self._approved_host_inventory_sync_characters.discard(cleared_character_id)
+        self._clear_character_link_from_entity(entity)
+        entity.update()
+        self.inspector.set_linked_character_info("")
+        self.inspector.set_entity(entity)
+        self._position_floating_overlays()
+        self._mark_active_dungeon_dirty()
+        self._cleanup_unlinked_managed_character_artifacts()
+        if self._online_mode == ONLINE_MODE_DM_HOST:
+            self._broadcast_snapshot_if_host()
+        return True
+
     def _on_link_character_requested(self) -> None:
         entity = self.inspector._entity
         if not isinstance(entity, EntityItem):
@@ -15747,28 +15783,51 @@ class DungeonAppletWidget(QWidget):
             return
 
         entries = list_character_link_targets()
-        if not entries:
+        current_sheet_id = str(entity.data(ROLE_LINKED_SHEET_ID) or "").strip()
+        current_sheet_name = str(
+            entity.data(ROLE_LINKED_SHEET_NAME) or current_sheet_id or "Current Character"
+        ).strip()
+        if not entries and not current_sheet_id:
             QMessageBox.information(self, "Link Character", "No character sheets are available.")
             return
-        labels: list[str] = []
-        lookup: dict[str, object] = {}
+
+        unlink_label = "None (Unlink)"
+        current_placeholder = "__current__"
+        labels: list[str] = [unlink_label]
+        lookup: dict[str, object | None] = {unlink_label: None}
+        current_label = unlink_label
         for entry in entries:
-            sheet_id = sheet_id_for_entry(entry)
-            label = f"{entry.name} ({sheet_id})"
+            sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+            if not sheet_id:
+                continue
+            sheet_name = str(getattr(entry, "name", "") or sheet_id).strip() or sheet_id
+            label = f"{sheet_name} ({sheet_id})"
             labels.append(label)
             lookup[label] = entry
+            if sheet_id == current_sheet_id:
+                current_label = label
+        if current_sheet_id and current_label == unlink_label:
+            current_label = f"{current_sheet_name} ({current_sheet_id})"
+            labels.insert(1, current_label)
+            lookup[current_label] = current_placeholder
+
         selected_label, ok = QInputDialog.getItem(
             self,
-            "Link Character",
+            "Manage Character Link",
             "Character:",
             labels,
-            0,
+            max(0, labels.index(current_label)),
             False,
         )
         if not ok or not selected_label:
             return
+        if selected_label == current_label:
+            return
         entry = lookup.get(selected_label)
         if entry is None:
+            self._unlink_character_from_entity(entity, confirm=False)
+            return
+        if entry == current_placeholder:
             return
         try:
             sheet_id = sheet_id_for_entry(entry)  # type: ignore[arg-type]
@@ -15915,55 +15974,7 @@ class DungeonAppletWidget(QWidget):
         if not isinstance(entity, EntityItem):
             QMessageBox.information(self, "Unlink Character", "Select an entity first.")
             return
-        linked_sheet_id = str(entity.data(ROLE_LINKED_SHEET_ID) or "").strip()
-        linked_name = str(entity.data(ROLE_LINKED_SHEET_NAME) or linked_sheet_id).strip()
-        if not linked_sheet_id:
-            QMessageBox.information(self, "Unlink Character", "This entity has no linked character.")
-            return
-        if self._online_mode == ONLINE_MODE_PLAYER and not self._is_entity_owned_by_local_player(entity):
-            QMessageBox.information(
-                self,
-                "Unlink Character",
-                "You can only unlink characters from entities assigned to you.",
-            )
-            return
-        prompt_name = linked_name or linked_sheet_id or "this character"
-        confirm = QMessageBox.question(
-            self,
-            "Unlink Character",
-            f"Unlink '{prompt_name}' from this entity?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-        if self._online_mode == ONLINE_MODE_PLAYER:
-            entity_id = str(entity.data(ROLE_ENTITY_ID) or "").strip()
-            if not entity_id:
-                QMessageBox.warning(
-                    self,
-                    "Unlink Character",
-                    "This entity cannot be unlinked because it has no persistent entity id.",
-                )
-                return
-            request_payload = {
-                "entity_id": entity_id,
-                "dungeon_id": str(self._active_dungeon_id or ""),
-            }
-            self._dispatch_player_unlink_character_request(request_payload)
-            return
-        cleared_character_id = str(entity.data(ROLE_LINKED_CHARACTER_ID) or "").strip()
-        if cleared_character_id:
-            self._approved_host_inventory_sync_characters.discard(cleared_character_id)
-        self._clear_character_link_from_entity(entity)
-        entity.update()
-        self.inspector.set_linked_character_info("")
-        self.inspector.set_entity(entity)
-        self._position_floating_overlays()
-        self._mark_active_dungeon_dirty()
-        self._cleanup_unlinked_managed_character_artifacts()
-        if self._online_mode == ONLINE_MODE_DM_HOST:
-            self._broadcast_snapshot_if_host()
+        self._unlink_character_from_entity(entity, confirm=True)
 
     def _apply_inventory_sync_to_linked_entities(
         self,

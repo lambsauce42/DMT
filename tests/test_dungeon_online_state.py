@@ -5871,6 +5871,45 @@ def test_player_mode_link_button_enabled_for_owned_entity(dungeon_widget):
     assert dungeon_widget.inspector.link_character_btn.isEnabled()
 
 
+def test_link_picker_offers_unlink_option_and_clears_current_link(monkeypatch, dungeon_widget):
+    fake_player_sheets = types.SimpleNamespace(
+        character_id_for_entry=lambda entry: "",
+        list_character_link_targets=lambda: [],
+        sheet_id_for_entry=lambda entry: "",
+        inventory_payload_for_sheet_id=lambda sheet_id: {},
+        ensure_entry_archive=lambda entry: None,
+        character_sheet_pdf_path=lambda sheet_id: Path("/tmp/missing.pdf"),
+        character_sheet_archive_path=lambda sheet_id: Path("/tmp/missing.dmtchar"),
+    )
+    monkeypatch.setitem(sys.modules, "player_sheets", fake_player_sheets)
+
+    captured: dict[str, object] = {}
+
+    def _capture_get_item(_parent, _title, _label, items, current_index, editable):
+        captured["items"] = list(items)
+        captured["current_index"] = current_index
+        captured["editable"] = editable
+        return ("None (Unlink)", True)
+
+    monkeypatch.setattr("dungeon_applet.QInputDialog.getItem", _capture_get_item)
+
+    entity = EntityItem(QPointF(25, 25))
+    entity.setData(ROLE_LINKED_SHEET_ID, "sheet-linked")
+    entity.setData(ROLE_LINKED_SHEET_NAME, "Linked Hero")
+    entity.setData(ROLE_LINKED_CHARACTER_ID, "character-linked")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+
+    dungeon_widget._on_link_character_requested()
+
+    assert captured["items"] == ["None (Unlink)", "Linked Hero (sheet-linked)"]
+    assert captured["current_index"] == 1
+    assert captured["editable"] is False
+    assert str(entity.data(ROLE_LINKED_SHEET_ID) or "") == ""
+    assert str(entity.data(ROLE_LINKED_CHARACTER_ID) or "") == ""
+    assert dungeon_widget.inspector.linked_character_lbl.text() == "Linked Character: None"
+
+
 def test_inspector_hides_actions_and_description_for_linked_entity(dungeon_widget):
     entity = EntityItem(QPointF(25, 25))
     entity.setData(ROLE_LINKED_SHEET_ID, "sheet-1")

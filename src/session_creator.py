@@ -6,12 +6,13 @@ import os
 import hashlib
 import re
 import sys
+import traceback
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import QEasingCurve, QPointF, Qt, QTimer, QSize, QVariantAnimation
+from PySide6.QtCore import QEasingCurve, QPointF, Qt, QTimer, QSize, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QAction,
     QIcon,
@@ -589,9 +590,23 @@ class FilePoolEdgeToggleButton(QPushButton):
 
 
 class SessionCreatorWidget(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    startupFinished = Signal()
+    startupStatusChanged = Signal(str)
+    startupFailed = Signal(str)
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        initial_manager: Optional[SessionManager] = None,
+        initial_world_data: Optional[list[dict]] = None,
+        defer_files_tab: bool = False,
+        defer_startup: bool = False,
+    ) -> None:
         super().__init__(parent)
-        self.manager = SessionManager()
+        self._defer_startup = bool(defer_startup)
+        self._startup_started = False
+        self.manager = initial_manager if isinstance(initial_manager, SessionManager) else SessionManager()
         self._current_session: Optional[Session] = None
         self._current_session_dirty = False
         self._loading_plan_text = False
@@ -602,8 +617,16 @@ class SessionCreatorWidget(QWidget):
         self._text_link_controllers: list[SessionTextLinkController] = []
         self._session_autosave_enabled = is_session_autosave_enabled()
         self._transcript_controller = TranscriptSessionController(self)
+        self._defer_files_tab = bool(defer_files_tab and not _is_test_env())
+        self._startup_in_progress = bool(self._defer_files_tab and self._defer_startup)
+        self._files_tab_built = False
+        self._files_tab_placeholder: Optional[QWidget] = None
 
-        self._world_data = _navigation_world_data()
+        self._world_data = (
+            list(initial_world_data)
+            if isinstance(initial_world_data, list)
+            else _navigation_world_data()
+        )
 
         # Auto-save timer
         self.auto_save_timer = QTimer(self)
@@ -629,6 +652,41 @@ class SessionCreatorWidget(QWidget):
                         msg,
                     ),
                 )
+
+    def begin_startup(self) -> None:
+        if not self._startup_in_progress or self._startup_started:
+            return
+        self._startup_started = True
+        self.startupStatusChanged.emit("Building files tab...")
+        QTimer.singleShot(0, lambda: self._startup_phase_files_tab())
+
+    def startup_in_progress(self) -> bool:
+        return bool(self._startup_in_progress)
+
+    def _startup_phase_files_tab(self) -> None:
+        try:
+            self._build_files_tab_deferred(defer_pdf_viewer=True)
+        except Exception:
+            self._startup_failed(traceback.format_exc())
+            return
+        self.startupStatusChanged.emit("Preparing PDF preview...")
+        QTimer.singleShot(0, self._startup_phase_pdf_preview)
+
+    def _startup_phase_pdf_preview(self) -> None:
+        try:
+            self._build_files_pdf_preview()
+            attachment = self._current_attachment()
+            if attachment is not None:
+                self._on_selected_file_changed()
+        except Exception:
+            self._startup_failed(traceback.format_exc())
+            return
+        self._startup_in_progress = False
+        self.startupFinished.emit()
+
+    def _startup_failed(self, error_text: str) -> None:
+        self._startup_in_progress = False
+        self.startupFailed.emit(str(error_text or ""))
 
     def closeEvent(self, event) -> None:
         self._persist_pending_session_edits()
@@ -1097,7 +1155,14 @@ class SessionCreatorWidget(QWidget):
         plan_layout.addWidget(self.plan_editor, 1)
 
         self.ref_tabs.addTab(plan_tab, "Plan")
-        self.ref_tabs.addTab(self._build_files_tab(), "Files")
+        if self._defer_files_tab:
+            self._files_tab_placeholder = self._build_placeholder_reference_tab(
+                "Files are still loading. Open this tab in a moment."
+            )
+            self.ref_tabs.addTab(self._files_tab_placeholder, "Files")
+        else:
+            self.ref_tabs.addTab(self._build_files_tab(), "Files")
+            self._files_tab_built = True
         self.transcript_panel = TranscriptSessionPanel(self._transcript_controller, self)
         self.recap_panel = RecapSessionPanel(self._transcript_controller, self)
         self.ref_tabs.addTab(self.transcript_panel, "Transcript")
@@ -1245,8 +1310,10 @@ class SessionCreatorWidget(QWidget):
         self._populate_context_combo(self.world_combo, self._world_options())
         self._on_world_changed() # Trigger cascade
         self._init_text_link_controllers()
+        if self._defer_files_tab and not self._defer_startup:
+            QTimer.singleShot(0, self._build_files_tab_deferred)
 
-    def _build_files_tab(self) -> QWidget:
+    def _build_files_tab(self, *, defer_pdf_viewer: bool = False) -> QWidget:
         files_tab = QWidget(self)
         files_layout = QVBoxLayout(files_tab)
         files_layout.setContentsMargins(8, 8, 8, 8)
@@ -1429,20 +1496,22 @@ class SessionCreatorWidget(QWidget):
         pdf_layout = QVBoxLayout(self.files_pdf_page)
         pdf_layout.setContentsMargins(0, 0, 0, 0)
         pdf_layout.setSpacing(0)
-        if PDFIUM_VIEW_AVAILABLE:
+        self.files_pdf_loading_placeholder = None
+        if PDFIUM_VIEW_AVAILABLE and not defer_pdf_viewer:
             self.files_pdf_viewer = CharacterSheetPanel(self.files_pdf_page)
             self.files_pdf_viewer.set_autosave_enabled(False)
             pdf_layout.addWidget(self.files_pdf_viewer, 1)
             self.files_pdf_unavailable = None
         else:
             self.files_pdf_viewer = None
-            self.files_pdf_unavailable = QLabel(
-                "PDF preview requires pypdfium2. Use Open to view externally.",
-                self.files_pdf_page,
-            )
-            self.files_pdf_unavailable.setWordWrap(True)
-            self.files_pdf_unavailable.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pdf_layout.addWidget(self.files_pdf_unavailable, 1)
+            placeholder_text = "PDF preview is still loading."
+            if not PDFIUM_VIEW_AVAILABLE:
+                placeholder_text = "PDF preview requires pypdfium2. Use Open to view externally."
+            self.files_pdf_unavailable = None
+            self.files_pdf_loading_placeholder = QLabel(placeholder_text, self.files_pdf_page)
+            self.files_pdf_loading_placeholder.setWordWrap(True)
+            self.files_pdf_loading_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pdf_layout.addWidget(self.files_pdf_loading_placeholder, 1)
         self.files_preview_stack.addWidget(self.files_pdf_page)
 
         self.files_unsupported_page = QLabel(
@@ -1481,6 +1550,48 @@ class SessionCreatorWidget(QWidget):
         placeholder.setWordWrap(True)
         layout.addWidget(placeholder, 1)
         return placeholder_tab
+
+    def _build_files_tab_deferred(self, *, defer_pdf_viewer: bool = False) -> None:
+        if self._files_tab_built:
+            return
+        placeholder = self._files_tab_placeholder
+        files_index = self.ref_tabs.indexOf(placeholder) if placeholder is not None else -1
+        if files_index == -1:
+            return
+        current_index = self.ref_tabs.currentIndex()
+        files_tab = self._build_files_tab(defer_pdf_viewer=defer_pdf_viewer)
+        self._files_tab_built = True
+        self.ref_tabs.removeTab(files_index)
+        self.ref_tabs.insertTab(files_index, files_tab, "Files")
+        if current_index == files_index:
+            self.ref_tabs.setCurrentIndex(files_index)
+        if self._current_session is not None:
+            self._refresh_file_table()
+            self._set_file_controls_enabled(True)
+        else:
+            self._show_empty_file_preview("No file selected.")
+            self._set_file_controls_enabled(False)
+        if placeholder is not None:
+            placeholder.deleteLater()
+        self._files_tab_placeholder = None
+
+    def _build_files_pdf_preview(self) -> None:
+        if not self._files_tab_built or not hasattr(self, "files_pdf_page"):
+            return
+        if self.files_pdf_viewer is not None or not PDFIUM_VIEW_AVAILABLE:
+            return
+        pdf_layout = self.files_pdf_page.layout()
+        if pdf_layout is None:
+            return
+        placeholder = getattr(self, "files_pdf_loading_placeholder", None)
+        if placeholder is not None:
+            pdf_layout.removeWidget(placeholder)
+            placeholder.hide()
+            placeholder.deleteLater()
+            self.files_pdf_loading_placeholder = None
+        self.files_pdf_viewer = CharacterSheetPanel(self.files_pdf_page)
+        self.files_pdf_viewer.set_autosave_enabled(False)
+        pdf_layout.addWidget(self.files_pdf_viewer, 1)
 
     def _trigger_auto_save(self) -> None:
         if self._current_session:
@@ -2239,6 +2350,8 @@ class SessionCreatorWidget(QWidget):
         self._trigger_auto_save()
 
     def _set_file_controls_enabled(self, enabled: bool) -> None:
+        if not self._files_tab_built or not hasattr(self, "files_table"):
+            return
         self.files_table.setEnabled(enabled)
         self.add_file_btn.setEnabled(enabled)
         self.files_text_editor.setReadOnly(not enabled)
@@ -2248,6 +2361,8 @@ class SessionCreatorWidget(QWidget):
         self._update_file_action_states()
 
     def _update_file_action_states(self) -> None:
+        if not self._files_tab_built or not hasattr(self, "files_table"):
+            return
         enabled = bool(self._current_session and self.files_table.isEnabled())
         has_selection = self._current_attachment() is not None
         self.remove_file_btn.setEnabled(enabled and has_selection)
@@ -2348,15 +2463,22 @@ class SessionCreatorWidget(QWidget):
 
     def _on_reference_tab_changed(self, index: int) -> None:
         if not hasattr(self, "ref_tabs") or not hasattr(self, "files_edge_toggle_btn"):
+            if hasattr(self, "ref_tabs") and self.ref_tabs.tabText(index) == "Files":
+                self._build_files_tab_deferred()
             return
         is_files_tab = self.ref_tabs.tabText(index) == "Files"
         if is_files_tab:
+            if self._defer_files_tab and not self._files_tab_built:
+                self._build_files_tab_deferred()
+                return
             self._position_files_edge_toggle()
             self.files_edge_toggle_btn.show()
         else:
             self.files_edge_toggle_btn.hide()
 
     def _refresh_file_table(self, *, selected_attachment_id: Optional[str] = None) -> None:
+        if not self._files_tab_built or not hasattr(self, "files_table"):
+            return
         session = self._current_session
         self.files_table.blockSignals(True)
         self.files_table.setRowCount(0)
@@ -2411,6 +2533,8 @@ class SessionCreatorWidget(QWidget):
             break
 
     def _current_attachment(self) -> Optional[SessionAttachment]:
+        if not self._files_tab_built or not hasattr(self, "files_table"):
+            return None
         session = self._current_session
         if not session:
             return None
@@ -2426,6 +2550,8 @@ class SessionCreatorWidget(QWidget):
         return next((a for a in session.attachments if a.id == attachment_id), None)
 
     def _show_empty_file_preview(self, message: str) -> None:
+        if not self._files_tab_built or not hasattr(self, "files_preview_title"):
+            return
         self._active_text_attachment_id = None
         self.files_preview_title.setText("Select an attached file")
         self.files_empty_page.setText(message)
