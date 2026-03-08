@@ -1,5 +1,5 @@
 ## UI Guidelines
-Whenever new buttons are introduced. Inspect whether they are close to other buttons and if suitable, equalize the size between all buttons and align them if possible. If a button is next to a **small** other widget, it can make sense to for example adjust the height such that the button aligns with both edges of the widget (example: one line text input + a button right next to it -> button should have same height as text input box). Buttons that contain square icon should always be square as well unless otherwise specified. Also make sure buttons and widgets never overlap no matter the screen size.
+Whenever UI is changed, treat it as layout work, not just widget insertion. New widgets must fit the surrounding row/panel in size, alignment, spacing, and style. Adjacent controls should usually share the same outer height and aligned edges unless there is a clear reason not to. Reuse the local UI pattern instead of relying on default Qt sizing, and check that nothing looks tacked on, mismatched, cramped, or overlapping at any screen size. Buttons that contain square icon should always be square as well unless otherwise specified.
 
 ## Fallbacks and backwards compatability
 Unless specifically instructed there you shall **never** add backwards compatability - it just produces code bloat while this repo is in early dev. Also fallbacks should never be "silent", they must be seen somewhere, maybe not in the active frontend but terminal or logging outputs are suitable (prefer terminal).
@@ -12,4 +12,3 @@ For refactors, schema changes, storage format changes, or internal API cleanups:
 
 ## Other
 In case you get stuck somewhere, you can have a look at quirks.md it contains solutions to some reoccuring issues.
-

@@ -130,6 +130,27 @@ def test_inventory_and_equipment_changes_mark_character_dirty_indicator(tmp_path
     assert widget._header_name.text() == "Character: Hero One *"
 
 
+def test_inventory_edit_only_syncs_active_character_archive(tmp_path, qtbot, monkeypatch):
+    entries = _seed_character_entries(tmp_path, monkeypatch)
+
+    synced_names: list[str] = []
+
+    def _fake_sync_entry_archive(entry, *args, **kwargs):
+        synced_names.append(str(entry.name))
+        return True
+
+    monkeypatch.setattr(player_sheets, "sync_entry_archive", _fake_sync_entry_archive)
+
+    widget = PlayerSheetsWidget()
+    qtbot.addWidget(widget)
+    widget._sheet_list.setCurrentRow(0)
+
+    synced_names.clear()
+    widget._add_inventory_item("item-a")
+
+    assert synced_names == [str(entries[0].name)]
+
+
 def test_character_overflow_opens_linked_npc_picker(tmp_path, qtbot, monkeypatch):
     _seed_character_entries(tmp_path, monkeypatch)
     monkeypatch.setattr(

@@ -112,6 +112,7 @@ from dungeon_constants import (
     ROLE_LINKED_CHARACTER_ID,
     WALL_COLOR,
 )
+from character_sheet_stats import extract_character_stats_from_pdf
 from dungeon_states import (
     SelectState, FreeDrawState, DrawingRectState, DrawingEllipseState, 
     DrawingPolygonState, PlacingState, EraserState, FogState, EncounterPlacingState,
@@ -382,189 +383,7 @@ def _generate_probabilistic_unique_id(prefix: str) -> str:
 
 
 def _extract_character_stats_from_pdf(pdf_path: str) -> dict:
-    field_map = {
-        "name": ["CharacterName", "Character Name", "Character_Name", "Name"],
-        "strength": ["STR", "Strength", "Strength Score", "STR Score"],
-        "dexterity": ["DEX", "Dexterity", "Dexterity Score", "DEX Score"],
-        "constitution": ["CON", "Constitution", "Constitution Score", "CON Score"],
-        "intelligence": ["INT", "Intelligence", "Intelligence Score", "INT Score"],
-        "wisdom": ["WIS", "Wisdom", "Wisdom Score", "WIS Score"],
-        "charisma": ["CHA", "Charisma", "Charisma Score", "CHA Score"],
-        "ac": ["AC", "ArmorClass", "Armor Class", "Armour Class"],
-        "hp_max": ["HPMax", "HP Max", "HitPoints", "Hit Points", "MaxHP", "HPmax"],
-        "hp_current": ["HPCurrent", "CurrentHP", "Current Hit Points", "HP"],
-    }
-
-    def _parse_int(value: object) -> int | None:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        match = re.search(r"-?\d+", text)
-        if not match:
-            return None
-        try:
-            return int(match.group(0))
-        except (TypeError, ValueError):
-            return None
-
-    def _normalize_field_key(value: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
-
-    def _extract_candidates(values: dict[str, str], candidates: list[str]) -> str | None:
-        for candidate in candidates:
-            candidate_key = _normalize_field_key(candidate)
-            if not candidate_key:
-                continue
-            direct = values.get(candidate_key)
-            if direct:
-                return direct
-            for key, value in values.items():
-                if key.startswith(candidate_key):
-                    suffix = key[len(candidate_key) :]
-                    if not suffix or suffix.isdigit():
-                        return value
-        return None
-
-    def _extract_pdf_literal(value: bytes) -> str:
-        # Decode escaped PDF literal strings used in AcroForm /T and /V fields.
-        decoded = value.decode("latin-1", errors="ignore")
-        decoded = re.sub(
-            r"\\([0-7]{1,3})",
-            lambda match: chr(int(match.group(1), 8)),
-            decoded,
-        )
-        decoded = decoded.replace("\\n", "\n")
-        decoded = decoded.replace("\\r", "\r")
-        decoded = decoded.replace("\\t", "\t")
-        decoded = decoded.replace("\\b", "\b")
-        decoded = decoded.replace("\\f", "\f")
-        decoded = decoded.replace("\\(", "(")
-        decoded = decoded.replace("\\)", ")")
-        decoded = decoded.replace("\\\\", "\\")
-        return decoded.strip()
-
-    output = {
-        "name": None,
-        "strength": None,
-        "dexterity": None,
-        "constitution": None,
-        "intelligence": None,
-        "wisdom": None,
-        "charisma": None,
-        "ac": None,
-        "hp_max": None,
-        "hp_current": None,
-        "hp": None,
-    }
-
-    try:
-        from pypdf import PdfReader  # type: ignore
-    except Exception:
-        PdfReader = None  # type: ignore
-
-    if PdfReader is not None:
-        try:
-            reader = PdfReader(pdf_path)
-            fields = reader.get_fields() or {}
-            field_values: dict[str, str] = {}
-            for field_name, raw_field in fields.items():
-                if not isinstance(field_name, str):
-                    continue
-                raw_val = None
-                if isinstance(raw_field, dict):
-                    raw_val = raw_field.get("/V")
-                if raw_val is None:
-                    continue
-                clean = str(raw_val).strip()
-                if not clean:
-                    continue
-                field_values[_normalize_field_key(field_name)] = clean
-
-            for key, candidates in field_map.items():
-                clean = _extract_candidates(field_values, candidates)
-                if not clean:
-                    continue
-                output[key] = clean if key == "name" else _parse_int(clean)
-        except Exception:
-            pass
-
-    missing = [key for key, value in output.items() if value is None and key != "hp"]
-    if missing:
-        # Fallback for environments without pypdf: parse raw AcroForm tokens directly.
-        # This follows the same intent as tmp.py (AcroForm first, text fallback second).
-        try:
-            token_values: dict[str, str] = {}
-            raw_bytes = Path(pdf_path).read_bytes()
-            pattern = re.compile(
-                rb"/T\(((?:\\.|[^\\)])*)\)(?:(?!endobj).){0,1200}?/V\(((?:\\.|[^\\)])*)\)",
-                re.DOTALL,
-            )
-            for match in pattern.finditer(raw_bytes):
-                name = _extract_pdf_literal(match.group(1))
-                value = _extract_pdf_literal(match.group(2))
-                if not name or not value:
-                    continue
-                token_values[_normalize_field_key(name)] = value
-            for key in missing:
-                candidates = field_map.get(key)
-                if not candidates:
-                    continue
-                clean = _extract_candidates(token_values, candidates)
-                if not clean:
-                    continue
-                output[key] = clean if key == "name" else _parse_int(clean)
-        except Exception:
-            pass
-
-    missing = [key for key, value in output.items() if value is None]
-    if not [key for key in missing if key != "hp"]:
-        if output.get("hp") is None:
-            if isinstance(output.get("hp_max"), int):
-                output["hp"] = output.get("hp_max")
-            elif isinstance(output.get("hp_current"), int):
-                output["hp"] = output.get("hp_current")
-        return output
-
-    # Text fallback for non-acroform or partially-populated form PDFs.
-    try:
-        from pypdf import PdfReader  # type: ignore
-        reader = PdfReader(pdf_path)
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
-    except Exception:
-        return output
-
-    def _find(pattern: str) -> str | None:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            return None
-        return match.group(1).strip()
-
-    text_values = {
-        "name": _find(r"Character\s*Name\s*[:\s]+([^\n\r]+)"),
-        "strength": _find(r"\bSTR(?:ength)?(?:\s*Score)?\b\D{0,10}(\d{1,3})"),
-        "dexterity": _find(r"\bDEX(?:terity)?(?:\s*Score)?\b\D{0,10}(\d{1,3})"),
-        "constitution": _find(r"\bCON(?:stitution)?(?:\s*Score)?\b\D{0,10}(\d{1,3})"),
-        "intelligence": _find(r"\bINT(?:elligence)?(?:\s*Score)?\b\D{0,10}(\d{1,3})"),
-        "wisdom": _find(r"\bWIS(?:dom)?(?:\s*Score)?\b\D{0,10}(\d{1,3})"),
-        "charisma": _find(r"\bCHA(?:risma)?(?:\s*Score)?\b\D{0,10}(\d{1,3})"),
-        "ac": _find(r"\bAC\b\D{0,10}(\d{1,3})"),
-        "hp_max": _find(r"\bHP(?:\s*Max(?:imum)?)?\b\D{0,10}(\d{1,3})"),
-        "hp_current": _find(r"\bCurrent\s*Hit\s*Points?\b\D{0,10}(\d{1,3})"),
-    }
-    for key in missing:
-        candidate = text_values.get(key)
-        if candidate is None:
-            continue
-        if key == "name":
-            output[key] = candidate
-        else:
-            output[key] = _parse_int(candidate)
-    if output.get("hp") is None:
-        if isinstance(output.get("hp_max"), int):
-            output["hp"] = output.get("hp_max")
-        elif isinstance(output.get("hp_current"), int):
-            output["hp"] = output.get("hp_current")
-    return output
+    return extract_character_stats_from_pdf(pdf_path)
 
 
 def _serialize_path(path: QPainterPath) -> list[dict]:
@@ -4429,6 +4248,7 @@ class DungeonAppletWidget(QWidget):
         self._awaiting_player_snapshot: bool = False
         self._suppress_external_inventory_forward = False
         self._online_inventory_sync_fingerprints: dict[str, str] = {}
+        self._recent_local_character_sync_payloads_by_sheet_id: dict[str, dict] = {}
         self._approved_host_inventory_sync_characters: set[str] = set()
         self._pending_link_entity_requests: dict[str, dict] = {}
         self._pending_unlink_entity_requests: dict[str, dict] = {}
@@ -4822,6 +4642,7 @@ class DungeonAppletWidget(QWidget):
             from player_sheets import PLAYER_SHEET_EVENTS
 
             PLAYER_SHEET_EVENTS.inventorySaved.connect(self._on_external_character_inventory_saved)
+            PLAYER_SHEET_EVENTS.characterSyncReady.connect(self._on_external_character_sync_ready)
         except Exception:
             pass
 
@@ -5105,6 +4926,7 @@ class DungeonAppletWidget(QWidget):
             self._pending_player_state_update = None
             self._pending_player_state_update_request_id = ""
             self._online_inventory_sync_fingerprints.clear()
+            self._recent_local_character_sync_payloads_by_sheet_id.clear()
             self._approved_host_inventory_sync_characters.clear()
             self._pending_owned_linked_character_resolutions.clear()
             self._resolved_owned_linked_character_pull_signatures.clear()
@@ -7524,6 +7346,27 @@ class DungeonAppletWidget(QWidget):
             if focus_kind == kind and focus_key == key:
                 focus_target_edit = edit
 
+        def _build_initiative_commit_button(
+            parent: QWidget,
+            *,
+            edit: QLineEdit,
+            editable: bool,
+        ) -> QPushButton:
+            button = QPushButton("OK", parent)
+            button.setObjectName("InlinePrimaryButton")
+            button.setProperty("initiative_commit_button", True)
+            button.setProperty("initiative_kind", str(edit.property("initiative_kind") or ""))
+            button.setProperty("initiative_id", str(edit.property("initiative_id") or ""))
+            button.setEnabled(editable)
+            target_height = max(1, edit.sizeHint().height())
+            button.setFixedHeight(target_height)
+            button.setMinimumWidth(max(button.sizeHint().width(), edit.sizeHint().height()))
+            button.setStyleSheet(
+                f"QPushButton {{ min-height: 0px; max-height: {target_height}px; padding-top: 0px; padding-bottom: 0px; }}"
+            )
+            button.clicked.connect(lambda _checked=False, source=edit: self._commit_initiative_input(source))
+            return button
+
         player_entries = self._initiative_state.get("player_entries", {})
         displayed_player_rows = 0
         if isinstance(player_entries, dict):
@@ -7560,6 +7403,13 @@ class DungeonAppletWidget(QWidget):
                 if is_player and editable and first_editable_player_edit is None:
                     first_editable_player_edit = edit
                 row_layout.addWidget(edit)
+                row_layout.addWidget(
+                    _build_initiative_commit_button(
+                        row_widget,
+                        edit=edit,
+                        editable=editable,
+                    )
+                )
                 self._initiative_rows_layout.addWidget(row_widget)
 
         if is_dm:
@@ -7591,6 +7441,13 @@ class DungeonAppletWidget(QWidget):
                         editable=True,
                     )
                     row_layout.addWidget(edit)
+                    row_layout.addWidget(
+                        _build_initiative_commit_button(
+                            row_widget,
+                            edit=edit,
+                            editable=True,
+                        )
+                    )
                     self._initiative_rows_layout.addWidget(row_widget)
 
         self._initiative_rows_layout.addStretch(1)
@@ -7848,7 +7705,12 @@ class DungeonAppletWidget(QWidget):
             silent=silent,
         ) is not None
 
-    def _dispatch_player_link_character_request(self, request_payload: dict) -> bool:
+    def _dispatch_player_link_character_request(
+        self,
+        request_payload: dict,
+        *,
+        request_kind: str = "",
+    ) -> bool:
         payload = dict(request_payload) if isinstance(request_payload, dict) else {}
         request_id = self._dispatch_player_command_with_request_id(
             "link_character_entity",
@@ -7857,7 +7719,11 @@ class DungeonAppletWidget(QWidget):
         )
         if not request_id:
             return False
-        self._pending_link_entity_requests[request_id] = payload
+        pending_payload = dict(payload)
+        clean_request_kind = str(request_kind or "").strip()
+        if clean_request_kind:
+            pending_payload["_request_kind"] = clean_request_kind
+        self._pending_link_entity_requests[request_id] = pending_payload
         return True
 
     def _dispatch_player_unlink_character_request(self, request_payload: dict) -> bool:
@@ -13849,7 +13715,10 @@ class DungeonAppletWidget(QWidget):
             "archive_b64": archive_b64,
             "dungeon_id": str(dungeon_id or self._active_dungeon_id or ""),
         }
-        if not self._dispatch_player_link_character_request(request_payload):
+        if not self._dispatch_player_link_character_request(
+            request_payload,
+            request_kind="push_local_character",
+        ):
             return False, "Unable to request local character push."
         return True, "Requested local character push to the session."
 
@@ -14040,7 +13909,7 @@ class DungeonAppletWidget(QWidget):
         for entity_id, resolution_payload in list(self._pending_owned_linked_character_resolutions.items()):
             if self._has_pending_character_link_resolution_for_entity(entity_id):
                 continue
-            local_payload = self._resolve_local_sheet_sync_payload(
+            local_payload = self._resolve_local_sheet_sync_summary(
                 str(resolution_payload.get("character_id") or "").strip()
             )
             if self._local_sync_matches_host_resolution(local_payload, resolution_payload):
@@ -14281,6 +14150,36 @@ class DungeonAppletWidget(QWidget):
             "archive_b64": archive_b64,
         }
 
+    def _resolve_local_sheet_sync_summary(self, character_id: str) -> dict | None:
+        clean_character = str(character_id or "").strip()
+        if not clean_character:
+            return None
+        try:
+            import player_sheets as player_sheets_module
+        except Exception:
+            return None
+        summary_for_character_id = getattr(
+            player_sheets_module,
+            "local_character_sync_summary_for_character_id",
+            None,
+        )
+        if callable(summary_for_character_id):
+            try:
+                summary = summary_for_character_id(clean_character)
+            except Exception:
+                summary = None
+            if isinstance(summary, dict):
+                return {
+                    "sheet_id": str(summary.get("sheet_id") or "").strip(),
+                    "sheet_name": str(summary.get("sheet_name") or clean_character).strip() or clean_character,
+                    "character_id": str(summary.get("character_id") or clean_character).strip() or clean_character,
+                    "save_revision": int(summary.get("save_revision") or 0),
+                    "last_saved_at": str(summary.get("last_saved_at") or "").strip(),
+                    "content_hash": str(summary.get("content_hash") or "").strip(),
+                    "inventory": normalize_inventory_payload(summary.get("inventory") or {}),
+                }
+        return self._resolve_local_sheet_sync_payload(clean_character)
+
     def _on_client_snapshot_received(self, snapshot: dict) -> None:
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
@@ -14331,6 +14230,11 @@ class DungeonAppletWidget(QWidget):
                         "sheet_name": sheet_name,
                         "entity_id": str(item_data.get("entity_id") or "").strip(),
                         "dungeon_id": str(dungeon.get("id") or "").strip(),
+                        "authority_player_id": str(
+                            item_data.get("linked_authority_player_id")
+                            or item_data.get("owner_player_id")
+                            or ""
+                        ).strip(),
                         "save_revision": host_save_revision,
                         "last_saved_at": str(item_data.get("linked_last_saved_at") or "").strip(),
                         "content_hash": str(item_data.get("linked_content_hash") or "").strip(),
@@ -14356,8 +14260,16 @@ class DungeonAppletWidget(QWidget):
                 host_content_hash = str(sync_payload.get("content_hash") or "").strip()
                 entity_id = str(sync_payload.get("entity_id") or "").strip()
                 dungeon_id = str(sync_payload.get("dungeon_id") or "").strip()
-                local_payload = self._resolve_local_sheet_sync_payload(character_id)
+                authority_player_id = str(sync_payload.get("authority_player_id") or "").strip()
+                local_payload = self._resolve_local_sheet_sync_summary(character_id)
+                local_player_is_authority = bool(
+                    local_player_id
+                    and authority_player_id
+                    and authority_player_id == local_player_id
+                )
                 if self._local_sync_matches_host_resolution(local_payload, sync_payload):
+                    if local_player_is_authority and self._local_character_sheet_exists(character_id):
+                        self._approved_host_inventory_sync_characters.add(character_id)
                     if entity_id:
                         self._resolved_owned_linked_character_pull_signatures[entity_id] = (
                             self._owned_linked_character_resolution_signature(sync_payload)
@@ -14371,6 +14283,18 @@ class DungeonAppletWidget(QWidget):
                     and self._resolved_owned_linked_character_pull_signatures.get(entity_id, "")
                     == resolution_signature
                 ):
+                    continue
+                if local_player_is_authority and isinstance(local_payload, dict):
+                    ok, message = self._request_push_local_character_link(
+                        character_id=character_id,
+                        entity_id=entity_id,
+                        dungeon_id=dungeon_id,
+                        fallback_sheet_id=sheet_id,
+                        fallback_sheet_name=sheet_name,
+                    )
+                    if message:
+                        level = "[INFO]" if ok else "[WARN]"
+                        self._append_server_log(f"{level} {message}")
                     continue
                 if _in_test_env():
                     resolution_action = self._prompt_owned_linked_character_resolution(
@@ -14545,7 +14469,10 @@ class DungeonAppletWidget(QWidget):
                 skip_reload = False
                 if current_active == target_id and current_players == preferred_players:
                     try:
-                        skip_reload = self._serialize_scene() == target_state
+                        skip_reload = (
+                            self._scene_signature(self._serialize_scene())
+                            == self._scene_signature(target_state)
+                        )
                     except Exception:
                         skip_reload = False
                 self._dungeons = dungeons
@@ -14629,6 +14556,11 @@ class DungeonAppletWidget(QWidget):
                     if request_id
                     else None
                 )
+                request_kind = (
+                    str(pending_request.get("_request_kind") or "").strip()
+                    if isinstance(pending_request, dict)
+                    else ""
+                )
                 entity_id = str(data.get("entity_id") or "").strip()
                 if not entity_id and isinstance(pending_request, dict):
                     entity_id = str(pending_request.get("entity_id") or "").strip()
@@ -14640,13 +14572,19 @@ class DungeonAppletWidget(QWidget):
                     linked_character_id = str(pending_request.get("character_id") or "").strip()
                 if linked_character_id:
                     self._approved_host_inventory_sync_characters.add(linked_character_id)
+                sheet_name = str(data.get("sheet_name") or "").strip()
+                if not sheet_name and isinstance(pending_request, dict):
+                    sheet_name = str(
+                        pending_request.get("sheet_name")
+                        or pending_request.get("sheet_id")
+                        or ""
+                    ).strip()
                 if isinstance(target_entity, EntityItem):
                     sheet_id = str(data.get("sheet_id") or "").strip()
                     if not sheet_id and isinstance(pending_request, dict):
                         sheet_id = str(pending_request.get("sheet_id") or "").strip()
-                    sheet_name = str(data.get("sheet_name") or "").strip()
-                    if not sheet_name and isinstance(pending_request, dict):
-                        sheet_name = str(pending_request.get("sheet_name") or sheet_id).strip()
+                    if not sheet_name:
+                        sheet_name = sheet_id
                     linked_inventory = data.get("inventory")
                     if not isinstance(linked_inventory, dict) and isinstance(pending_request, dict):
                         linked_inventory = pending_request.get("inventory")
@@ -14671,6 +14609,11 @@ class DungeonAppletWidget(QWidget):
                         self.inspector.set_linked_character_info(sheet_name)
                         self.inspector.set_entity(target_entity)
                     self._position_floating_overlays()
+                if request_kind == "push_local_character":
+                    label = f" for {sheet_name}" if sheet_name else ""
+                    self._append_server_log(
+                        f"[INFO] Local character push to the session completed{label}."
+                    )
             if action == "unlink_character_entity":
                 pending_request = (
                     self._pending_unlink_entity_requests.pop(request_id, None)
@@ -16368,6 +16311,43 @@ class DungeonAppletWidget(QWidget):
 
         return updated
 
+    def _on_external_character_sync_ready(self, sync_payload: dict) -> None:
+        if not isinstance(sync_payload, dict):
+            return
+        clean_sheet = str(sync_payload.get("sheet_id") or "").strip()
+        clean_character = str(sync_payload.get("character_id") or "").strip()
+        inventory_payload = sync_payload.get("inventory")
+        if not clean_sheet or not clean_character or not isinstance(inventory_payload, dict):
+            return
+        cached_payload = dict(sync_payload)
+        cached_payload["sheet_id"] = clean_sheet
+        cached_payload["character_id"] = clean_character
+        cached_payload["inventory"] = normalize_inventory_payload(inventory_payload)
+        self._recent_local_character_sync_payloads_by_sheet_id[clean_sheet] = cached_payload
+
+    def _consume_recent_local_character_sync_payload(
+        self,
+        *,
+        sheet_id: str,
+        inventory_payload: dict,
+    ) -> dict | None:
+        clean_sheet = str(sheet_id or "").strip()
+        if not clean_sheet:
+            return None
+        cached_payload = self._recent_local_character_sync_payloads_by_sheet_id.get(clean_sheet)
+        if not isinstance(cached_payload, dict):
+            return None
+        cached_inventory = normalize_inventory_payload(cached_payload.get("inventory") or {})
+        incoming_inventory = normalize_inventory_payload(
+            inventory_payload if isinstance(inventory_payload, dict) else {}
+        )
+        if self._inventory_payload_fingerprint(cached_inventory) != self._inventory_payload_fingerprint(
+            incoming_inventory
+        ):
+            return None
+        self._recent_local_character_sync_payloads_by_sheet_id.pop(clean_sheet, None)
+        return dict(cached_payload)
+
     def _dispatch_online_character_inventory_sync(
         self,
         sheet_id: str,
@@ -16382,6 +16362,36 @@ class DungeonAppletWidget(QWidget):
         payload = normalize_inventory_payload(
             inventory_payload if isinstance(inventory_payload, dict) else {}
         )
+        cached_sync_payload = self._consume_recent_local_character_sync_payload(
+            sheet_id=clean_sheet,
+            inventory_payload=payload,
+        )
+        if isinstance(cached_sync_payload, dict):
+            character_id = str(cached_sync_payload.get("character_id") or "").strip()
+            if self._online_mode != ONLINE_MODE_PLAYER:
+                return None, character_id
+            if not character_id:
+                return None, ""
+            sync_request = {
+                "character_id": character_id,
+                "sheet_id": str(cached_sync_payload.get("sheet_id") or clean_sheet).strip() or clean_sheet,
+                "save_revision": int(cached_sync_payload.get("save_revision") or 0),
+                "last_saved_at": str(cached_sync_payload.get("last_saved_at") or ""),
+                "content_hash": str(cached_sync_payload.get("content_hash") or ""),
+                "inventory": payload,
+                "stats": dict(cached_sync_payload.get("stats") or {}),
+                "archive_b64": str(cached_sync_payload.get("archive_b64") or ""),
+                "dungeon_id": str(self._active_dungeon_id or ""),
+            }
+            clean_claim_id = str(claim_id or "").strip()
+            if clean_claim_id:
+                sync_request["claim_id"] = clean_claim_id
+            request_id = self._dispatch_player_command_with_request_id(
+                "sync_character_inventory",
+                sync_request,
+                silent=True,
+            )
+            return request_id, character_id
         try:
             from player_sheets import character_id_for_sheet_id, inventory_payload_for_sheet_id
         except Exception:
@@ -17022,6 +17032,70 @@ class DungeonAppletWidget(QWidget):
             return 1.0
         return dpr
 
+    def _serialize_scene_for_player_state_update(self) -> dict:
+        clean_player = str(self._local_player_id or "").strip()
+        if not clean_player:
+            return {"items": [], "fog": {"path": []}}
+        items_data: list[dict] = []
+        for item in self.canvas.scene().items():
+            if isinstance(item, EntityItem):
+                if str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip() != clean_player:
+                    continue
+                entity_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
+                if not entity_id:
+                    entity_id = uuid.uuid4().hex
+                    item.setData(ROLE_ENTITY_ID, entity_id)
+                items_data.append(
+                    {
+                        "type": "entity",
+                        "entity_id": entity_id,
+                        "owner_player_id": clean_player,
+                        "pos": [float(item.pos().x()), float(item.pos().y())],
+                        "color": item._color.name(),
+                        "hp": int(getattr(item, "hp", 0) or 0),
+                        "max_hp": int(getattr(item, "_max_hp", 0) or 0),
+                        "ac": int(getattr(item, "ac", 0) or 0),
+                        "strength": int(getattr(item, "strength", 10) or 10),
+                        "dexterity": int(getattr(item, "dexterity", 10) or 10),
+                        "constitution": int(getattr(item, "constitution", 10) or 10),
+                        "intelligence": int(getattr(item, "intelligence", 10) or 10),
+                        "wisdom": int(getattr(item, "wisdom", 10) or 10),
+                        "charisma": int(getattr(item, "charisma", 10) or 10),
+                        "actions": str(getattr(item, "actions", "") or ""),
+                        "description": str(getattr(item, "description", "") or ""),
+                        "label": str(item.data(ROLE_LABEL) or ""),
+                        "layer": item.data(ROLE_LAYER) or LAYER_FG,
+                        "z": float(item.zValue()),
+                        "size_w_cells": int(getattr(item, "size_w_cells", 1) or 1),
+                        "size_h_cells": int(getattr(item, "size_h_cells", 1) or 1),
+                        "lock_square": bool(getattr(item, "lock_square", True)),
+                    }
+                )
+                continue
+            if not (isinstance(item, QGraphicsPathItem) and item.data(ROLE_KIND) == "stroke"):
+                continue
+            if str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip() != clean_player:
+                continue
+            pen = item.pen()
+            stroke_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
+            if not stroke_id:
+                stroke_id = uuid.uuid4().hex
+                item.setData(ROLE_ENTITY_ID, stroke_id)
+            items_data.append(
+                {
+                    "type": "stroke",
+                    "stroke_id": stroke_id,
+                    "owner_player_id": clean_player,
+                    "pos": [float(item.pos().x()), float(item.pos().y())],
+                    "path": _serialize_path(item.path()),
+                    "pen_color": pen.color().name() or WALL_COLOR,
+                    "pen_width": float(pen.widthF() or WALL_WIDTH),
+                    "layer": item.data(ROLE_LAYER) or LAYER_FG,
+                    "z": float(item.zValue()),
+                }
+            )
+        return {"items": items_data, "fog": {"path": []}}
+
     def _on_canvas_changed(self) -> None:
         if self._suppress_change_tracking:
             return
@@ -17043,7 +17117,7 @@ class DungeonAppletWidget(QWidget):
         ):
             self._apply_online_permissions()
             state_update_payload = {
-                "state": self._serialize_scene(),
+                "state": self._serialize_scene_for_player_state_update(),
                 "dungeon_id": self._active_dungeon_id,
             }
             self._send_player_state_update(state_update_payload)

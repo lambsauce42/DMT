@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -35,6 +36,7 @@ from character_archive import (
     read_character_meta,
     write_character_archive,
 )
+from character_sheet_stats import extract_character_stats_from_pdf
 from unique_ids import generate_named_object_id
 
 from PySide6.QtCore import (
@@ -661,6 +663,7 @@ def linked_character_item_cache_dir(sheet_id: str) -> Path:
 
 class PlayerSheetEvents(QObject):
     inventorySaved = Signal(str, dict)
+    characterSyncReady = Signal(dict)
 
 
 PLAYER_SHEET_EVENTS = PlayerSheetEvents()
@@ -2148,23 +2151,37 @@ def load_entries_from_storage() -> List[PlayerSheetEntry]:
     return entries
 
 
-def _storage_payload_from_entries(entries: List[PlayerSheetEntry]) -> list[dict]:
+def _storage_payload_from_entries(
+    entries: List[PlayerSheetEntry],
+    *,
+    sync_entries: Sequence[PlayerSheetEntry] | None = None,
+) -> list[dict]:
     payload: list[dict] = []
+    sync_target_ids = (
+        None
+        if sync_entries is None
+        else {id(entry) for entry in sync_entries}
+    )
     for entry in entries:
-        ensure_entry_archive(entry)
+        if sync_target_ids is None or id(entry) in sync_target_ids:
+            ensure_entry_archive(entry)
         archive_entry = _entry_from_archive(_entry_archive_path(entry))
         payload.append(entry_to_dict(archive_entry or entry))
     return payload
 
 
-def save_entries_to_storage(entries: List[PlayerSheetEntry]) -> None:
+def save_entries_to_storage(
+    entries: List[PlayerSheetEntry],
+    *,
+    sync_entries: Sequence[PlayerSheetEntry] | None = None,
+) -> None:
     """Persist a cache mirror of the authoritative character archives."""
     for entry in entries:
         _ensure_entry_sheet_id(entry)
         _ensure_entry_character_id(entry)
     path = player_sheets_storage_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _storage_payload_from_entries(entries)
+    payload = _storage_payload_from_entries(entries, sync_entries=sync_entries)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -2229,6 +2246,67 @@ def archive_bytes_for_character_id(character_id: str) -> Optional[bytes]:
         return None
     ensure_entry_archive(entry)
     return _read_archive_bytes_for_entry(entry)
+
+
+def local_character_sync_payload_for_entry(
+    entry: PlayerSheetEntry,
+    *,
+    inventory_payload: dict | None = None,
+    pdf_path: str = "",
+    archive_bytes: bytes | None = None,
+) -> dict:
+    clean_sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+    clean_character_id = str(character_id_for_entry(entry) or "").strip()
+    clean_sheet_name = str(getattr(entry, "name", "") or clean_sheet_id or clean_character_id).strip()
+    normalized_inventory = normalize_inventory_payload(
+        inventory_payload if isinstance(inventory_payload, dict) else _entry_inventory_payload(entry)
+    )
+    resolved_pdf_path = str(pdf_path or getattr(entry, "pdf_path", "") or "").strip()
+    stats = {}
+    if resolved_pdf_path and Path(resolved_pdf_path).exists():
+        stats = extract_character_stats_from_pdf(resolved_pdf_path)
+    if not isinstance(stats, dict):
+        stats = {}
+    if not str(stats.get("name") or "").strip():
+        stats["name"] = clean_sheet_name or clean_character_id or clean_sheet_id
+    resolved_archive_bytes = archive_bytes
+    if resolved_archive_bytes is None:
+        resolved_archive_bytes = _read_archive_bytes_for_entry(entry)
+    archive_b64 = (
+        base64.b64encode(resolved_archive_bytes).decode("ascii")
+        if resolved_archive_bytes
+        else ""
+    )
+    return {
+        "sheet_id": clean_sheet_id,
+        "sheet_name": clean_sheet_name or clean_sheet_id or clean_character_id,
+        "character_id": clean_character_id,
+        "save_revision": int(getattr(entry, "save_revision", 0) or 0),
+        "last_saved_at": str(getattr(entry, "last_saved_at", "") or "").strip(),
+        "content_hash": str(getattr(entry, "content_hash", "") or "").strip(),
+        "inventory": normalized_inventory,
+        "stats": stats,
+        "archive_b64": archive_b64,
+        "pdf_path": resolved_pdf_path,
+    }
+
+
+def local_character_sync_summary_for_character_id(character_id: str) -> dict | None:
+    entry = entry_for_character_id(character_id)
+    if entry is None:
+        return None
+    clean_sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+    clean_character_id = str(character_id_for_entry(entry) or "").strip()
+    clean_sheet_name = str(getattr(entry, "name", "") or clean_sheet_id or clean_character_id).strip()
+    return {
+        "sheet_id": clean_sheet_id,
+        "sheet_name": clean_sheet_name or clean_sheet_id or clean_character_id,
+        "character_id": clean_character_id,
+        "save_revision": int(getattr(entry, "save_revision", 0) or 0),
+        "last_saved_at": str(getattr(entry, "last_saved_at", "") or "").strip(),
+        "content_hash": str(getattr(entry, "content_hash", "") or "").strip(),
+        "inventory": _entry_inventory_payload(entry),
+    }
 
 
 def cleanup_managed_linked_entries(
@@ -5122,10 +5200,14 @@ class PlayerSheetsWidget(QWidget):
     def _load_entries(self) -> List[PlayerSheetEntry]:
         return load_entries_from_storage()
 
-    def _save_entries(self) -> None:
-        for entry in self._manager.entries:
+    def _save_entries(
+        self,
+        *,
+        sync_entries: Sequence[PlayerSheetEntry] | None = None,
+    ) -> None:
+        for entry in sync_entries or ():
             sync_entry_archive(entry)
-        save_entries_to_storage(self._manager.entries)
+        save_entries_to_storage(self._manager.entries, sync_entries=())
 
     def _refresh_sheet_unsaved_indicator(self) -> None:
         self._sheet_unsaved = bool(self._sheet_panel_unsaved or self._sheet_data_unsaved)
@@ -5637,7 +5719,7 @@ class PlayerSheetsWidget(QWidget):
             self._remove_inventory_item_by_index(item_id, source_index)
         else:
             return
-        self._save_entries()
+        self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
         self._set_equipment_selection(slot_id)
@@ -5651,7 +5733,7 @@ class PlayerSheetsWidget(QWidget):
             return
         self._current_entry.inventory.append(item_id)
         self._current_entry.equipment[source_slot] = None
-        self._save_entries()
+        self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
         self._clear_equipment_selection()
@@ -5871,7 +5953,7 @@ class PlayerSheetsWidget(QWidget):
             self._current_entry.silver = value
         elif field == "copper":
             self._current_entry.copper = value
-        self._save_entries()
+        self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
 
     def _open_inventory_picker(self) -> None:
@@ -5903,7 +5985,7 @@ class PlayerSheetsWidget(QWidget):
         if not self._current_entry:
             return
         self._current_entry.inventory.append(item_id)
-        self._save_entries()
+        self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
         if self._inventory_list.count() > 0:
@@ -5917,7 +5999,7 @@ class PlayerSheetsWidget(QWidget):
         ):
             return
         self._current_entry.inventory_notes = self._inventory_notepad.toPlainText()
-        self._save_entries()
+        self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
 
     def _remove_inventory_item(self) -> None:
@@ -5930,7 +6012,7 @@ class PlayerSheetsWidget(QWidget):
                 QMessageBox.information(self, "No Selection", "Select an equipment slot first.")
                 return
             self._current_entry.equipment[slot_id] = None
-            self._save_entries()
+            self._save_entries(sync_entries=[self._current_entry])
             self._mark_current_sheet_data_dirty()
             self._set_inventory(self._current_entry)
             self._clear_equipment_selection()
@@ -5956,7 +6038,7 @@ class PlayerSheetsWidget(QWidget):
             if item_id:
                 inventory.append(item_id)
         self._current_entry.inventory = inventory
-        self._save_entries()
+        self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
 
@@ -6290,18 +6372,29 @@ class PlayerSheetsWidget(QWidget):
             QMessageBox.information(self, "No Selection", "Select a sheet to save.")
             return
         current_pdf_path: Optional[str] = None
+        saved_archive_bytes: bytes | None = None
         if self._sheet_panel is not None:
             self._sheet_panel.save_current()
             current_pdf_path = self._sheet_panel.current_path
         if current_pdf_path:
             self._current_entry.pdf_path = str(current_pdf_path)
             sync_entry_archive(self._current_entry, pdf_source=current_pdf_path)
+            saved_archive_bytes = _read_archive_bytes_for_entry(self._current_entry)
         self._save_entries()
         self._set_sheet_data_unsaved(False)
         if self._sheet_panel is None or not self._sheet_panel.is_modified():
             self._set_sheet_panel_unsaved(False)
         sheet_id = sheet_id_for_entry(self._current_entry)
-        PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id, _entry_inventory_payload(self._current_entry))
+        inventory_payload = _entry_inventory_payload(self._current_entry)
+        PLAYER_SHEET_EVENTS.characterSyncReady.emit(
+            local_character_sync_payload_for_entry(
+                self._current_entry,
+                inventory_payload=inventory_payload,
+                pdf_path=str(current_pdf_path or self._current_entry.pdf_path or ""),
+                archive_bytes=saved_archive_bytes,
+            )
+        )
+        PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id, inventory_payload)
 
     def _confirm_unsaved_before_destructive(self, action_name: str) -> bool:
         if self._sheet_panel is None or not self._sheet_panel.is_modified():
@@ -6867,6 +6960,7 @@ class PlayerSheetsWidget(QWidget):
             if not entry:
                 return
             self._manager.add_sheet(entry)
+            ensure_entry_archive(entry)
             self._save_entries()
             self._apply_filters()
 

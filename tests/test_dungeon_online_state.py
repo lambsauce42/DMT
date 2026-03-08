@@ -240,6 +240,176 @@ def test_spawn_ping_command_pushes_without_error(dungeon_widget):
     assert dungeon_widget.canvas.undo_stack.index() == 1
 
 
+def test_player_inventory_sync_uses_recent_character_sync_payload_cache(dungeon_widget, monkeypatch):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._active_dungeon_id = "d1"
+
+    sent: dict[str, object] = {}
+
+    def _fake_dispatch(action, payload, *, silent=False):
+        sent["action"] = action
+        sent["payload"] = dict(payload)
+        sent["silent"] = silent
+        return "req-1"
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_dispatch_player_command_with_request_id",
+        _fake_dispatch,
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda _character_id: (_ for _ in ()).throw(AssertionError("slow sync path should be bypassed")),
+    )
+
+    inventory_payload = {"inventory": [{"item_id": "item-a", "quantity": 1}]}
+    dungeon_widget._on_external_character_sync_ready(
+        {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": "character-1",
+            "save_revision": 7,
+            "last_saved_at": "2026-03-08T10:11:12+00:00",
+            "content_hash": "hash-123",
+            "inventory": inventory_payload,
+            "stats": {"name": "Hero", "strength": 14},
+            "archive_b64": "YXJjaGl2ZQ==",
+        }
+    )
+
+    request_id, character_id = dungeon_widget._dispatch_online_character_inventory_sync(
+        "sheet-1",
+        inventory_payload,
+    )
+
+    assert request_id == "req-1"
+    assert character_id == "character-1"
+    assert sent["action"] == "sync_character_inventory"
+    assert sent["silent"] is True
+    assert sent["payload"] == {
+        "character_id": "character-1",
+        "sheet_id": "sheet-1",
+        "save_revision": 7,
+        "last_saved_at": "2026-03-08T10:11:12+00:00",
+        "content_hash": "hash-123",
+        "inventory": {"inventory": [{"item_id": "item-a", "quantity": 1}]},
+        "stats": {"name": "Hero", "strength": 14},
+        "archive_b64": "YXJjaGl2ZQ==",
+        "dungeon_id": "d1",
+    }
+
+
+def test_player_state_update_omits_linked_character_payloads_for_owned_entities(dungeon_widget):
+    dungeon_widget._local_player_id = "player-1"
+
+    owned = EntityItem(QPointF(25, 35))
+    owned.setData(ROLE_ENTITY_ID, "entity-owned")
+    owned.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    owned.setData(ROLE_LABEL, "Owned")
+    owned.setData(ROLE_LINKED_SHEET_ID, "sheet-1")
+    owned.setData(ROLE_LINKED_SHEET_NAME, "Hero")
+    owned.setData(ROLE_LINKED_CHARACTER_ID, "character-1")
+    owned.linked_inventory = {"inventory": [{"item_id": "item-a", "quantity": 1}]}
+    owned.linked_sheet_archive_b64 = "very-large-archive-payload"
+    dungeon_widget.canvas.scene().addItem(owned)
+
+    other = EntityItem(QPointF(50, 60))
+    other.setData(ROLE_ENTITY_ID, "entity-other")
+    other.setData(ROLE_OWNER_PLAYER_ID, "player-2")
+    dungeon_widget.canvas.scene().addItem(other)
+
+    state = dungeon_widget._serialize_scene_for_player_state_update()
+
+    assert state["fog"] == {"path": []}
+    assert len(state["items"]) == 1
+    serialized = state["items"][0]
+    assert serialized["entity_id"] == "entity-owned"
+    assert serialized["owner_player_id"] == "player-1"
+    assert "linked_inventory" not in serialized
+    assert "linked_sheet_archive_b64" not in serialized
+
+
+def test_player_snapshot_uses_local_sync_summary_for_owned_character_resolution(
+    dungeon_widget,
+    monkeypatch,
+):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._players_dungeon_id = "d1"
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda _character_id: (_ for _ in ()).throw(AssertionError("full sync payload path should not be used")),
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_summary",
+        lambda _character_id: {
+            "sheet_id": "sheet-local",
+            "sheet_name": "Local Hero",
+            "character_id": "character-1",
+            "save_revision": 0,
+            "last_saved_at": "",
+            "content_hash": "",
+            "inventory": {"inventory": []},
+        },
+    )
+    queued: list[dict] = []
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_queue_owned_linked_character_resolution",
+        lambda payload: queued.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_has_pending_character_link_resolution_for_entity",
+        lambda _entity_id: False,
+    )
+
+    snapshot = {
+        "collection_name": "Collection",
+        "collection_id": "collection-1",
+        "players": {"player-1": "Scout"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Dungeon",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-1",
+                            "linked_sheet_id": "sheet-host",
+                            "linked_sheet_name": "Host Hero",
+                            "linked_character_id": "character-1",
+                            "linked_save_revision": 2,
+                            "linked_last_saved_at": "2026-03-08T12:00:00+00:00",
+                            "linked_content_hash": "host-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-a", "quantity": 1}]},
+                            "linked_sheet_archive_b64": "YXJjaGl2ZQ==",
+                            "pos": [0.0, 0.0],
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert len(queued) == 1
+    assert queued[0]["entity_id"] == "entity-1"
+    assert queued[0]["character_id"] == "character-1"
+    assert queued[0]["local_exists"] is True
+
+
 def test_host_mode_keeps_player_vision_toggle_available(dungeon_widget):
     dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
 
@@ -3317,6 +3487,37 @@ def test_client_failed_command_result_without_action_clears_pending_requests(dun
     assert dungeon_widget._pending_add_loot_from_inventory_requests == {}
 
 
+def test_client_push_local_character_link_success_logs_completion(monkeypatch, dungeon_widget):
+    log_messages = []
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_append_server_log",
+        lambda message: log_messages.append(message),
+    )
+    dungeon_widget._pending_link_entity_requests["link-1"] = {
+        "entity_id": "entity-1",
+        "sheet_name": "Alice",
+        "_request_kind": "push_local_character",
+    }
+
+    dungeon_widget._on_client_command_result(
+        {
+            "ok": True,
+            "request_id": "link-1",
+            "data": {
+                "action": "link_character_entity",
+                "entity_id": "entity-1",
+                "character_id": "character-1",
+            },
+        }
+    )
+
+    assert dungeon_widget._pending_link_entity_requests == {}
+    assert log_messages == [
+        "[INFO] Local character push to the session completed for Alice."
+    ]
+
+
 def test_host_claim_loot_reserves_entries_until_finalize(dungeon_widget):
     class _HostStub:
         def __init__(self):
@@ -5778,6 +5979,111 @@ def test_player_initiative_enter_confirms_without_focus_loss(dungeon_widget, qtb
     assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 23
 
 
+def test_player_initiative_ok_button_confirms_value(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    snapshot = {
+        "players": {"player-1": "Alice"},
+        "scene": {
+            "items": [
+                {
+                    "type": "entity",
+                    "pos": [8.0, 8.0],
+                    "entity_id": "e1",
+                    "label": "Wolf",
+                    "owner_player_id": "player-1",
+                }
+            ],
+            "fog": {"path": []},
+        },
+        "initiative_state": {
+            "active": True,
+            "collapsed": False,
+            "player_entries": {
+                "player-1:e1": {
+                    "player_id": "player-1",
+                    "entity_id": "e1",
+                    "name": "Alice - Wolf",
+                    "initiative": None,
+                }
+            },
+            "entity_entries": {},
+        },
+    }
+    dungeon_widget._on_client_snapshot_received(snapshot)
+    QApplication.processEvents()
+
+    edits = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QLineEdit)
+        if str(candidate.property("initiative_kind") or "") == "player"
+        and str(candidate.property("initiative_id") or "") == "player-1:e1"
+    ]
+    assert edits
+    edit = edits[-1]
+    edit.setText("17")
+    buttons = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QPushButton)
+        if bool(candidate.property("initiative_commit_button"))
+        and str(candidate.property("initiative_kind") or "") == "player"
+        and str(candidate.property("initiative_id") or "") == "player-1:e1"
+    ]
+    assert buttons
+    assert buttons[-1].height() == edit.height()
+
+    qtbot.mouseClick(buttons[-1], Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 17
+
+
+def test_dm_initiative_ok_button_confirms_player_row_value(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._initiative_state = {
+        "active": True,
+        "collapsed": False,
+        "player_entries": {
+            "player-1:e1": {
+                "player_id": "player-1",
+                "entity_id": "e1",
+                "name": "Alice - Wolf",
+                "initiative": None,
+            }
+        },
+        "entity_entries": {},
+    }
+    dungeon_widget._render_initiative_overlay()
+    QApplication.processEvents()
+
+    edits = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QLineEdit)
+        if str(candidate.property("initiative_kind") or "") == "player"
+        and str(candidate.property("initiative_id") or "") == "player-1:e1"
+    ]
+    assert edits
+    edit = edits[-1]
+    edit.setText("19")
+    buttons = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QPushButton)
+        if bool(candidate.property("initiative_commit_button"))
+        and str(candidate.property("initiative_kind") or "") == "player"
+        and str(candidate.property("initiative_id") or "") == "player-1:e1"
+    ]
+    assert buttons
+
+    qtbot.mouseClick(buttons[-1], Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 19
+
+
 def test_player_mode_hides_initiative_reopen_button(dungeon_widget):
     dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
     assert dungeon_widget._initiative_reopen_btn.isHidden()
@@ -7329,6 +7635,88 @@ def test_snapshot_pull_defaults_to_backing_up_existing_local_character(
     assert len(sync_calls) == 1
     _args, kwargs = sync_calls[0]
     assert kwargs["backup_existing_local_entry"] is True
+
+
+def test_snapshot_owned_authoritative_character_repushes_local_state_without_prompt(
+    dungeon_widget, monkeypatch
+):
+    push_requests = []
+    prompt_calls = []
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = types.SimpleNamespace(
+        send_command=lambda *_args, **_kwargs: True,
+        disconnect=lambda: None,
+    )
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_summary",
+        lambda character_id: {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": character_id,
+            "save_revision": 6,
+            "last_saved_at": "2026-03-08T12:30:00Z",
+            "content_hash": "local-newer-hash",
+            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+        },
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_request_push_local_character_link",
+        lambda **kwargs: push_requests.append(dict(kwargs)) or (True, "Requested local character push to the session."),
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_owned_linked_character_resolution",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or "pull",
+    )
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-local",
+                            "linked_sheet_id": "sheet-1",
+                            "linked_sheet_name": "Hero",
+                            "linked_character_id": "character-1",
+                            "linked_authority_player_id": "player-local",
+                            "linked_save_revision": 5,
+                            "linked_last_saved_at": "2026-03-08T12:00:00Z",
+                            "linked_content_hash": "host-stale-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                            "linked_sheet_archive_b64": _valid_archive_b64(),
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert len(push_requests) == 1
+    assert push_requests[0] == {
+        "character_id": "character-1",
+        "entity_id": "entity-1",
+        "dungeon_id": "d1",
+        "fallback_sheet_id": "sheet-1",
+        "fallback_sheet_name": "Hero",
+    }
+    assert prompt_calls == []
 
 
 def test_sync_local_sheet_inventory_does_not_map_character_id_as_sheet_id(dungeon_widget, monkeypatch):

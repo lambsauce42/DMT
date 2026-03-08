@@ -3,7 +3,7 @@ import sys
 import json
 
 import pytest
-from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QLineEdit, QPushButton, QWidget
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -73,6 +73,27 @@ def test_join_online_builds_online_join_applet(monkeypatch, qapp):
     assert applet["online"]["host_ip"] == "192.168.1.10"
     assert applet["online"]["port"] == 8765
     assert applet["online"]["player_name"] == "Mira"
+
+
+def test_join_online_prompt_prefills_last_saved_player_name(monkeypatch, qapp, tmp_path):
+    monkeypatch.setattr("app.dnd_saves_dir", lambda: tmp_path)
+    settings_dir = tmp_path / "settings"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    (settings_dir / "dungeon_profile.json").write_text(
+        json.dumps({"last_player_name": "Scout"}),
+        encoding="utf-8",
+    )
+
+    widget = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
+
+    def _fake_exec(self):
+        line_edits = self.findChildren(QLineEdit)
+        assert any(edit.text() == "Scout" for edit in line_edits)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr("app.ModernDialog.exec", _fake_exec)
+
+    assert widget._prompt_join_online_details() is None
 
 
 def test_host_online_cancelled_dialog_does_not_open_applet(monkeypatch, qapp):

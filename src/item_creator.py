@@ -56,7 +56,7 @@ from item_file_format import (
     load_item_payload,
     write_item_document,
 )
-from loot_applet import LootPreviewTooltip
+from loot_applet import CATEGORY_LABELS, LootPreviewTooltip
 
 PREVIEW_WIDTH = 350  # Match export width for 1:1 display
 EXPORT_WIDTH = 350   # Keep layout scale consistent with the renderer default
@@ -72,6 +72,24 @@ ITEM_ICON_DIR_FALLBACK = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "assets", "iconitems")
 )
 ITEM_ICON_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+ITEM_LIBRARY_CATEGORY_ORDER = [
+    "equipment",
+    "consumables",
+    "valuables",
+    "magic",
+    "quest",
+    "miscellaneous",
+]
+ITEM_LIBRARY_RARITY_ORDER = [
+    "common",
+    "uncommon",
+    "rare",
+    "epic",
+    "legendary",
+    "artifact",
+]
+ITEM_LIBRARY_FILTER_COMBO_WIDTH = 176
+ITEM_LIBRARY_SEARCH_MIN_WIDTH = 360
 
 try:
     from item_renderer import (
@@ -255,6 +273,7 @@ class _ItemLibraryDialog(QDialog):
         search_height = QFontMetrics(self.font()).height() + 14
         self._search_container = QWidget(controls_frame)
         self._search_container.setFixedHeight(search_height)
+        self._search_container.setMinimumWidth(ITEM_LIBRARY_SEARCH_MIN_WIDTH)
         search_layout = QHBoxLayout(self._search_container)
         search_layout.setContentsMargins(8, 0, 8, 0)
         search_layout.setSpacing(6)
@@ -286,20 +305,37 @@ class _ItemLibraryDialog(QDialog):
 
         self._category_combo = QComboBox(controls_frame)
         self._category_combo.setFixedHeight(36)
-        self._category_combo.setFixedWidth(190)
+        self._category_combo.setFixedWidth(ITEM_LIBRARY_FILTER_COMBO_WIDTH)
         self._category_combo.addItem("All Categories")
-        known_categories = sorted(
-            {
-                category
-                for item in self._items
-                for category in item.get("category_values", [])
-                if str(category).strip()
-            },
-            key=str.casefold,
+        self._category_combo.addItems(
+            [CATEGORY_LABELS[key] for key in ITEM_LIBRARY_CATEGORY_ORDER]
         )
-        self._category_combo.addItems(known_categories)
         self._category_combo.currentTextChanged.connect(self._populate_rows)
         controls.addWidget(self._category_combo)
+
+        rarity_label = QLabel("Rarity", controls_frame)
+        rarity_label.setStyleSheet("color: #8b949e; font-size: 12px; font-weight: 600;")
+        controls.addWidget(rarity_label)
+
+        self._rarity_combo = QComboBox(controls_frame)
+        self._rarity_combo.setFixedHeight(36)
+        self._rarity_combo.setFixedWidth(ITEM_LIBRARY_FILTER_COMBO_WIDTH)
+        self._rarity_combo.addItem("All Rarities")
+        self._rarity_combo.addItems([rarity.capitalize() for rarity in ITEM_LIBRARY_RARITY_ORDER])
+        self._rarity_combo.currentTextChanged.connect(self._populate_rows)
+        controls.addWidget(self._rarity_combo)
+
+        level_label = QLabel("Level", controls_frame)
+        level_label.setStyleSheet("color: #8b949e; font-size: 12px; font-weight: 600;")
+        controls.addWidget(level_label)
+
+        self._level_combo = QComboBox(controls_frame)
+        self._level_combo.setFixedHeight(36)
+        self._level_combo.setFixedWidth(ITEM_LIBRARY_FILTER_COMBO_WIDTH)
+        self._level_combo.addItem("All Levels")
+        self._level_combo.addItems([str(value) for value in range(1, 21)])
+        self._level_combo.currentTextChanged.connect(self._populate_rows)
+        controls.addWidget(self._level_combo)
 
         sort_label = QLabel("Sort By", controls_frame)
         sort_label.setStyleSheet("color: #8b949e; font-size: 12px; font-weight: 600;")
@@ -307,9 +343,9 @@ class _ItemLibraryDialog(QDialog):
 
         self._sort_combo = QComboBox(controls_frame)
         self._sort_combo.setFixedHeight(36)
-        self._sort_combo.addItems(["Title", "Category"])
+        self._sort_combo.addItems(["Title", "Category", "Rarity", "Level"])
         self._sort_combo.currentTextChanged.connect(self._populate_rows)
-        self._sort_combo.setFixedWidth(170)
+        self._sort_combo.setFixedWidth(ITEM_LIBRARY_FILTER_COMBO_WIDTH)
         controls.addWidget(self._sort_combo)
         layout.addWidget(controls_frame)
 
@@ -415,13 +451,28 @@ class _ItemLibraryDialog(QDialog):
         query = self._search_input.text().strip().lower()
         parts = [part for part in query.split() if part]
         category_filter = self._category_combo.currentText().strip()
+        rarity_filter = self._rarity_combo.currentText().strip().lower()
+        level_filter = self._level_combo.currentText().strip()
         filtered = []
         for item in self._items:
             search_text = str(item.get("search_text") or "").strip().lower()
             if parts and not all(part in search_text for part in parts):
                 continue
-            category_values = [str(value).strip() for value in item.get("category_values", []) if str(value).strip()]
-            if category_filter and category_filter != "All Categories" and category_filter not in category_values:
+            category_keys = [str(value).strip() for value in item.get("category_keys", []) if str(value).strip()]
+            if category_filter and category_filter != "All Categories":
+                selected_key = next(
+                    (key for key in ITEM_LIBRARY_CATEGORY_ORDER if CATEGORY_LABELS.get(key) == category_filter),
+                    "",
+                )
+                if selected_key and selected_key not in category_keys:
+                    continue
+                if not selected_key:
+                    continue
+            item_rarity = str(item.get("rarity_key") or "").strip().lower()
+            if rarity_filter and rarity_filter != "all rarities" and item_rarity != rarity_filter:
+                continue
+            item_level = str(item.get("level") or "").strip()
+            if level_filter and level_filter != "All Levels" and item_level != level_filter:
                 continue
             filtered.append(item)
 
@@ -431,6 +482,22 @@ class _ItemLibraryDialog(QDialog):
                 filtered,
                 key=lambda item: (
                     str(item.get("category_sort") or "").casefold(),
+                    str(item.get("title") or "").casefold(),
+                ),
+            )
+        if mode == "rarity":
+            return sorted(
+                filtered,
+                key=lambda item: (
+                    int(item.get("rarity_index", 999)),
+                    str(item.get("title") or "").casefold(),
+                ),
+            )
+        if mode == "level":
+            return sorted(
+                filtered,
+                key=lambda item: (
+                    int(item.get("level_sort", 999)),
                     str(item.get("title") or "").casefold(),
                 ),
             )
@@ -1427,27 +1494,69 @@ class ItemCreatorWidget(QWidget):
             if not isinstance(payload, dict):
                 print(f"[WARN] Skipping unreadable item library entry: {path}", file=sys.stderr)
                 continue
-            raw_tags = [str(tag).strip() for tag in (payload.get("tags") or []) if str(tag).strip()]
-            category_values = [tag.capitalize() for tag in raw_tags] or ["Uncategorized"]
+            raw_tags = {str(tag).strip().lower() for tag in (payload.get("tags") or []) if str(tag).strip()}
+            category_keys = [key for key in ITEM_LIBRARY_CATEGORY_ORDER if key in raw_tags]
+            category_values = [CATEGORY_LABELS[key] for key in category_keys] or ["Uncategorized"]
             categories = ", ".join(category_values)
             title = str(payload.get("title") or "Untitled Item")
             rarity = str(payload.get("rarity") or "common")
             level = str(payload.get("level") or "")
+            flavor_text = str(payload.get("flavor_text") or "").strip()
+            effects = [
+                str(effect).strip()
+                for effect in (payload.get("effects") or [])
+                if str(effect).strip()
+            ]
+            classes = [
+                str(class_name).strip()
+                for class_name in (payload.get("classes") or [])
+                if str(class_name).strip()
+            ]
+            stats_parts: List[str] = []
+            for stat in (payload.get("stats") or []):
+                if isinstance(stat, (list, tuple)):
+                    stats_parts.extend(str(part).strip() for part in stat if str(part).strip())
+                elif isinstance(stat, dict):
+                    stats_parts.extend(
+                        str(stat.get(key) or "").strip()
+                        for key in ("value", "name", "stat")
+                        if str(stat.get(key) or "").strip()
+                    )
+                else:
+                    cleaned = str(stat).strip()
+                    if cleaned:
+                        stats_parts.append(cleaned)
+            rarity_key = rarity.strip().lower()
+            if rarity_key == "very rare":
+                rarity_key = "epic"
+            try:
+                level_sort = int(level)
+            except (TypeError, ValueError):
+                level_sort = 999
             rows.append(
                 {
                     "path": str(path),
                     "title": title,
                     "category": categories,
                     "category_sort": categories,
-                    "category_values": category_values,
+                    "category_keys": category_keys,
                     "rarity": rarity,
+                    "rarity_key": rarity_key,
+                    "rarity_index": ITEM_LIBRARY_RARITY_ORDER.index(rarity_key)
+                    if rarity_key in ITEM_LIBRARY_RARITY_ORDER
+                    else 999,
                     "level": level,
+                    "level_sort": level_sort,
                     "search_text": " ".join(
                         [
                             title.lower(),
                             categories.lower(),
                             rarity.lower(),
                             level.lower(),
+                            flavor_text.lower(),
+                            " ".join(effect.lower() for effect in effects),
+                            " ".join(class_name.lower() for class_name in classes),
+                            " ".join(part.lower() for part in stats_parts),
                         ]
                     ).strip(),
                 }

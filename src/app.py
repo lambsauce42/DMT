@@ -88,6 +88,7 @@ from user_settings import (
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
 ONLINE_LAUNCH_LOG_FILENAME = "dmt_online_launch.log"
 APP_CRASH_LOG_FILENAME = "dmt_app_crash.log"
+LOCAL_DUNGEON_PROFILE_FILENAME = "dungeon_profile.json"
 _CRASH_LOG_HANDLE: Optional[object] = None
 _CRASH_LOG_INSTANCE_PATH: Optional[Path] = None
 _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
@@ -2445,6 +2446,19 @@ class HomeWidget(QWidget):
         button.setMinimumWidth(110)
         return button
 
+    def _last_join_player_name(self) -> str:
+        path = dnd_saves_dir() / "settings" / LOCAL_DUNGEON_PROFILE_FILENAME
+        try:
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    clean_name = str(payload.get("last_player_name") or "").strip()
+                    if clean_name:
+                        return clean_name
+        except Exception:
+            pass
+        return "Player"
+
     def _prompt_host_dungeon_collection_details(self) -> Optional[Dict[str, object]]:
         base_dir = dungeon_collections_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -2556,7 +2570,7 @@ class HomeWidget(QWidget):
         form.addRow("Port", port_spin)
 
         player_name_edit = QLineEdit(dialog)
-        player_name_edit.setText("Player")
+        player_name_edit.setText(self._last_join_player_name())
         player_name_edit.setMinimumHeight(36)
         form.addRow("Player Name", player_name_edit)
 

@@ -168,15 +168,43 @@ def test_show_item_library_supports_search_category_filter_and_sort(item_widget,
     third_path = tmp_path / "gem.dmtitem"
     write_item_document(
         first_path,
-        build_item_document({"title": "Blade", "rarity": "rare", "tags": ["equipment"]}, None),
+        build_item_document(
+            {
+                "title": "Blade",
+                "rarity": "rare",
+                "level": 3,
+                "tags": ["equipment"],
+                "stats": [["+2", "CON"]],
+                "flavor_text": "Forged for moonlight duels.",
+            },
+            None,
+        ),
     )
     write_item_document(
         second_path,
-        build_item_document({"title": "Potion", "rarity": "common", "tags": ["consumables"]}, None),
+        build_item_document(
+            {
+                "title": "Potion",
+                "rarity": "common",
+                "level": 1,
+                "tags": ["consumables"],
+                "effects": ["Restores HP"],
+            },
+            None,
+        ),
     )
     write_item_document(
         third_path,
-        build_item_document({"title": "Gem", "rarity": "epic", "tags": ["valuables"]}, None),
+        build_item_document(
+            {
+                "title": "Gem",
+                "rarity": "epic",
+                "level": 7,
+                "tags": ["valuables"],
+                "classes": ["Wizard"],
+            },
+            None,
+        ),
     )
     item_widget._base_save_dir = str(tmp_path)
 
@@ -187,10 +215,24 @@ def test_show_item_library_supports_search_category_filter_and_sort(item_widget,
     table = dialog._table
     assert table.item(0, 0).text() == "Blade"
     assert dialog._category_combo.currentText() == "All Categories"
+    assert dialog._rarity_combo.currentText() == "All Rarities"
+    assert dialog._level_combo.currentText() == "All Levels"
 
     dialog._search_input.setText("pot")
     qtbot.waitUntil(lambda: table.rowCount() == 1)
     assert table.item(0, 0).text() == "Potion"
+
+    dialog._search_input.setText("moonlight")
+    qtbot.waitUntil(lambda: table.rowCount() == 1)
+    assert table.item(0, 0).text() == "Blade"
+
+    dialog._search_input.setText("restores")
+    qtbot.waitUntil(lambda: table.rowCount() == 1)
+    assert table.item(0, 0).text() == "Potion"
+
+    dialog._search_input.setText("wizard")
+    qtbot.waitUntil(lambda: table.rowCount() == 1)
+    assert table.item(0, 0).text() == "Gem"
 
     dialog._search_input.clear()
     dialog._category_combo.setCurrentText("Valuables")
@@ -198,6 +240,16 @@ def test_show_item_library_supports_search_category_filter_and_sort(item_widget,
     assert table.item(0, 0).text() == "Gem"
 
     dialog._category_combo.setCurrentText("All Categories")
+    dialog._rarity_combo.setCurrentText("Epic")
+    qtbot.waitUntil(lambda: table.rowCount() == 1)
+    assert table.item(0, 0).text() == "Gem"
+
+    dialog._rarity_combo.setCurrentText("All Rarities")
+    dialog._level_combo.setCurrentText("3")
+    qtbot.waitUntil(lambda: table.rowCount() == 1)
+    assert table.item(0, 0).text() == "Blade"
+
+    dialog._level_combo.setCurrentText("All Levels")
     dialog._sort_combo.setCurrentText("Category")
     qtbot.waitUntil(lambda: table.rowCount() == 3)
     assert table.item(0, 1).text() == "Consumables"
