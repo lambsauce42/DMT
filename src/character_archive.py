@@ -313,6 +313,50 @@ def read_character_inventory_bytes(archive_bytes: bytes | None) -> dict[str, Any
     return normalize_inventory_payload(payload)
 
 
+def rewrite_character_archive_bytes(
+    archive_bytes: bytes | None,
+    inventory_payload: dict[str, Any] | None,
+    *,
+    meta_updates: dict[str, Any] | None = None,
+) -> bytes | None:
+    if not archive_bytes:
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as zf:
+            names = set(zf.namelist())
+            if not {PDF_ENTRY_NAME, INVENTORY_ENTRY_NAME, INFO_ENTRY_NAME}.issubset(names):
+                return None
+            raw_pdf = zf.read(PDF_ENTRY_NAME)
+            raw_meta = json.loads(zf.read(INFO_ENTRY_NAME).decode("utf-8"))
+    except Exception:
+        return None
+    if not raw_pdf or not isinstance(raw_meta, dict):
+        return None
+
+    normalized_inventory = normalize_inventory_payload(inventory_payload)
+    meta_payload = dict(raw_meta)
+    meta_payload["archive_version"] = ARCHIVE_VERSION
+    meta_payload["updated_at"] = _utc_now()
+    if isinstance(meta_updates, dict):
+        meta_payload.update(meta_updates)
+
+    buffer = io.BytesIO()
+    try:
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(PDF_ENTRY_NAME, raw_pdf)
+            zf.writestr(
+                INVENTORY_ENTRY_NAME,
+                json.dumps(normalized_inventory, ensure_ascii=False, indent=2),
+            )
+            zf.writestr(
+                INFO_ENTRY_NAME,
+                json.dumps(meta_payload, ensure_ascii=False, indent=2),
+            )
+    except Exception:
+        return None
+    return buffer.getvalue()
+
+
 def read_character_meta(archive_path: Path) -> dict[str, Any]:
     if not archive_path.exists():
         return {}

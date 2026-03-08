@@ -5,7 +5,7 @@ import struct
 from typing import Any, Dict, List
 
 
-_MAX_FRAME_SIZE = 8 * 1024 * 1024
+_MAX_FRAME_SIZE = 16 * 1024 * 1024
 
 
 def encode_message(message: Dict[str, Any]) -> bytes:

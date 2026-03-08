@@ -141,6 +141,35 @@ def test_client_can_supply_persistent_player_id_for_handshake(qtbot):
         server.stop()
 
 
+def test_client_drops_session_token_when_joining_with_new_persistent_identity(qtbot):
+    port = _free_tcp_port()
+    server = OnlineSessionServer()
+    ok, err = server.start(port)
+    assert ok, err
+
+    client = OnlineSessionClient()
+    try:
+        client.connect_to_host("127.0.0.1", port, "Alice", persistent_player_id="pid-1")
+        qtbot.waitUntil(lambda: client.player_id is not None, timeout=4000)
+        first_token = str(client.session_token)
+        assert str(client.player_id) == "pid-1"
+        assert first_token
+
+        client.disconnect()
+        _spin_for(120)
+
+        client.connect_to_host("127.0.0.1", port, "Bob", persistent_player_id="pid-2")
+        qtbot.waitUntil(lambda: client.player_id is not None, timeout=4000)
+
+        assert str(client.player_id) == "pid-2"
+        assert str(client.session_token) != first_token
+        assert server.players.get("pid-2") == "Bob"
+        assert server.players.get("pid-1") != "Bob"
+    finally:
+        client.disconnect()
+        server.stop()
+
+
 def test_persistent_player_id_cannot_take_over_connected_identity(qtbot):
     port = _free_tcp_port()
     server = OnlineSessionServer()

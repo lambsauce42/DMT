@@ -20,6 +20,8 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QKeySequence,
+    QShortcut,
     QTextCharFormat,
     QTextCursor,
 )
@@ -72,6 +74,7 @@ from save_paths import (
     clear_all_online_runtime_caches,
     dnd_saves_dir,
     default_dnd_save_dir,
+    selected_debug_save_profile,
 )
 from tab_workspace import TabWorkspaceController, WorkspaceTabsHost
 from ui.encounter_panel import EncounterPanel
@@ -84,6 +87,9 @@ from user_settings import (
 COLLECTION_FILE_EXTENSION = ".dmtcollection"
 ONLINE_LAUNCH_LOG_FILENAME = "dmt_online_launch.log"
 APP_CRASH_LOG_FILENAME = "dmt_app_crash.log"
+MANUAL_TEST_KEYS_ENV = "DMT_MANUAL_TEST_KEYS"
+MANUAL_TEST_PORT_ENV = "DMT_MANUAL_TEST_PORT"
+DEFAULT_MANUAL_TEST_PORT = 34111
 _CRASH_LOG_HANDLE: Optional[object] = None
 _CRASH_LOG_INSTANCE_PATH: Optional[Path] = None
 _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
@@ -1753,6 +1759,14 @@ class MainLauncherWindow(_WorkspaceTabWindow):
         self._disable_tab_close(home_index)
         self._workspace_controller.set_home_widget(home)
         self.tabs.setCurrentIndex(0)
+        self._manual_test_keys_enabled = str(
+            os.environ.get(MANUAL_TEST_KEYS_ENV, "0")
+        ).strip().lower() not in {"", "0", "false", "no", "off"}
+        self._manual_test_port = self._resolve_manual_test_port()
+        self._manual_test_profile = selected_debug_save_profile() or "DEFAULT"
+        self._manual_test_shortcuts: list[QShortcut] = []
+        if self._manual_test_keys_enabled:
+            self._register_manual_test_shortcut(Qt.Key.Key_F19, self._manual_test_quick_online_launch)
 
     def closeEvent(self, event) -> None:
         if not self._workspace_controller.begin_primary_shutdown(self):
@@ -1765,6 +1779,50 @@ class MainLauncherWindow(_WorkspaceTabWindow):
         self._workspace_controller.unregister_window(self)
         clear_all_online_runtime_caches()
         super().closeEvent(event)
+
+    def _resolve_manual_test_port(self) -> int:
+        raw = str(os.environ.get(MANUAL_TEST_PORT_ENV) or "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except (TypeError, ValueError):
+                pass
+        return DEFAULT_MANUAL_TEST_PORT
+
+    def _register_manual_test_shortcut(self, key: Qt.Key, callback) -> None:
+        shortcut = QShortcut(QKeySequence(key), self)
+        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        shortcut.activated.connect(callback)
+        self._manual_test_shortcuts.append(shortcut)
+
+    def _manual_test_quick_online_launch(self) -> None:
+        port = int(self._manual_test_port)
+        profile = str(self._manual_test_profile or "DEFAULT").strip().upper() or "DEFAULT"
+        if profile == "DEFAULT":
+            key = f"online_host::{port}::manual"
+            applet = {
+                "key": key,
+                "title": f"Host Session {port}",
+                "tab": f"Host:{port}",
+                "online": {
+                    "port": port,
+                    "collection_path": "",
+                },
+            }
+        else:
+            player_name = "Player1" if profile == "DEBUG1" else "Player2"
+            key = f"online_join::127.0.0.1::{port}::{player_name}::manual"
+            applet = {
+                "key": key,
+                "title": f"Join Session {player_name}",
+                "tab": f"Join:{player_name}",
+                "online": {
+                    "host_ip": "127.0.0.1",
+                    "port": port,
+                    "player_name": player_name,
+                },
+            }
+        self.open_applet(applet, focus_if_new=True)
 
 
 class HomeWidget(QWidget):

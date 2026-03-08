@@ -24,7 +24,7 @@ from character_archive import (
     read_character_inventory,
     write_character_archive,
 )
-from item_file_format import build_item_document, load_item_document
+from item_file_format import build_item_document, load_item_document, write_item_document
 import player_sheets
 
 
@@ -254,6 +254,30 @@ def test_apply_remote_character_package_does_not_overwrite_existing_personal_she
     assert entry.inventory == ["item-personal"]
 
 
+def test_apply_remote_character_package_uses_authoritative_sheet_id_for_new_managed_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+
+    ok, message, payload = player_sheets.apply_remote_character_package_for_character_id(
+        "character-remote",
+        "Remote Hero",
+        {"inventory": []},
+        sheet_id="sheet-host",
+        managed_scope="session-a",
+        emit_event=False,
+    )
+
+    assert ok is True, message
+    assert isinstance(payload, dict)
+    entries = player_sheets.load_entries_from_storage()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert player_sheets.sheet_id_for_entry(entry) == "sheet-host"
+    assert entry.managed_linked is True
+    assert entry.managed_scope == "session-a"
+
+
 def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> None:
     source_pdf = tmp_path / "sheet.pdf"
     source_pdf.write_bytes(b"%PDF-1.4 test sheet")
@@ -395,6 +419,79 @@ def test_sync_entry_archive_materializes_item_document_cache(
     assert cached_document["payload"]["item_id"] == "item_a"
 
 
+def test_sync_entry_archive_embeds_local_library_item_documents_for_referenced_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    items_root = tmp_path / "items"
+    items_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(player_sheets, "items_dir", lambda: items_root)
+
+    local_item_path = items_root / "blade.dmtitem"
+    write_item_document(
+        local_item_path,
+        build_item_document({"item_id": "item_a", "title": "Hero Blade"}, None),
+    )
+
+    source_pdf = tmp_path / "hero.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4 hero")
+    entry = player_sheets.PlayerSheetEntry(
+        name="Hero",
+        pdf_path=str(source_pdf),
+        inventory=["item_a"],
+    )
+
+    assert player_sheets.sync_entry_archive(entry)
+
+    archive_payload = read_character_inventory(Path(entry.archive_path))
+    assert archive_payload["item_documents"]["item_a"]["payload"]["title"] == "Hero Blade"
+
+
+def test_ensure_entry_archive_refreshes_stale_archive_missing_embedded_item_documents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    items_root = tmp_path / "items"
+    items_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(player_sheets, "items_dir", lambda: items_root)
+
+    local_item_path = items_root / "blade.dmtitem"
+    write_item_document(
+        local_item_path,
+        build_item_document({"item_id": "item_a", "title": "Hero Blade"}, None),
+    )
+
+    source_pdf = tmp_path / "hero.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4 hero")
+    entry = player_sheets.PlayerSheetEntry(
+        name="Hero",
+        pdf_path=str(source_pdf),
+        archive_path=str(player_sheets.character_sheet_archive_path("hero")),
+        sheet_id="hero",
+        character_id="character-hero",
+        inventory=["item_a"],
+        save_revision=4,
+        last_saved_at="2026-03-08T12:00:00+00:00",
+    )
+    entry.content_hash = player_sheets._entry_content_hash(entry)
+
+    write_character_archive(
+        Path(entry.archive_path),
+        pdf_path=source_pdf,
+        inventory_payload={
+            "inventory": [{"item_id": "item_a", "quantity": 1}],
+            "equipment": {},
+            "item_documents": {},
+        },
+        meta=player_sheets._entry_meta_payload(entry, created_at="2026-03-08T11:00:00+00:00"),
+    )
+
+    assert player_sheets.ensure_entry_archive(entry)
+
+    archive_payload = read_character_inventory(Path(entry.archive_path))
+    assert archive_payload["item_documents"]["item_a"]["payload"]["title"] == "Hero Blade"
+
+
 def test_cleanup_managed_linked_entries_removes_only_unlinked_managed_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -425,6 +522,42 @@ def test_cleanup_managed_linked_entries_removes_only_unlinked_managed_entries(
     assert removed == 1
     entries = player_sheets.load_entries_from_storage()
     assert [entry.name for entry in entries] == ["Regular Hero"]
+
+
+def test_cleanup_managed_linked_entries_only_touches_requested_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    first_pdf = tmp_path / "first.pdf"
+    second_pdf = tmp_path / "second.pdf"
+    first_pdf.write_bytes(b"%PDF-1.4 first")
+    second_pdf.write_bytes(b"%PDF-1.4 second")
+
+    first = player_sheets.PlayerSheetEntry(
+        name="Scope A",
+        pdf_path=str(first_pdf),
+        character_id="character-a",
+        managed_linked=True,
+        managed_scope="scope-a",
+    )
+    second = player_sheets.PlayerSheetEntry(
+        name="Scope B",
+        pdf_path=str(second_pdf),
+        character_id="character-b",
+        managed_linked=True,
+        managed_scope="scope-b",
+    )
+    assert player_sheets.ensure_entry_archive(first)
+    assert player_sheets.ensure_entry_archive(second)
+    player_sheets.save_entries_to_storage([first, second])
+
+    removed = player_sheets.cleanup_managed_linked_entries(set(), managed_scope="scope-a")
+
+    assert removed == 1
+    entries = player_sheets.load_entries_from_storage()
+    assert len(entries) == 1
+    assert entries[0].name == "Scope B"
+    assert entries[0].managed_scope == "scope-b"
 
 
 def test_entries_with_same_name_get_distinct_stable_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

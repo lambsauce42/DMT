@@ -34,3 +34,10 @@ def test_frame_decoder_handles_split_frames():
     part_b = encoded[5:]
     assert decoder.feed(part_a) == []
     assert decoder.feed(part_b) == [message]
+
+
+def test_frame_supports_large_character_payloads_under_updated_cap():
+    message = {"type": "command", "action": "sync_character_inventory", "archive_b64": "x" * (9 * 1024 * 1024)}
+    encoded = encode_message(message)
+    decoder = FrameDecoder()
+    assert decoder.feed(encoded) == [message]

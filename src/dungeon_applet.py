@@ -132,12 +132,14 @@ from save_paths import (
     clear_online_runtime_cache as clear_online_runtime_storage,
     collection_icon_assets_dir,
     working_collection_icon_assets_dir,
+    selected_debug_save_profile,
 )
 from character_archive import (
     character_sync_content_hash,
     extract_character_pdf,
     normalize_inventory_payload,
     read_character_inventory_bytes,
+    rewrite_character_archive_bytes,
     validate_character_archive_bytes,
 )
 from loot_applet import LootPreviewTooltip
@@ -186,6 +188,13 @@ COLLECTION_FILE_FORMAT = "dmtcollection.v1"
 LOCAL_DUNGEON_PROFILE_FILENAME = "dungeon_profile.json"
 FOG_OVERLAY_Z = 200.0
 MAX_ONLINE_ICON_BYTES = 2 * 1024 * 1024
+MANUAL_TEST_KEYS_ENV = "DMT_MANUAL_TEST_KEYS"
+MANUAL_TEST_PORT_ENV = "DMT_MANUAL_TEST_PORT"
+MANUAL_TEST_SHEET_ENV = "DMT_MANUAL_TEST_SHEET"
+MANUAL_TEST_ENTITY_LABEL_ENV = "DMT_MANUAL_TEST_ENTITY_LABEL"
+DEFAULT_MANUAL_TEST_PORT = 34111
+DEFAULT_MANUAL_TEST_SHEET = "manual_bob"
+DEFAULT_MANUAL_TEST_ENTITY_LABEL = "Manual Scenario Hero"
 
 
 def _sanitize_filename(name: str, fallback: str = "dungeon_collection") -> str:
@@ -4447,6 +4456,9 @@ class DungeonAppletWidget(QWidget):
         self._approved_host_inventory_sync_characters: set[str] = set()
         self._pending_link_entity_requests: dict[str, dict] = {}
         self._pending_unlink_entity_requests: dict[str, dict] = {}
+        self._pending_owned_linked_character_resolutions: dict[str, dict] = {}
+        self._resolved_owned_linked_character_pull_signatures: dict[str, str] = {}
+        self._owned_linked_character_resolution_dialog: QDialog | None = None
         self._pending_link_conflicts: dict[str, dict] = {}
         self._suppressed_link_conflicts: dict[str, str] = {}
         self._host_link_conflict_response_cache: dict[str, dict] = {}
@@ -4467,10 +4479,28 @@ class DungeonAppletWidget(QWidget):
         self._reconnect_status_anim_timer.setInterval(420)
         self._reconnect_status_anim_timer.timeout.connect(self._on_reconnect_status_animation_tick)
         self._debug_instance_id: str = uuid.uuid4().hex[:8]
+        self._debug_profile: str = selected_debug_save_profile() or "DEFAULT"
         self._debug_log_enabled: bool = str(
             os.environ.get("DMT_ONLINE_DEBUG_LOG", "0")
         ).strip().lower() not in {"0", "false", "no", "off"}
         self._debug_log_path: Path = self._resolve_debug_log_path()
+        self._manual_test_keys_enabled: bool = str(
+            os.environ.get(MANUAL_TEST_KEYS_ENV, "0")
+        ).strip().lower() not in {"", "0", "false", "no", "off"}
+        self._manual_test_sheet_name: str = (
+            str(os.environ.get(MANUAL_TEST_SHEET_ENV) or DEFAULT_MANUAL_TEST_SHEET).strip()
+            or DEFAULT_MANUAL_TEST_SHEET
+        )
+        self._manual_test_entity_label: str = (
+            str(os.environ.get(MANUAL_TEST_ENTITY_LABEL_ENV) or DEFAULT_MANUAL_TEST_ENTITY_LABEL).strip()
+            or DEFAULT_MANUAL_TEST_ENTITY_LABEL
+        )
+        manual_port_raw = str(os.environ.get(MANUAL_TEST_PORT_ENV) or "").strip()
+        try:
+            self._manual_test_port: int = max(1, int(manual_port_raw or DEFAULT_MANUAL_TEST_PORT))
+        except (TypeError, ValueError):
+            self._manual_test_port = DEFAULT_MANUAL_TEST_PORT
+        self._manual_test_item_counter: int = 0
         self._connected_players: dict[str, str] = {}
         self._suppress_network_sync = False
         self._suppress_ping_sync = False
@@ -4886,6 +4916,11 @@ class DungeonAppletWidget(QWidget):
         self._pending_player_state_update = None
         self._pending_player_state_update_request_id = ""
         self._approved_host_inventory_sync_characters.clear()
+        self._pending_owned_linked_character_resolutions.clear()
+        self._resolved_owned_linked_character_pull_signatures.clear()
+        if self._owned_linked_character_resolution_dialog is not None:
+            self._owned_linked_character_resolution_dialog.close()
+            self._owned_linked_character_resolution_dialog = None
         self._host_unknown_item_review_cache.clear()
         if collection_path:
             path = Path(collection_path)
@@ -4986,6 +5021,11 @@ class DungeonAppletWidget(QWidget):
         self._pending_player_state_update = None
         self._pending_player_state_update_request_id = ""
         self._approved_host_inventory_sync_characters.clear()
+        self._pending_owned_linked_character_resolutions.clear()
+        self._resolved_owned_linked_character_pull_signatures.clear()
+        if self._owned_linked_character_resolution_dialog is not None:
+            self._owned_linked_character_resolution_dialog.close()
+            self._owned_linked_character_resolution_dialog = None
         self._host_unknown_item_review_cache.clear()
         self._update_workspace_tab_title(f"Join: {self._local_player_name}")
         self._set_online_mode(ONLINE_MODE_PLAYER)
@@ -5109,6 +5149,11 @@ class DungeonAppletWidget(QWidget):
             self._pending_player_state_update_request_id = ""
             self._online_inventory_sync_fingerprints.clear()
             self._approved_host_inventory_sync_characters.clear()
+            self._pending_owned_linked_character_resolutions.clear()
+            self._resolved_owned_linked_character_pull_signatures.clear()
+            if self._owned_linked_character_resolution_dialog is not None:
+                self._owned_linked_character_resolution_dialog.close()
+                self._owned_linked_character_resolution_dialog = None
             self._pending_link_conflicts.clear()
             self._suppressed_link_conflicts.clear()
             self._host_link_conflict_response_cache.clear()
@@ -5868,6 +5913,72 @@ class DungeonAppletWidget(QWidget):
         self._loot_pool_item_path_by_id[str(persisted_resolved)] = persisted_resolved
         return persisted_resolved, None
 
+    def _claimed_item_note_line(self, entry: dict) -> str:
+        item_id = str(entry.get("item_id") or "").strip()
+        item_document = entry.get("item_document")
+        payload = item_document.get("payload") if isinstance(item_document, dict) else {}
+        title = _resolve_human_item_title(
+            item_id,
+            title=payload.get("title") if isinstance(payload, dict) else entry.get("title"),
+            name=payload.get("name") if isinstance(payload, dict) else "",
+            normalized_name=(
+                payload.get("normalized_item_name")
+                if isinstance(payload, dict)
+                else ""
+            ),
+            fallback=str(entry.get("title") or item_id or "Unknown Item"),
+        )
+        return f"Claimed item '{title or item_id or 'Unknown Item'}' kept as a text entry."
+
+    def _choose_claimed_item_storage_mode(
+        self,
+        entry: dict,
+        resolved_path: Path | None,
+    ) -> str:
+        item_document = entry.get("item_document")
+        if not isinstance(item_document, dict):
+            return "copy"
+        payload = item_document.get("payload")
+        if str(item_document.get("format") or "").strip().lower() != ITEM_FILE_FORMAT:
+            return "copy"
+        if not isinstance(payload, dict):
+            return "copy"
+        if resolved_path is not None:
+            try:
+                if self._path_is_within(resolved_path.resolve(), items_dir()):
+                    return "copy"
+            except Exception:
+                pass
+        if _in_test_env():
+            return "copy"
+        title = _resolve_human_item_title(
+            str(entry.get("item_id") or "").strip(),
+            title=payload.get("title"),
+            name=payload.get("name"),
+            normalized_name=payload.get("normalized_item_name"),
+            fallback=str(entry.get("title") or "Unknown Item"),
+        )
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Claim Unknown Item")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText(
+            f"How should the claimed item '{title or 'Unknown Item'}' be stored locally?"
+        )
+        dialog.setInformativeText(
+            "Create Local Copy writes a local item definition file.\n"
+            "Keep As Note claims the item without creating a local item file."
+        )
+        copy_button = dialog.addButton("Create Local Copy", QMessageBox.ButtonRole.AcceptRole)
+        note_button = dialog.addButton("Keep As Note", QMessageBox.ButtonRole.ActionRole)
+        dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked == copy_button:
+            return "copy"
+        if clicked == note_button:
+            return "note"
+        return "cancel"
+
     def _set_loot_pool_entries(self, entries: list[dict], *, broadcast: bool = False) -> None:
         self._loot_claim_reservations.clear()
         self._loot_claim_entry_reservations.clear()
@@ -6002,7 +6113,8 @@ class DungeonAppletWidget(QWidget):
                 item = _loot_item_from_path(path)
             except Exception:
                 item = None
-        self._loot_pool_item_cache[key] = item
+        if item is not None:
+            self._loot_pool_item_cache[key] = item
         return item
 
     def _fallback_loot_icon_pixmap(self, *, size: int = 28, icon_path: str = "") -> QPixmap:
@@ -6240,9 +6352,11 @@ class DungeonAppletWidget(QWidget):
                     max_height=460,
                     dpr=dpr,
                 )
+                if isinstance(pixmap, QPixmap) and not pixmap.isNull():
+                    self._loot_pool_preview_cache[key] = pixmap
+                    return pixmap
         if pixmap is None or pixmap.isNull():
             pixmap = self._fallback_loot_preview_pixmap(entry)
-        self._loot_pool_preview_cache[key] = pixmap
         return pixmap
 
     def _show_loot_pool_preview_for_item(self, row: QListWidgetItem, global_pos: QPoint) -> None:
@@ -6412,6 +6526,7 @@ class DungeonAppletWidget(QWidget):
         inventory_payload = normalize_inventory_payload(inventory_payload_for_sheet_id(clean_sheet_id) or {})
         if not isinstance(inventory_payload, dict):
             return []
+        embedded_item_documents = _inventory_payload_item_documents(inventory_payload)
         inventory_rows = inventory_payload.get("inventory")
         if not isinstance(inventory_rows, list):
             return []
@@ -6426,6 +6541,7 @@ class DungeonAppletWidget(QWidget):
             resolved_path = loot_item_path_for_id(item_id) if loot_item_path_for_id is not None else None
             path = str(resolved_path) if resolved_path is not None else str(item_id)
             item_document = None
+            embedded_document = embedded_item_documents.get(item_id)
             candidate_path = resolved_path or Path(item_id).expanduser()
             if candidate_path.exists():
                 item_document = self._loot_pool_item_document_from_path(candidate_path)
@@ -6438,6 +6554,20 @@ class DungeonAppletWidget(QWidget):
                         normalized_name=payload.get("normalized_item_name"),
                         fallback=title,
                     )
+            elif (
+                isinstance(embedded_document, dict)
+                and str(embedded_document.get("format") or "").strip().lower() == ITEM_FILE_FORMAT
+                and isinstance(embedded_document.get("payload"), dict)
+            ):
+                item_document = dict(embedded_document)
+                embedded_payload = embedded_document.get("payload")
+                title = _resolve_human_item_title(
+                    item_id,
+                    title=embedded_payload.get("title"),
+                    name=embedded_payload.get("name"),
+                    normalized_name=embedded_payload.get("normalized_item_name"),
+                    fallback=title,
+                )
             for unit_index in range(quantity):
                 rows.append(
                     {
@@ -6461,6 +6591,7 @@ class DungeonAppletWidget(QWidget):
                 resolved_path = loot_item_path_for_id(item_id) if loot_item_path_for_id is not None else None
                 path = str(resolved_path) if resolved_path is not None else str(item_id)
                 item_document = None
+                embedded_document = embedded_item_documents.get(item_id)
                 candidate_path = resolved_path or Path(item_id).expanduser()
                 if candidate_path.exists():
                     item_document = self._loot_pool_item_document_from_path(candidate_path)
@@ -6473,6 +6604,20 @@ class DungeonAppletWidget(QWidget):
                             normalized_name=payload.get("normalized_item_name"),
                             fallback=title,
                         )
+                elif (
+                    isinstance(embedded_document, dict)
+                    and str(embedded_document.get("format") or "").strip().lower() == ITEM_FILE_FORMAT
+                    and isinstance(embedded_document.get("payload"), dict)
+                ):
+                    item_document = dict(embedded_document)
+                    embedded_payload = embedded_document.get("payload")
+                    title = _resolve_human_item_title(
+                        item_id,
+                        title=embedded_payload.get("title"),
+                        name=embedded_payload.get("name"),
+                        normalized_name=embedded_payload.get("normalized_item_name"),
+                        fallback=title,
+                    )
                 slot_label = str(EQUIPMENT_SLOT_LABELS.get(slot_id) or "").strip()
                 if not slot_label:
                     slot_label = slot_id.replace("_", " ").title()
@@ -6881,6 +7026,14 @@ class DungeonAppletWidget(QWidget):
                 continue
             item_id = str(entry.get("item_id") or "").strip()
             resolved = self._loot_pool_resolve_item_path(entry)
+            storage_mode = self._choose_claimed_item_storage_mode(entry, resolved)
+            if storage_mode == "cancel":
+                return False, "Claim cancelled."
+            if storage_mode == "note":
+                note_line = self._claimed_item_note_line(entry)
+                if note_line:
+                    notes.append(note_line)
+                continue
             persisted, persist_error = self._persist_claimed_item_to_default_library(entry, resolved)
             if persist_error:
                 return False, persist_error
@@ -8661,6 +8814,11 @@ class DungeonAppletWidget(QWidget):
             return
         was_ready = bool(self._player_connection_ready)
         was_waiting_for_snapshot = bool(self._awaiting_player_snapshot)
+        self._debug_log(
+            "client_disconnected",
+            was_ready=bool(was_ready),
+            was_waiting_for_snapshot=bool(was_waiting_for_snapshot),
+        )
         terminal_disconnect_message = ""
         reconnect_after_established_session = False
         if self._client_controller is not None:
@@ -8879,11 +9037,12 @@ class DungeonAppletWidget(QWidget):
                 continue
             entity_owner = str(item_data.get("owner_player_id") or "").strip()
             if owner_player_id and entity_owner == owner_player_id:
-                filtered_inventory, filtered_content_hash = self._takeover_filtered_inventory_for_player(
+                filtered_inventory, filtered_archive_b64, filtered_content_hash = self._takeover_filtered_inventory_for_player(
                     item_data,
                     player_id=owner_player_id,
                 )
                 item_data["linked_inventory"] = filtered_inventory
+                item_data["linked_sheet_archive_b64"] = filtered_archive_b64
                 item_data["linked_content_hash"] = filtered_content_hash
                 continue
             # Never expose other players' linked character package payloads.
@@ -9643,6 +9802,7 @@ class DungeonAppletWidget(QWidget):
             sheet_name=sheet_name_for_review,
             inventory_payload=inventory_payload,
             existing_inventory=existing_inventory,
+            interactive=False,
         )
         if unknown_status == "kick":
             reason = unknown_status_note or "DM rejected unknown linked items and removed the player."
@@ -9691,6 +9851,7 @@ class DungeonAppletWidget(QWidget):
                 character_id=character_id,
                 sheet_name=sheet_id,
                 inventory_payload=authoritative_payload,
+                archive_b64=archive_b64,
             )
             self._broadcast_snapshot_if_host()
 
@@ -9866,6 +10027,7 @@ class DungeonAppletWidget(QWidget):
             sheet_name=sheet_name,
             inventory_payload=normalized_inventory,
             existing_inventory=normalize_inventory_payload(item_data.get("linked_inventory") or {}),
+            interactive=False,
         )
         if unknown_status == "kick":
             reason = unknown_status_note or "DM rejected unknown linked items and removed the player."
@@ -9950,6 +10112,7 @@ class DungeonAppletWidget(QWidget):
             character_id=resolved_character_id,
             sheet_name=sheet_name,
             inventory_payload=normalized_inventory,
+            archive_b64=archive_b64,
         )
         if self._online_mode != ONLINE_MODE_PLAYER:
             self._cleanup_unlinked_managed_character_artifacts()
@@ -10416,8 +10579,9 @@ class DungeonAppletWidget(QWidget):
         item_data: dict,
         *,
         player_id: str,
-    ) -> tuple[dict, str]:
+    ) -> tuple[dict, str, str]:
         normalized = normalize_inventory_payload(item_data.get("linked_inventory") or {})
+        original_archive_b64 = str(item_data.get("linked_sheet_archive_b64") or "").strip()
         authority_player_id = str(
             item_data.get("linked_authority_player_id")
             or item_data.get("owner_player_id")
@@ -10425,16 +10589,50 @@ class DungeonAppletWidget(QWidget):
         ).strip()
         clean_player = str(player_id or "").strip()
         if not clean_player or not authority_player_id or authority_player_id == clean_player:
-            return normalized, str(item_data.get("linked_content_hash") or "").strip()
-        filtered_inventory, _removed_item_ids = self._filter_inventory_payload_to_dm_known_items(
+            return normalized, original_archive_b64, str(item_data.get("linked_content_hash") or "").strip()
+        filtered_inventory, removed_item_ids = self._filter_inventory_payload_to_dm_known_items(
             normalized
         )
+        referenced_item_ids = set(self._inventory_referenced_item_ids(filtered_inventory))
+        filtered_inventory = self._apply_authoritative_item_documents_to_inventory_payload(
+            filtered_inventory,
+            item_ids=referenced_item_ids,
+            existing_inventory=normalized,
+        )
+        filtered_archive_b64 = original_archive_b64
+        if original_archive_b64 and (
+            removed_item_ids
+            or _inventory_payload_item_documents(filtered_inventory)
+            != _inventory_payload_item_documents(normalized)
+        ):
+            try:
+                original_archive_bytes = base64.b64decode(
+                    original_archive_b64.encode("ascii"),
+                    validate=True,
+                )
+                filtered_archive_bytes = rewrite_character_archive_bytes(
+                    original_archive_bytes,
+                    filtered_inventory,
+                )
+                if filtered_archive_bytes:
+                    filtered_archive_b64 = base64.b64encode(filtered_archive_bytes).decode("ascii")
+                else:
+                    filtered_archive_b64 = ""
+                    self._append_server_log(
+                        "[WARN] Unable to rewrite takeover character archive after filtering unknown items. "
+                        "The archive payload was cleared for this snapshot."
+                    )
+            except Exception as exc:
+                filtered_archive_b64 = ""
+                self._append_server_log(
+                    f"[WARN] Unable to filter takeover character archive payload: {exc}"
+                )
         content_hash = self._linked_inventory_content_hash(
             character_id=str(item_data.get("linked_character_id") or "").strip(),
             inventory_payload=filtered_inventory,
-            archive_b64=str(item_data.get("linked_sheet_archive_b64") or "").strip(),
+            archive_b64=filtered_archive_b64,
         )
-        return filtered_inventory, content_hash
+        return filtered_inventory, filtered_archive_b64, content_hash
 
     def _validated_linked_character_sync_metadata(
         self,
@@ -11957,8 +12155,14 @@ class DungeonAppletWidget(QWidget):
         except Exception:
             return
         active_character_ids = self._active_linked_character_ids_in_collection()
+        managed_scope = self._active_online_runtime_cache_id()
         try:
-            removed = int(cleanup_managed_linked_entries(active_character_ids))
+            removed = int(
+                cleanup_managed_linked_entries(
+                    active_character_ids,
+                    managed_scope=managed_scope,
+                )
+            )
         except Exception as exc:
             self._append_server_log(
                 f"[WARN] Failed to clean up unlinked managed character artifacts: {exc}"
@@ -12151,6 +12355,107 @@ class DungeonAppletWidget(QWidget):
         self._hide_loot_pool_preview()
         return bool(decision.get("accepted"))
 
+    def _prompt_unknown_local_character_items_resolution(
+        self,
+        *,
+        sheet_name: str,
+        character_id: str,
+        entries: list[dict],
+        allow_import: bool,
+        allow_embed: bool,
+    ) -> str:
+        if _in_test_env():
+            if allow_embed:
+                return "embed"
+            return "notes"
+        preview_entries = self._unknown_item_preview_entries(entries)
+        if not preview_entries:
+            return "notes"
+
+        dialog = QDialog(self)
+        dialog.setModal(True)
+        dialog.setWindowTitle("Unknown Character Items")
+        dialog.setMinimumWidth(520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        heading_label = QLabel(
+            (
+                f"'{sheet_name or character_id or 'Character'}' contains items "
+                "unknown to your local item library."
+            ),
+            dialog,
+        )
+        heading_label.setWordWrap(True)
+        layout.addWidget(heading_label)
+
+        if allow_import and allow_embed:
+            details_text = (
+                "Choose how to keep these unknown items:\n\n"
+                "Copy To Local Storage imports them into your main local item library.\n"
+                "Keep Embedded In Character stores them only with this downloaded character.\n"
+                "Convert To Notes removes them from inventory and writes text notes instead."
+            )
+        else:
+            details_text = (
+                "These unknown items are missing a complete embedded definition.\n\n"
+                "Convert To Notes removes them from inventory and writes text notes instead."
+            )
+        details_label = QLabel(details_text, dialog)
+        details_label.setWordWrap(True)
+        layout.addWidget(details_label)
+
+        list_widget = QListWidget(dialog)
+        list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        list_widget.setMouseTracking(True)
+        list_widget.viewport().setMouseTracking(True)
+        self._install_loot_preview_tracking(list_widget)
+        layout.addWidget(list_widget, 1)
+
+        for preview_entry in preview_entries:
+            row = QListWidgetItem(
+                str(preview_entry.get("title") or preview_entry.get("item_id") or "Item"),
+                list_widget,
+            )
+            row.setData(Qt.ItemDataRole.UserRole + 1, dict(preview_entry))
+            icon_pixmap = self._loot_pool_icon_for_entry(preview_entry)
+            if isinstance(icon_pixmap, QPixmap) and not icon_pixmap.isNull():
+                row.setIcon(QIcon(icon_pixmap))
+
+        buttons = QDialogButtonBox(parent=dialog)
+        choice = {"action": ""}
+
+        def _add_button(label: str, action: str, role: QDialogButtonBox.ButtonRole) -> QPushButton:
+            button = buttons.addButton(label, role)
+            button.clicked.connect(lambda: (choice.update(action=action), dialog.accept()))
+            return button
+
+        if allow_import:
+            _add_button("Copy To Local Storage", "import", QDialogButtonBox.ButtonRole.AcceptRole)
+        if allow_embed:
+            _add_button("Keep Embedded In Character", "embed", QDialogButtonBox.ButtonRole.ActionRole)
+        _add_button("Convert To Notes", "notes", QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def _show_preview(item: QListWidgetItem | None) -> None:
+            if item is None:
+                self._hide_loot_pool_preview()
+                return
+            self._show_loot_pool_preview_for_item(item, QCursor.pos())
+
+        list_widget.currentItemChanged.connect(lambda current, _previous: _show_preview(current))
+        list_widget.itemEntered.connect(_show_preview)
+        if list_widget.count() > 0:
+            list_widget.setCurrentRow(0)
+            _show_preview(list_widget.currentItem())
+
+        dialog.exec()
+        self._hide_loot_pool_preview()
+        return str(choice.get("action") or "").strip()
+
     def _review_active_unknown_linked_items_for_dm(
         self,
         *,
@@ -12158,14 +12463,17 @@ class DungeonAppletWidget(QWidget):
         character_id: str,
         sheet_name: str,
         inventory_payload: dict,
+        archive_b64: str = "",
     ) -> None:
         if self._online_mode != ONLINE_MODE_DM_HOST:
             return
-        normalized = normalize_inventory_payload(
-            inventory_payload if isinstance(inventory_payload, dict) else {}
+        normalized = self._inventory_payload_with_archive_item_documents(
+            inventory_payload if isinstance(inventory_payload, dict) else {},
+            archive_b64=str(archive_b64 or "").strip(),
         )
         incoming_documents = _inventory_payload_item_documents(normalized)
         unresolved_entries: list[dict] = []
+        missing_document_item_ids: list[str] = []
         for item_id in self._inventory_referenced_item_ids(normalized):
             if self._linked_item_document_by_id(item_id) is not None:
                 continue
@@ -12185,8 +12493,17 @@ class DungeonAppletWidget(QWidget):
                     "item_document": dict(incoming_document) if isinstance(incoming_document, dict) else None,
                 }
             )
+            if not isinstance(incoming_document, dict):
+                missing_document_item_ids.append(item_id)
         if not unresolved_entries:
             return
+        if missing_document_item_ids:
+            preview = ", ".join(missing_document_item_ids[:3])
+            suffix = "..." if len(missing_document_item_ids) > 3 else ""
+            self._append_server_log(
+                "[WARN] Deferred unknown linked item review is missing embedded item documents "
+                f"for {len(missing_document_item_ids)} item(s): {preview}{suffix}"
+            )
         review_signature = self._linked_item_review_signature(unresolved_entries)
         review_cache_key = (
             f"active_unknown::{str(player_id or '').strip()}::"
@@ -12224,7 +12541,8 @@ class DungeonAppletWidget(QWidget):
             if unresolved_item_ids:
                 self._append_server_log(
                     "[WARN] Unknown linked item definitions were not persisted into DM storage. "
-                    "The review prompt will reappear until persistence succeeds or is dismissed."
+                    "The review prompt is not retried automatically for the current state; "
+                    "it will only be shown again on a later linked-character update unless dismissed."
                 )
                 return
             self._append_server_log(
@@ -12405,7 +12723,7 @@ class DungeonAppletWidget(QWidget):
                 imported += 1
                 self._loot_pool_item_path_by_id[item_id] = target_path
             except Exception as exc:
-                messages.append(f"Failed to import '{item_id}': {exc}")
+                messages.append(f"Failed to import '{item_id}' to '{target_path}': {exc}")
         return imported, messages
 
     def _persist_item_documents_to_local_library(
@@ -12432,7 +12750,22 @@ class DungeonAppletWidget(QWidget):
         persisted_item_ids: list[str] = []
         unresolved_item_ids: list[str] = []
         for item_id in requested_item_ids:
-            if self._linked_item_document_by_id(item_id) is not None:
+            persisted_document = self._linked_item_document_by_id(item_id)
+            if persisted_document is None:
+                cached_path = self._loot_pool_item_path_by_id.get(item_id)
+                if isinstance(cached_path, Path) and cached_path.exists():
+                    cached_document = load_item_document(cached_path)
+                    cached_payload = (
+                        cached_document.get("payload")
+                        if isinstance(cached_document, dict)
+                        else {}
+                    )
+                    if (
+                        isinstance(cached_payload, dict)
+                        and item_id_from_payload(cached_payload, fallback_path=cached_path) == item_id
+                    ):
+                        persisted_document = cached_document
+            if persisted_document is not None:
                 persisted_item_ids.append(item_id)
             else:
                 unresolved_item_ids.append(item_id)
@@ -12489,9 +12822,8 @@ class DungeonAppletWidget(QWidget):
         layout.addWidget(heading)
 
         info = QLabel(
-            "Select one or more items to import into the DM item library, keep the DM version for conflicts, "
-            "or remove them from the incoming character update. You can also kick the player "
-            "to reject the entire update.",
+            "Select items to import into the DM item library, keep the DM version for conflicts, "
+            "or dismiss this review and keep the current player-owned character update active.",
             dialog,
         )
         info.setWordWrap(True)
@@ -12536,11 +12868,10 @@ class DungeonAppletWidget(QWidget):
         import_button = buttons.addButton("Import Selected", QDialogButtonBox.ButtonRole.AcceptRole)
         select_all_button = buttons.addButton("Select All", QDialogButtonBox.ButtonRole.ActionRole)
         use_authority_button = buttons.addButton("Keep DM Version", QDialogButtonBox.ButtonRole.ActionRole)
-        remove_button = buttons.addButton("Remove Selected", QDialogButtonBox.ButtonRole.DestructiveRole)
-        kick_button = buttons.addButton("Kick Player", QDialogButtonBox.ButtonRole.RejectRole)
+        dismiss_button = buttons.addButton("Dismiss Review", QDialogButtonBox.ButtonRole.RejectRole)
         layout.addWidget(buttons)
 
-        decision: dict[str, object] = {"action": "blocked", "selected_item_ids": [], "signature": signature}
+        decision: dict[str, object] = {"action": "dismiss", "selected_item_ids": [], "signature": signature}
 
         def _selected_item_ids() -> list[str]:
             selected: list[str] = []
@@ -12561,7 +12892,6 @@ class DungeonAppletWidget(QWidget):
                     break
             import_button.setEnabled(has_selection)
             use_authority_button.setEnabled(has_conflict_selection)
-            remove_button.setEnabled(has_selection)
 
         def _show_preview(item: QListWidgetItem | None) -> None:
             if item is None:
@@ -12582,8 +12912,7 @@ class DungeonAppletWidget(QWidget):
         import_button.clicked.connect(lambda: _choose("import"))
         select_all_button.clicked.connect(list_widget.selectAll)
         use_authority_button.clicked.connect(lambda: _choose("use_authority"))
-        remove_button.clicked.connect(lambda: _choose("remove"))
-        kick_button.clicked.connect(lambda: _choose("kick"))
+        dismiss_button.clicked.connect(lambda: _choose("dismiss"))
         dialog.exec()
         self._hide_loot_pool_preview()
 
@@ -12596,7 +12925,7 @@ class DungeonAppletWidget(QWidget):
             ],
             "signature": signature,
         }
-        if resolved["action"] in {"blocked", "remove", "kick"}:
+        if resolved["action"] in {"dismiss", "blocked"}:
             self._host_unknown_item_review_cache[cache_key] = dict(resolved)
         return resolved
 
@@ -12608,6 +12937,7 @@ class DungeonAppletWidget(QWidget):
         sheet_name: str,
         inventory_payload: dict,
         existing_inventory: dict | None = None,
+        interactive: bool = True,
     ) -> tuple[str, dict, str]:
         working_payload = normalize_inventory_payload(
             inventory_payload if isinstance(inventory_payload, dict) else {}
@@ -12620,6 +12950,27 @@ class DungeonAppletWidget(QWidget):
             )
             if not unresolved_entries:
                 return "ok", working_payload, status_note
+            if not interactive:
+                conflicting_item_ids = {
+                    str(entry.get("item_id") or "").strip()
+                    for entry in unresolved_entries
+                    if isinstance(entry, dict)
+                    and bool(entry.get("conflicts_with_authority"))
+                    and str(entry.get("item_id") or "").strip()
+                }
+                if conflicting_item_ids:
+                    working_payload = self._apply_authoritative_item_documents_to_inventory_payload(
+                        working_payload,
+                        item_ids=conflicting_item_ids,
+                        existing_inventory=existing_inventory,
+                    )
+                    status_note = "Kept DM-authoritative definitions for conflicting linked items."
+                    continue
+                return (
+                    "ok",
+                    working_payload,
+                    "Deferred DM review for unknown linked items and kept the current player-owned character active.",
+                )
             review_signature = self._linked_item_review_signature(unresolved_entries)
             review_cache_key = (
                 f"{str(player_id or '').strip()}::"
@@ -12642,15 +12993,13 @@ class DungeonAppletWidget(QWidget):
                 for item_id in decision.get("selected_item_ids", [])
                 if str(item_id or "").strip()
             }
-            if action == "kick":
-                return "kick", working_payload, "DM rejected unknown linked items and removed the player."
-            if action == "remove" and selected_item_ids:
-                working_payload = self._remove_item_ids_from_inventory_payload(
-                    working_payload,
-                    removed_item_ids=selected_item_ids,
-                )
-                status_note = "Removed unapproved linked items from the incoming character update."
-                continue
+            if action == "blocked":
+                self._host_unknown_item_review_cache[review_cache_key] = {
+                    "action": "blocked",
+                    "selected_item_ids": sorted(selected_item_ids),
+                    "signature": review_signature,
+                }
+                return "blocked", working_payload, "Linked item review is still unresolved."
             if action == "use_authority" and selected_item_ids:
                 working_payload = self._apply_authoritative_item_documents_to_inventory_payload(
                     working_payload,
@@ -12683,11 +13032,15 @@ class DungeonAppletWidget(QWidget):
                 )
                 continue
             self._host_unknown_item_review_cache[review_cache_key] = {
-                "action": "blocked",
+                "action": "dismiss",
                 "selected_item_ids": sorted(selected_item_ids),
                 "signature": review_signature,
             }
-            return "blocked", working_payload, "Linked item review is still unresolved."
+            return (
+                "ok",
+                working_payload,
+                "DM dismissed unknown linked item review and kept the current player-owned character active.",
+            )
 
     def _canonicalize_linked_inventory_payload(
         self,
@@ -12922,7 +13275,7 @@ class DungeonAppletWidget(QWidget):
         sheet_name: str,
         character_id: str,
         archive_b64: str = "",
-    ) -> tuple[dict, list[str]]:
+    ) -> tuple[bool, dict, list[str], str]:
         normalized = self._inventory_payload_with_archive_item_documents(
             inventory_payload if isinstance(inventory_payload, dict) else {},
             archive_b64=archive_b64,
@@ -12939,49 +13292,60 @@ class DungeonAppletWidget(QWidget):
             if not isinstance(entry.get("item_document"), dict)
         ]
         if not import_candidates and not missing_document_entries:
-            return normalized, []
-
-        if import_candidates:
-            should_import = self._prompt_unknown_items_with_preview(
-                title="Unknown Character Items",
-                heading=(
-                    f"'{sheet_name or character_id or 'Character'}' includes items your local library does not know."
-                ),
-                details=(
-                    "Copy these item definitions into your local items folder?\n"
-                    "If not, the managed character keeps the embedded item definitions without copying them locally."
-                ),
-                entries=import_candidates,
-                accept_label="Copy To Local Items",
-                reject_label="Keep Embedded",
-                default_accept=True,
+            return True, normalized, [], ""
+        resolution = self._prompt_unknown_local_character_items_resolution(
+            sheet_name=sheet_name,
+            character_id=character_id,
+            entries=unknown_entries,
+            allow_import=bool(import_candidates) and not bool(missing_document_entries),
+            allow_embed=bool(import_candidates) and not bool(missing_document_entries),
+        )
+        if resolution == "notes":
+            converted_payload, converted_notes = self._convert_unknown_inventory_items_to_notes(
+                normalized,
+                unknown_entries,
             )
-        else:
-            should_import = False
+            if converted_notes:
+                self._append_server_log(
+                    "[INFO] Converted "
+                    f"{len(converted_notes)} unknown character item(s) into inventory notes."
+                )
+            return True, converted_payload, converted_notes, ""
+        if not resolution:
+            return False, normalized, [], "Character download cancelled."
+        if resolution == "embed":
+            preview = ", ".join(
+                str(entry.get("title") or entry.get("item_id") or "Item")
+                for entry in import_candidates[:3]
+            )
+            suffix = "..." if len(import_candidates) > 3 else ""
+            self._append_server_log(
+                "[INFO] Kept unknown character item definitions embedded in the downloaded character "
+                f"without importing them into local storage: {preview}{suffix}"
+            )
+            return True, normalized, [], ""
+        if resolution != "import":
+            return False, normalized, [], "Unknown character item resolution was not selected."
 
-        if should_import and import_candidates:
-            _persisted_item_ids, unresolved_item_ids, import_messages = self._persist_item_documents_to_local_library(
+        persisted_item_ids, unresolved_item_ids, import_messages = (
+            self._persist_item_documents_to_local_library(
                 import_candidates,
                 overwrite_existing=True,
             )
-            if import_messages:
-                self._append_server_log(f"[WARN] {' '.join(import_messages)}")
-            if unresolved_item_ids:
-                self._append_server_log(
-                    "[WARN] Some embedded linked item definitions could not be copied into the local item library. "
-                    "The managed character kept the authoritative embedded item definitions."
-                )
-        if missing_document_entries:
-            preview = ", ".join(
-                str(entry.get("title") or entry.get("item_id") or "Item")
-                for entry in missing_document_entries[:3]
+        )
+        if import_messages:
+            self._append_server_log(f"[WARN] {' '.join(import_messages)}")
+        if unresolved_item_ids:
+            message = (
+                "Unable to persist unknown character item definitions into local storage."
             )
-            suffix = "..." if len(missing_document_entries) > 3 else ""
-            self._append_server_log(
-                "[WARN] Some linked character items are unknown locally and were kept without embedded item definitions: "
-                f"{preview}{suffix}"
-            )
-        return normalized, []
+            self._append_server_log(f"[WARN] {message}")
+            return False, normalized, [], message
+        self._append_server_log(
+            "[INFO] Imported "
+            f"{len(persisted_item_ids)} unknown character item definition(s) into local storage."
+        )
+        return True, normalized, [], ""
 
     def _local_character_replace_options(self) -> list[dict]:
         try:
@@ -13106,6 +13470,74 @@ class DungeonAppletWidget(QWidget):
             return "", ""
         return str(choice.get("action") or "").strip(), str(choice.get("sheet_id") or "").strip()
 
+    def _prompt_owned_linked_character_resolution(
+        self,
+        *,
+        sheet_id: str,
+        sheet_name: str,
+        character_id: str,
+        local_exists: bool,
+    ) -> str:
+        if _in_test_env():
+            return "pull"
+
+        dialog = QDialog(self)
+        dialog.setModal(True)
+        dialog.setWindowTitle("Resolve Linked Character")
+        dialog.setMinimumWidth(560)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        linked_name = str(sheet_name or sheet_id or character_id or "Character").strip()
+        linked_sheet = str(sheet_id or "").strip() or "unknown"
+        linked_character = str(character_id or "").strip() or "unknown"
+        if local_exists:
+            summary_text = (
+                f"This entity is linked to '{linked_name}', and you already have a local copy.\n\n"
+                f"Sheet: {linked_sheet}\n"
+                f"Character id: {linked_character}\n\n"
+                "Choose whether to push your local sheet to the session, pull the session version "
+                "into your local sheets, or unlink the character from this entity."
+            )
+        else:
+            summary_text = (
+                f"This entity is linked to '{linked_name}', but you do not have that character locally.\n\n"
+                f"Sheet: {linked_sheet}\n"
+                f"Character id: {linked_character}\n\n"
+                "Choose whether to download the session version into your local sheets or unlink "
+                "the character from this entity."
+            )
+        summary = QLabel(summary_text, dialog)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        choice: dict[str, str] = {"action": ""}
+
+        def _add_action_button(label: str, action: str, *, primary: bool = False) -> QPushButton:
+            button = QPushButton(label, dialog)
+            button.setObjectName("PrimaryButton" if primary else "SecondaryButton")
+            button.setMinimumHeight(38)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.clicked.connect(lambda: (choice.update(action=action), dialog.accept()))
+            layout.addWidget(button)
+            return button
+
+        if local_exists:
+            _add_action_button("Push My Sheet To Session", "push", primary=True)
+            _add_action_button("Pull From Session", "pull")
+        else:
+            _add_action_button("Download Character", "pull", primary=True)
+        _add_action_button("Unlink Character", "unlink")
+
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        controls.rejected.connect(dialog.reject)
+        layout.addWidget(controls)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return ""
+        return str(choice.get("action") or "").strip()
+
     def _local_link_sync_payload_for_sheet(
         self,
         sheet_id: str,
@@ -13191,6 +13623,223 @@ class DungeonAppletWidget(QWidget):
             return False, "Unable to request character unlink."
         return True, "Requested character unlink."
 
+    def _request_push_local_character_link(
+        self,
+        *,
+        character_id: str,
+        entity_id: str,
+        dungeon_id: str,
+        fallback_sheet_id: str,
+        fallback_sheet_name: str,
+    ) -> tuple[bool, str]:
+        local_payload = self._resolve_local_sheet_sync_payload(character_id)
+        if not isinstance(local_payload, dict):
+            return False, "Unable to load your local character data."
+        archive_b64 = str(local_payload.get("archive_b64") or "").strip()
+        if not archive_b64:
+            return False, "Your local character archive is missing. Open and save that character first."
+        request_payload = {
+            "entity_id": str(entity_id or "").strip(),
+            "sheet_id": str(local_payload.get("sheet_id") or fallback_sheet_id).strip() or str(fallback_sheet_id or "").strip(),
+            "sheet_name": str(local_payload.get("sheet_name") or fallback_sheet_name).strip() or str(fallback_sheet_name or fallback_sheet_id or "").strip(),
+            "character_id": str(local_payload.get("character_id") or character_id).strip() or str(character_id or "").strip(),
+            "save_revision": int(local_payload.get("save_revision") or 0),
+            "last_saved_at": str(local_payload.get("last_saved_at") or ""),
+            "content_hash": str(local_payload.get("content_hash") or ""),
+            "inventory": normalize_inventory_payload(local_payload.get("inventory") or {}),
+            "stats": dict(local_payload.get("stats") or {}),
+            "archive_b64": archive_b64,
+            "dungeon_id": str(dungeon_id or self._active_dungeon_id or ""),
+        }
+        if not self._dispatch_player_link_character_request(request_payload):
+            return False, "Unable to request local character push."
+        return True, "Requested local character push to the session."
+
+    def _owned_linked_character_resolution_signature(self, sync_payload: dict) -> str:
+        normalized = {
+            "entity_id": str(sync_payload.get("entity_id") or "").strip(),
+            "dungeon_id": str(sync_payload.get("dungeon_id") or "").strip(),
+            "sheet_id": str(sync_payload.get("sheet_id") or "").strip(),
+            "sheet_name": str(sync_payload.get("sheet_name") or "").strip(),
+            "character_id": str(sync_payload.get("character_id") or "").strip(),
+            "save_revision": int(sync_payload.get("save_revision") or 0),
+            "last_saved_at": str(sync_payload.get("last_saved_at") or ""),
+            "content_hash": str(sync_payload.get("content_hash") or ""),
+            "inventory": normalize_inventory_payload(sync_payload.get("inventory") or {}),
+        }
+        serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _local_sync_matches_host_resolution(self, local_payload: dict | None, host_payload: dict) -> bool:
+        if not isinstance(local_payload, dict):
+            return False
+        try:
+            local_save_revision = max(0, int(local_payload.get("save_revision") or 0))
+        except (TypeError, ValueError):
+            local_save_revision = 0
+        try:
+            host_save_revision = max(0, int(host_payload.get("save_revision") or 0))
+        except (TypeError, ValueError):
+            host_save_revision = 0
+        local_inventory = normalize_inventory_payload(local_payload.get("inventory") or {})
+        host_inventory = normalize_inventory_payload(host_payload.get("inventory") or {})
+        local_content_hash = str(local_payload.get("content_hash") or "").strip()
+        host_content_hash = str(host_payload.get("content_hash") or "").strip()
+        if local_save_revision == host_save_revision:
+            if local_content_hash and host_content_hash and local_content_hash == host_content_hash:
+                return True
+            if (
+                self._inventory_payload_fingerprint(local_inventory)
+                == self._inventory_payload_fingerprint(host_inventory)
+            ):
+                return True
+        return False
+
+    def _show_owned_linked_character_resolution_dialog(self, resolution_payload: dict) -> None:
+        entity_id = str(resolution_payload.get("entity_id") or "").strip()
+        if not entity_id:
+            return
+        dialog = QDialog(self)
+        dialog.setModal(True)
+        dialog.setWindowTitle("Resolve Linked Character")
+        dialog.setMinimumWidth(560)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        sheet_id = str(resolution_payload.get("sheet_id") or "").strip()
+        sheet_name = str(
+            resolution_payload.get("sheet_name")
+            or sheet_id
+            or resolution_payload.get("character_id")
+            or "Character"
+        ).strip()
+        character_id = str(resolution_payload.get("character_id") or "").strip() or "unknown"
+        local_exists = bool(resolution_payload.get("local_exists"))
+        if local_exists:
+            summary_text = (
+                f"This entity is linked to '{sheet_name}', and you already have a local copy.\n\n"
+                f"Sheet: {sheet_id or 'unknown'}\n"
+                f"Character id: {character_id}\n\n"
+                "Choose whether to push your local sheet to the session, pull the session version "
+                "into your local sheets, or unlink the character from this entity."
+            )
+        else:
+            summary_text = (
+                f"This entity is linked to '{sheet_name}', but you do not have that character locally.\n\n"
+                f"Sheet: {sheet_id or 'unknown'}\n"
+                f"Character id: {character_id}\n\n"
+                "Choose whether to download the session version into your local sheets or unlink "
+                "the character from this entity."
+            )
+        summary = QLabel(summary_text, dialog)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        choice: dict[str, str] = {"action": ""}
+
+        def _add_action_button(label: str, action: str, *, primary: bool = False) -> None:
+            button = QPushButton(label, dialog)
+            button.setObjectName("PrimaryButton" if primary else "SecondaryButton")
+            button.setMinimumHeight(38)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.clicked.connect(lambda: (choice.update(action=action), dialog.accept()))
+            layout.addWidget(button)
+
+        if local_exists:
+            _add_action_button("Push My Sheet To Session", "push", primary=True)
+            _add_action_button("Pull From Session", "pull")
+        else:
+            _add_action_button("Download Character", "pull", primary=True)
+        _add_action_button("Unlink Character", "unlink")
+
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        controls.rejected.connect(dialog.reject)
+        layout.addWidget(controls)
+
+        self._owned_linked_character_resolution_dialog = dialog
+
+        def _finish_dialog(_result: int) -> None:
+            self._owned_linked_character_resolution_dialog = None
+            action = str(choice.get("action") or "").strip()
+            ok = False
+            message = ""
+            if action == "push":
+                ok, message = self._request_push_local_character_link(
+                    character_id=str(resolution_payload.get("character_id") or "").strip(),
+                    entity_id=entity_id,
+                    dungeon_id=str(resolution_payload.get("dungeon_id") or "").strip(),
+                    fallback_sheet_id=sheet_id,
+                    fallback_sheet_name=sheet_name,
+                )
+            elif action == "pull":
+                ok, message = self._sync_local_sheet_inventory_from_host(
+                    str(resolution_payload.get("character_id") or "").strip(),
+                    resolution_payload.get("inventory") or {},
+                    sheet_name=sheet_name,
+                    archive_b64=str(resolution_payload.get("archive_b64") or ""),
+                    save_revision=int(resolution_payload.get("save_revision") or 0),
+                    last_saved_at=str(resolution_payload.get("last_saved_at") or ""),
+                    content_hash=str(resolution_payload.get("content_hash") or ""),
+                    refresh_entities=True,
+                    sheet_id=sheet_id,
+                    entity_id=entity_id,
+                    dungeon_id=str(resolution_payload.get("dungeon_id") or "").strip(),
+                )
+                if ok:
+                    self._resolved_owned_linked_character_pull_signatures[entity_id] = str(
+                        resolution_payload.get("signature") or ""
+                    )
+            elif action == "unlink":
+                ok, message = self._request_unlink_missing_local_character_link(
+                    entity_id=entity_id,
+                    dungeon_id=str(resolution_payload.get("dungeon_id") or "").strip(),
+                )
+            if message:
+                level = "[INFO]" if ok else "[WARN]"
+                self._append_server_log(f"{level} {message}")
+            dialog.deleteLater()
+            QTimer.singleShot(0, self._process_next_owned_linked_character_resolution)
+
+        dialog.finished.connect(_finish_dialog)
+        dialog.open()
+
+    def _queue_owned_linked_character_resolution(self, resolution_payload: dict) -> None:
+        entity_id = str(resolution_payload.get("entity_id") or "").strip()
+        if not entity_id:
+            return
+        queued = dict(resolution_payload)
+        queued["signature"] = self._owned_linked_character_resolution_signature(queued)
+        self._pending_owned_linked_character_resolutions[entity_id] = queued
+        QTimer.singleShot(0, self._process_next_owned_linked_character_resolution)
+
+    def _process_next_owned_linked_character_resolution(self) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return
+        if self._owned_linked_character_resolution_dialog is not None:
+            return
+        for entity_id, resolution_payload in list(self._pending_owned_linked_character_resolutions.items()):
+            if self._has_pending_character_link_resolution_for_entity(entity_id):
+                continue
+            local_payload = self._resolve_local_sheet_sync_payload(
+                str(resolution_payload.get("character_id") or "").strip()
+            )
+            if self._local_sync_matches_host_resolution(local_payload, resolution_payload):
+                self._resolved_owned_linked_character_pull_signatures[entity_id] = str(
+                    resolution_payload.get("signature") or ""
+                )
+                self._pending_owned_linked_character_resolutions.pop(entity_id, None)
+                continue
+            if (
+                self._resolved_owned_linked_character_pull_signatures.get(entity_id, "")
+                == str(resolution_payload.get("signature") or "")
+            ):
+                self._pending_owned_linked_character_resolutions.pop(entity_id, None)
+                continue
+            self._pending_owned_linked_character_resolutions.pop(entity_id, None)
+            self._show_owned_linked_character_resolution_dialog(resolution_payload)
+            return
+
     def _sync_local_sheet_inventory_from_host(
         self,
         character_id: str,
@@ -13211,16 +13860,11 @@ class DungeonAppletWidget(QWidget):
             return False, "Missing character id for inventory sync."
         clean_sheet = str(sheet_id or "").strip()
         local_sync_payload = self._resolve_local_sheet_sync_payload(clean_character)
+        created_local_character = local_sync_payload is None
+        if isinstance(local_sync_payload, dict) and not clean_sheet:
+            clean_sheet = str(local_sync_payload.get("sheet_id") or "").strip()
         if local_sync_payload is None and not clean_sheet:
-            try:
-                from player_sheets import character_id_for_sheet_id
-            except Exception:
-                character_id_for_sheet_id = None  # type: ignore[assignment]
-            if character_id_for_sheet_id is not None:
-                mapped_character_id = str(character_id_for_sheet_id(clean_character) or "").strip()
-                if mapped_character_id:
-                    clean_character = mapped_character_id
-                    local_sync_payload = self._resolve_local_sheet_sync_payload(clean_character)
+            return False, "Linked character sync is missing the authoritative sheet id."
         payload = normalize_inventory_payload(
             inventory_payload if isinstance(inventory_payload, dict) else {}
         )
@@ -13249,12 +13893,14 @@ class DungeonAppletWidget(QWidget):
         ):
             return True, "Inventory already synchronized."
         clean_archive_b64 = str(archive_b64 or "").strip()
-        payload, converted_notes = self._prepare_incoming_host_inventory_for_local_sync(
+        ok, payload, converted_notes, prepare_message = self._prepare_incoming_host_inventory_for_local_sync(
             inventory_payload=payload,
             sheet_name=str(sheet_name or clean_character),
             character_id=clean_character,
             archive_b64=clean_archive_b64,
         )
+        if not ok:
+            return False, str(prepare_message or "Unable to prepare linked character download.")
         if converted_notes:
             self._append_server_log(
                 f"[INFO] Converted {len(converted_notes)} unknown synced item(s) into inventory notes."
@@ -13277,6 +13923,8 @@ class DungeonAppletWidget(QWidget):
                 clean_character,
                 str(sheet_name or clean_character),
                 payload,
+                sheet_id=clean_sheet,
+                managed_scope=self._active_online_runtime_cache_id(),
                 archive_bytes=archive_bytes,
                 save_revision=resolved_save_revision,
                 last_saved_at=resolved_last_saved_at,
@@ -13298,6 +13946,8 @@ class DungeonAppletWidget(QWidget):
                 last_saved_at=resolved_last_saved_at,
                 content_hash=resolved_content_hash,
             )
+        if created_local_character:
+            return True, "Character downloaded."
         return True, "Inventory synchronized."
 
     def _local_character_sheet_exists(self, character_id: str) -> bool:
@@ -13450,6 +14100,7 @@ class DungeonAppletWidget(QWidget):
                     except (TypeError, ValueError):
                         host_save_revision = 0
                     candidate = {
+                        "character_id": character_id,
                         "sheet_id": sheet_id,
                         "sheet_name": sheet_name,
                         "entity_id": str(item_data.get("entity_id") or "").strip(),
@@ -13480,27 +14131,56 @@ class DungeonAppletWidget(QWidget):
                 entity_id = str(sync_payload.get("entity_id") or "").strip()
                 dungeon_id = str(sync_payload.get("dungeon_id") or "").strip()
                 local_payload = self._resolve_local_sheet_sync_payload(character_id)
-                if isinstance(local_payload, dict) and sheet_id:
-                    try:
-                        local_save_revision = max(0, int(local_payload.get("save_revision") or 0))
-                    except (TypeError, ValueError):
-                        local_save_revision = 0
-                    local_inventory = normalize_inventory_payload(local_payload.get("inventory") or {})
-                    local_content_hash = str(local_payload.get("content_hash") or "").strip()
-                    if local_save_revision > host_save_revision:
-                        self._append_server_log(
-                            "[WARN] Replaced newer local linked character data with the latest host session state."
+                if self._local_sync_matches_host_resolution(local_payload, sync_payload):
+                    if entity_id:
+                        self._resolved_owned_linked_character_pull_signatures[entity_id] = (
+                            self._owned_linked_character_resolution_signature(sync_payload)
                         )
-                    if local_save_revision == host_save_revision:
-                        if local_content_hash and host_content_hash and local_content_hash == host_content_hash:
-                            continue
-                        if (
-                            self._inventory_payload_fingerprint(local_inventory)
-                            == self._inventory_payload_fingerprint(
-                                normalize_inventory_payload(inventory_payload)
-                            )
-                        ):
-                            continue
+                    continue
+                if entity_id and self._has_pending_character_link_resolution_for_entity(entity_id):
+                    continue
+                resolution_signature = self._owned_linked_character_resolution_signature(sync_payload)
+                if (
+                    entity_id
+                    and self._resolved_owned_linked_character_pull_signatures.get(entity_id, "")
+                    == resolution_signature
+                ):
+                    continue
+                if _in_test_env():
+                    resolution_action = self._prompt_owned_linked_character_resolution(
+                        sheet_id=sheet_id,
+                        sheet_name=sheet_name,
+                        character_id=character_id,
+                        local_exists=isinstance(local_payload, dict),
+                    )
+                    if resolution_action == "push":
+                        ok, message = self._request_push_local_character_link(
+                            character_id=character_id,
+                            entity_id=entity_id,
+                            dungeon_id=dungeon_id,
+                            fallback_sheet_id=sheet_id,
+                            fallback_sheet_name=sheet_name,
+                        )
+                        if message:
+                            level = "[INFO]" if ok else "[WARN]"
+                            self._append_server_log(f"{level} {message}")
+                        continue
+                    if resolution_action == "unlink":
+                        ok, message = self._request_unlink_missing_local_character_link(
+                            entity_id=entity_id,
+                            dungeon_id=dungeon_id,
+                        )
+                        if message:
+                            level = "[INFO]" if ok else "[WARN]"
+                            self._append_server_log(f"{level} {message}")
+                        continue
+                    if resolution_action != "pull":
+                        continue
+                else:
+                    queued_payload = dict(sync_payload)
+                    queued_payload["local_exists"] = isinstance(local_payload, dict)
+                    self._queue_owned_linked_character_resolution(queued_payload)
+                    continue
                 sync_kwargs = {
                     "sheet_name": sheet_name,
                     "archive_b64": str(sync_payload.get("archive_b64") or ""),
@@ -13522,8 +14202,11 @@ class DungeonAppletWidget(QWidget):
                     inventory_payload,
                     **sync_kwargs,
                 )
-                if ok and self._local_character_sheet_exists(character_id):
-                    self._approved_host_inventory_sync_characters.add(character_id)
+                if ok:
+                    if self._local_character_sheet_exists(character_id):
+                        self._approved_host_inventory_sync_characters.add(character_id)
+                    if entity_id:
+                        self._resolved_owned_linked_character_pull_signatures[entity_id] = resolution_signature
                 elif message:
                     self._append_server_log(f"[WARN] {message}")
 
@@ -13720,6 +14403,8 @@ class DungeonAppletWidget(QWidget):
                 entity_id = str(data.get("entity_id") or "").strip()
                 if not entity_id and isinstance(pending_request, dict):
                     entity_id = str(pending_request.get("entity_id") or "").strip()
+                if entity_id:
+                    self._pending_owned_linked_character_resolutions.pop(entity_id, None)
                 target_entity = self._find_entity_by_id(entity_id) if entity_id else None
                 linked_character_id = str(data.get("character_id") or "").strip()
                 if not linked_character_id and isinstance(pending_request, dict):
@@ -13769,6 +14454,9 @@ class DungeonAppletWidget(QWidget):
                 entity_id = str(data.get("entity_id") or "").strip() if isinstance(data, dict) else ""
                 if not entity_id and isinstance(pending_request, dict):
                     entity_id = str(pending_request.get("entity_id") or "").strip()
+                if entity_id:
+                    self._pending_owned_linked_character_resolutions.pop(entity_id, None)
+                    self._resolved_owned_linked_character_pull_signatures.pop(entity_id, None)
                 target_entity = self._find_entity_by_id(entity_id) if entity_id else None
                 if isinstance(target_entity, EntityItem):
                     self._clear_character_link_from_entity(target_entity)
@@ -13813,6 +14501,11 @@ class DungeonAppletWidget(QWidget):
                             data.get("sheet_name")
                             or pending_request.get("sheet_name")
                             or target_character
+                        ),
+                        sheet_id=str(
+                            data.get("sheet_id")
+                            or pending_request.get("sheet_id")
+                            or ""
                         ),
                         save_revision=int(data.get("save_revision") or 0),
                         last_saved_at=str(data.get("last_saved_at") or ""),
@@ -14154,6 +14847,7 @@ class DungeonAppletWidget(QWidget):
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "pid": os.getpid(),
             "instance": str(getattr(self, "_debug_instance_id", "")),
+            "profile": str(getattr(self, "_debug_profile", "DEFAULT") or "DEFAULT"),
             "mode": str(getattr(self, "_online_mode", "")),
             "session": str(getattr(self, "_online_session_id", "")),
             "local_player_id": str(getattr(self, "_local_player_id", "") or ""),
@@ -14172,6 +14866,638 @@ class DungeonAppletWidget(QWidget):
                 handle.write("\n")
         except Exception:
             pass
+
+    def _widget_belongs_to_self(self, widget: QWidget | None) -> bool:
+        current = widget
+        while current is not None:
+            if current is self:
+                return True
+            current = current.parentWidget()
+        return False
+
+    def _manual_active_dialog(self) -> QDialog | None:
+        active_modal = QApplication.activeModalWidget()
+        if isinstance(active_modal, QDialog) and self._widget_belongs_to_self(active_modal):
+            return active_modal
+        active_window = QApplication.activeWindow()
+        if isinstance(active_window, QDialog) and self._widget_belongs_to_self(active_window):
+            return active_window
+        for widget in QApplication.topLevelWidgets():
+            if not isinstance(widget, QDialog):
+                continue
+            if not widget.isVisible():
+                continue
+            if self._widget_belongs_to_self(widget):
+                return widget
+        return None
+
+    def _manual_dialog_buttons(self, dialog: QDialog | None) -> list[QAbstractButton]:
+        if dialog is None:
+            return []
+        buttons = [
+            button
+            for button in dialog.findChildren(QAbstractButton)
+            if button.isVisible()
+        ]
+        def _button_sort_key(button: QAbstractButton) -> tuple[int, int, str]:
+            try:
+                point = button.mapToGlobal(QPoint(0, 0))
+                return (int(point.y()), int(point.x()), str(button.text() or ""))
+            except RuntimeError:
+                return (10**9, 10**9, str(button.text() or ""))
+        return sorted(buttons, key=_button_sort_key)
+
+    def _manual_activate_dialog_button(self, index: int) -> bool:
+        dialog = self._manual_active_dialog()
+        buttons = [
+            button
+            for button in self._manual_dialog_buttons(dialog)
+            if button.isEnabled()
+        ]
+        if index < 0 or index >= len(buttons):
+            self._append_server_log(
+                f"[WARN] Manual test key could not find dialog button index {index + 1}."
+            )
+            self._debug_log(
+                "manual_dialog_button_missing",
+                dialog_title=str(dialog.windowTitle() if dialog is not None else ""),
+                button_index=int(index),
+                button_count=int(len(buttons)),
+            )
+            return False
+        button = buttons[index]
+        self._debug_log(
+            "manual_dialog_button_click",
+            dialog_title=str(dialog.windowTitle() if dialog is not None else ""),
+            button_index=int(index),
+            button_text=str(button.text() or ""),
+        )
+        button.animateClick(0)
+        return True
+
+    def _manual_cancel_dialog(self) -> bool:
+        dialog = self._manual_active_dialog()
+        if dialog is None:
+            self._append_server_log("[WARN] Manual test key found no active dialog to cancel.")
+            self._debug_log("manual_dialog_cancel_missing")
+            return False
+        candidates = []
+        for button in self._manual_dialog_buttons(dialog):
+            if not button.isEnabled():
+                continue
+            text = str(button.text() or "").strip().lower()
+            if text in {"cancel", "dismiss", "close", "reject", "no"}:
+                candidates.append(button)
+        if candidates:
+            button = candidates[0]
+            self._debug_log(
+                "manual_dialog_cancel_click",
+                dialog_title=str(dialog.windowTitle() or ""),
+                button_text=str(button.text() or ""),
+            )
+            button.animateClick(0)
+            return True
+        dialog.reject()
+        self._debug_log(
+            "manual_dialog_reject",
+            dialog_title=str(dialog.windowTitle() or ""),
+        )
+        return True
+
+    def _manual_relevant_focus_active(self, watched_in_tree: bool) -> bool:
+        if watched_in_tree:
+            return True
+        focus_widget = QApplication.focusWidget()
+        if isinstance(focus_widget, QWidget) and self._widget_belongs_to_self(focus_widget):
+            return True
+        if self._manual_active_dialog() is not None:
+            return True
+        return False
+
+    def _manual_select_entity(self, entity: EntityItem | None) -> bool:
+        if not isinstance(entity, EntityItem):
+            return False
+        scene = self.canvas.scene()
+        scene.clearSelection()
+        entity.setSelected(True)
+        self.inspector.set_entity(entity)
+        self._position_floating_overlays()
+        self.canvas.centerOn(entity)
+        entity.update()
+        return True
+
+    def _manual_scenario_entity(self) -> EntityItem | None:
+        target_label = str(self._manual_test_entity_label or "").strip().casefold()
+        if not target_label:
+            return None
+        for item in self.canvas.scene().items():
+            if not isinstance(item, EntityItem):
+                continue
+            label = str(item.data(ROLE_LABEL) or "").strip().casefold()
+            if label == target_label:
+                return item
+        return None
+
+    def _manual_ensure_or_select_scenario_entity(self) -> bool:
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            return self._manual_select_first_owned_entity()
+        entity = self._manual_scenario_entity()
+        if entity is None:
+            self.canvas._place_entity(QPointF(GRID_SIZE * 4, GRID_SIZE * 4))
+            for item in self.canvas.scene().selectedItems():
+                if isinstance(item, EntityItem):
+                    entity = item
+                    break
+            if entity is None:
+                entity = next(
+                    (
+                        item
+                        for item in self.canvas.scene().items()
+                        if isinstance(item, EntityItem)
+                    ),
+                    None,
+                )
+            if entity is None:
+                self._append_server_log("[WARN] Manual test could not create the scenario entity.")
+                self._debug_log("manual_entity_create_failed")
+                return False
+            entity.setData(ROLE_LABEL, self._manual_test_entity_label)
+            entity.update()
+            self._mark_active_dungeon_dirty()
+            if self._online_mode == ONLINE_MODE_DM_HOST:
+                self._broadcast_snapshot_if_host()
+            self._debug_log(
+                "manual_entity_created",
+                entity_id=str(entity.data(ROLE_ENTITY_ID) or ""),
+                label=str(self._manual_test_entity_label or ""),
+            )
+        selected = self._manual_select_entity(entity)
+        if selected:
+            self._append_server_log(
+                f"[INFO] Manual test selected scenario entity '{self._manual_test_entity_label}'."
+            )
+            self._debug_log(
+                "manual_entity_selected",
+                entity_id=str(entity.data(ROLE_ENTITY_ID) or ""),
+                label=str(entity.data(ROLE_LABEL) or ""),
+            )
+        return selected
+
+    def _manual_select_first_owned_entity(self) -> bool:
+        local_player_id = str(self._local_player_id or "").strip()
+        if not local_player_id:
+            self._append_server_log("[WARN] Manual test could not select an owned entity before join completed.")
+            self._debug_log("manual_select_owned_entity_missing_player")
+            return False
+        candidates: list[EntityItem] = []
+        for item in self.canvas.scene().items():
+            if not isinstance(item, EntityItem):
+                continue
+            if str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip() != local_player_id:
+                continue
+            candidates.append(item)
+        if not candidates:
+            self._append_server_log("[WARN] Manual test found no owned entity to select.")
+            self._debug_log("manual_select_owned_entity_missing")
+            return False
+        candidates.sort(key=lambda item: str(item.data(ROLE_LABEL) or "").strip().casefold())
+        entity = candidates[0]
+        self._manual_select_entity(entity)
+        self._append_server_log(
+            f"[INFO] Manual test selected owned entity '{str(entity.data(ROLE_LABEL) or 'Entity')}'."
+        )
+        self._debug_log(
+            "manual_select_owned_entity_ok",
+            entity_id=str(entity.data(ROLE_ENTITY_ID) or ""),
+            label=str(entity.data(ROLE_LABEL) or ""),
+        )
+        return True
+
+    def _manual_find_selected_entity(self) -> EntityItem | None:
+        for item in self.canvas.scene().selectedItems():
+            if isinstance(item, EntityItem):
+                return item
+        return None
+
+    def _manual_assign_selected_entity_to_player_name(self, player_name: str) -> bool:
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            self._append_server_log("[WARN] Manual test owner assignment is DM-only.")
+            self._debug_log("manual_assign_owner_denied_player_mode")
+            return False
+        entity = self._manual_find_selected_entity()
+        if entity is None and not self._manual_ensure_or_select_scenario_entity():
+            return False
+        entity = self._manual_find_selected_entity()
+        if entity is None:
+            return False
+        target_player_id = ""
+        target_name = str(player_name or "").strip()
+        if target_name:
+            for player_id, connected_name in sorted(
+                self._connected_players.items(),
+                key=lambda entry: entry[1].casefold(),
+            ):
+                if str(connected_name or "").strip().casefold() == target_name.casefold():
+                    target_player_id = str(player_id or "").strip()
+                    target_name = str(connected_name or target_name).strip()
+                    break
+            if not target_player_id:
+                self._append_server_log(
+                    f"[WARN] Manual test could not find connected player '{player_name}'."
+                )
+                self._debug_log(
+                    "manual_assign_owner_missing_player",
+                    requested_name=str(player_name or ""),
+                )
+                return False
+        entity.setData(ROLE_OWNER_PLAYER_ID, target_player_id)
+        entity.update()
+        self.inspector.set_entity(entity)
+        self._mark_active_dungeon_dirty()
+        if self._online_mode == ONLINE_MODE_DM_HOST:
+            self._broadcast_snapshot_if_host()
+        self._append_server_log(
+            (
+                f"[INFO] Manual test assigned '{str(entity.data(ROLE_LABEL) or 'Entity')}' to {target_name}."
+                if target_player_id
+                else f"[INFO] Manual test cleared the owner for '{str(entity.data(ROLE_LABEL) or 'Entity')}'."
+            )
+        )
+        self._debug_log(
+            "manual_assign_owner",
+            entity_id=str(entity.data(ROLE_ENTITY_ID) or ""),
+            label=str(entity.data(ROLE_LABEL) or ""),
+            owner_player_id=str(target_player_id or ""),
+            owner_player_name=str(target_name or ""),
+        )
+        return True
+
+    def _manual_match_local_sheet(self, sheet_hint: str) -> dict | None:
+        try:
+            from player_sheets import character_id_for_entry, list_character_link_targets, sheet_id_for_entry
+        except Exception:
+            return None
+        clean_hint = str(sheet_hint or "").strip().casefold()
+        entries = list_character_link_targets()
+        matched_entry = None
+        for entry in entries:
+            entry_name = str(getattr(entry, "name", "") or "").strip()
+            entry_sheet_id = str(sheet_id_for_entry(entry) or "").strip()
+            entry_character_id = str(character_id_for_entry(entry) or "").strip()
+            values = {
+                entry_name.casefold(),
+                entry_sheet_id.casefold(),
+                entry_character_id.casefold(),
+            }
+            if clean_hint and clean_hint in values:
+                matched_entry = entry
+                break
+        if matched_entry is None and len(entries) == 1:
+            matched_entry = entries[0]
+        if matched_entry is None:
+            return None
+        return {
+            "sheet_id": str(sheet_id_for_entry(matched_entry) or "").strip(),
+            "sheet_name": str(getattr(matched_entry, "name", "") or "").strip(),
+        }
+
+    def _manual_link_selected_owned_entity_to_sheet(self, sheet_hint: str) -> bool:
+        entity = self._manual_find_selected_entity()
+        if entity is None and not self._manual_select_first_owned_entity():
+            return False
+        entity = self._manual_find_selected_entity()
+        if entity is None:
+            return False
+        if self._online_mode == ONLINE_MODE_PLAYER and not self._is_entity_owned_by_local_player(entity):
+            self._append_server_log("[WARN] Manual test can only link your owned entity while in player mode.")
+            self._debug_log("manual_link_sheet_denied_unowned")
+            return False
+        selected_sheet = self._manual_match_local_sheet(sheet_hint)
+        if not isinstance(selected_sheet, dict):
+            self._append_server_log(
+                f"[WARN] Manual test could not find local sheet '{sheet_hint}'."
+            )
+            self._debug_log(
+                "manual_link_sheet_missing",
+                sheet_hint=str(sheet_hint or ""),
+            )
+            return False
+        local_payload, error = self._local_link_sync_payload_for_sheet(
+            str(selected_sheet.get("sheet_id") or ""),
+            fallback_sheet_name=str(selected_sheet.get("sheet_name") or ""),
+        )
+        if not isinstance(local_payload, dict):
+            self._append_server_log(f"[WARN] {error or 'Unable to load local character data.'}")
+            self._debug_log(
+                "manual_link_sheet_payload_error",
+                sheet_id=str(selected_sheet.get("sheet_id") or ""),
+                error=str(error or ""),
+            )
+            return False
+        request_payload = {
+            "entity_id": str(entity.data(ROLE_ENTITY_ID) or "").strip(),
+            "sheet_id": str(local_payload.get("sheet_id") or "").strip(),
+            "sheet_name": str(local_payload.get("sheet_name") or "").strip(),
+            "character_id": str(local_payload.get("character_id") or "").strip(),
+            "save_revision": int(local_payload.get("save_revision") or 0),
+            "last_saved_at": str(local_payload.get("last_saved_at") or ""),
+            "content_hash": str(local_payload.get("content_hash") or ""),
+            "inventory": normalize_inventory_payload(local_payload.get("inventory") or {}),
+            "stats": dict(local_payload.get("stats") or {}),
+            "archive_b64": str(local_payload.get("archive_b64") or ""),
+            "dungeon_id": str(self._active_dungeon_id or ""),
+        }
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            ok = self._dispatch_player_link_character_request(request_payload)
+        else:
+            self._apply_character_link_to_entity(
+                entity,
+                sheet_id=str(request_payload.get("sheet_id") or ""),
+                sheet_name=str(request_payload.get("sheet_name") or ""),
+                character_id=str(request_payload.get("character_id") or ""),
+                authority_player_id=str(entity.data(ROLE_OWNER_PLAYER_ID) or ""),
+                save_revision=int(request_payload.get("save_revision") or 0),
+                last_saved_at=str(request_payload.get("last_saved_at") or ""),
+                content_hash=str(request_payload.get("content_hash") or ""),
+                linked_inventory=request_payload.get("inventory") or {},
+                stats=request_payload.get("stats") or {},
+                archive_b64=str(request_payload.get("archive_b64") or ""),
+            )
+            entity.update()
+            self.inspector.set_linked_character_info(str(request_payload.get("sheet_name") or ""))
+            self.inspector.set_entity(entity)
+            self._position_floating_overlays()
+            self._mark_active_dungeon_dirty()
+            if self._online_mode == ONLINE_MODE_DM_HOST:
+                self._broadcast_snapshot_if_host()
+            ok = True
+        if not ok:
+            self._append_server_log("[WARN] Manual test failed to send link request.")
+            self._debug_log(
+                "manual_link_sheet_dispatch_failed",
+                sheet_id=str(request_payload.get("sheet_id") or ""),
+                character_id=str(request_payload.get("character_id") or ""),
+            )
+            return False
+        self._append_server_log(
+            f"[INFO] Manual test linked '{str(entity.data(ROLE_LABEL) or 'Entity')}' to '{str(request_payload.get('sheet_name') or request_payload.get('sheet_id') or 'character')}'."
+        )
+        self._debug_log(
+            "manual_link_sheet_ok",
+            entity_id=str(entity.data(ROLE_ENTITY_ID) or ""),
+            sheet_id=str(request_payload.get("sheet_id") or ""),
+            character_id=str(request_payload.get("character_id") or ""),
+        )
+        return True
+
+    def _manual_add_item_to_selected_linked_character(self) -> bool:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            self._append_server_log("[WARN] Manual test item mutation is player-only.")
+            self._debug_log("manual_add_item_denied_mode", mode=str(self._online_mode or ""))
+            return False
+        entity = self._manual_find_selected_entity()
+        if entity is None and not self._manual_select_first_owned_entity():
+            return False
+        entity = self._manual_find_selected_entity()
+        if entity is None:
+            return False
+        character_id = str(entity.data(ROLE_LINKED_CHARACTER_ID) or "").strip()
+        if not character_id:
+            self._append_server_log("[WARN] Manual test selected entity has no linked character.")
+            self._debug_log("manual_add_item_missing_character")
+            return False
+        local_payload = self._resolve_local_sheet_sync_payload(character_id)
+        if not isinstance(local_payload, dict):
+            self._append_server_log("[WARN] Manual test could not resolve the local linked character package.")
+            self._debug_log(
+                "manual_add_item_missing_local_payload",
+                character_id=str(character_id or ""),
+            )
+            return False
+        sheet_id = str(local_payload.get("sheet_id") or "").strip()
+        if not sheet_id:
+            self._append_server_log("[WARN] Manual test could not resolve the local sheet id.")
+            self._debug_log(
+                "manual_add_item_missing_sheet",
+                character_id=str(character_id or ""),
+            )
+            return False
+        self._manual_test_item_counter += 1
+        counter = int(self._manual_test_item_counter)
+        item_id = f"manual_{self._debug_profile.lower()}_item_{counter}"
+        item_title = f"Manual {self._debug_profile} Item {counter}"
+        item_document = build_item_document(
+            {
+                "item_id": item_id,
+                "title": item_title,
+                "rarity": "common",
+                "category": "gear",
+                "description": f"Manual test item {counter} from {self._debug_profile}.",
+            },
+            None,
+        )
+        target_path = items_dir() / f"{item_id}{ITEM_FILE_EXTENSION}"
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            write_item_document(target_path, item_document)
+        except Exception as exc:
+            self._append_server_log(f"[WARN] Manual test failed to write item '{item_title}': {exc}")
+            self._debug_log(
+                "manual_add_item_write_failed",
+                item_id=str(item_id or ""),
+                path=str(target_path),
+                error=str(exc),
+            )
+            return False
+        payload = normalize_inventory_payload(local_payload.get("inventory") or {})
+        inventory_entries = list(payload.get("inventory") or [])
+        inventory_entries.append({"item_id": item_id, "quantity": 1})
+        payload["inventory"] = inventory_entries
+        item_documents = _inventory_payload_item_documents(payload)
+        item_documents[item_id] = item_document
+        payload["item_documents"] = item_documents
+        try:
+            from player_sheets import set_inventory_payload_for_sheet_id
+        except Exception:
+            self._append_server_log("[WARN] Manual test could not import player sheets inventory writer.")
+            self._debug_log("manual_add_item_player_sheets_unavailable")
+            return False
+        ok, message, saved_payload = set_inventory_payload_for_sheet_id(
+            sheet_id,
+            payload,
+            emit_event=True,
+        )
+        if not ok:
+            self._append_server_log(f"[WARN] {message or 'Manual test failed to update inventory.'}")
+            self._debug_log(
+                "manual_add_item_inventory_update_failed",
+                item_id=str(item_id or ""),
+                message=str(message or ""),
+            )
+            return False
+        saved = saved_payload if isinstance(saved_payload, dict) else payload
+        self._append_server_log(
+            f"[INFO] Manual test added '{item_title}' to linked character '{str(local_payload.get('sheet_name') or sheet_id)}'."
+        )
+        self._debug_log(
+            "manual_add_item_ok",
+            item_id=str(item_id or ""),
+            title=str(item_title or ""),
+            sheet_id=str(sheet_id or ""),
+            character_id=str(character_id or ""),
+            inventory_count=int(len(saved.get("inventory") or [])),
+        )
+        return True
+
+    def _manual_checkpoint_entity_summary(self, entity: EntityItem | None) -> dict[str, object]:
+        if not isinstance(entity, EntityItem):
+            return {}
+        linked_inventory = normalize_inventory_payload(getattr(entity, "linked_inventory", {}) or {})
+        inventory_ids = [
+            _inventory_entry_item_id(raw)
+            for raw in list(linked_inventory.get("inventory") or [])
+            if _inventory_entry_item_id(raw)
+        ]
+        return {
+            "entity_id": str(entity.data(ROLE_ENTITY_ID) or ""),
+            "label": str(entity.data(ROLE_LABEL) or ""),
+            "owner_player_id": str(entity.data(ROLE_OWNER_PLAYER_ID) or ""),
+            "linked_sheet_id": str(entity.data(ROLE_LINKED_SHEET_ID) or ""),
+            "linked_sheet_name": str(entity.data(ROLE_LINKED_SHEET_NAME) or ""),
+            "linked_character_id": str(entity.data(ROLE_LINKED_CHARACTER_ID) or ""),
+            "linked_inventory_ids": inventory_ids,
+        }
+
+    def _manual_checkpoint_local_character_summary(self, character_id: str) -> dict[str, object]:
+        clean_character = str(character_id or "").strip()
+        if not clean_character:
+            return {}
+        local_payload = self._resolve_local_sheet_sync_payload(clean_character)
+        if not isinstance(local_payload, dict):
+            return {
+                "character_id": clean_character,
+                "exists": False,
+            }
+        inventory_payload = normalize_inventory_payload(local_payload.get("inventory") or {})
+        inventory_ids = [
+            _inventory_entry_item_id(raw)
+            for raw in list(inventory_payload.get("inventory") or [])
+            if _inventory_entry_item_id(raw)
+        ]
+        return {
+            "character_id": clean_character,
+            "exists": True,
+            "sheet_id": str(local_payload.get("sheet_id") or ""),
+            "sheet_name": str(local_payload.get("sheet_name") or ""),
+            "inventory_ids": inventory_ids,
+            "item_document_ids": sorted(_inventory_payload_item_documents(inventory_payload).keys()),
+            "inventory_notes": str(inventory_payload.get("inventory_notes") or ""),
+            "save_revision": int(local_payload.get("save_revision") or 0),
+            "content_hash": str(local_payload.get("content_hash") or ""),
+        }
+
+    def _manual_log_checkpoint(self, *, detail: bool = False) -> bool:
+        selected_entity = self._manual_find_selected_entity()
+        if selected_entity is None:
+            selected_entity = self._manual_scenario_entity()
+        selected_summary = self._manual_checkpoint_entity_summary(selected_entity)
+        local_character_summary = self._manual_checkpoint_local_character_summary(
+            str(selected_summary.get("linked_character_id") or "")
+        )
+        dialog = self._manual_active_dialog()
+        buttons = [str(button.text() or "") for button in self._manual_dialog_buttons(dialog)]
+        owned_entity_ids: list[str] = []
+        local_player_id = str(self._local_player_id or "").strip()
+        if local_player_id:
+            for item in self.canvas.scene().items():
+                if not isinstance(item, EntityItem):
+                    continue
+                if str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip() != local_player_id:
+                    continue
+                owned_entity_ids.append(str(item.data(ROLE_ENTITY_ID) or ""))
+        payload: dict[str, object] = {
+            "checkpoint_kind": "detail" if detail else "basic",
+            "player_connection_ready": bool(self._player_connection_ready),
+            "awaiting_player_snapshot": bool(self._awaiting_player_snapshot),
+            "connected_player_names": sorted(str(name or "") for name in self._connected_players.values()),
+            "connected_player_count": int(len(self._connected_players)),
+            "pending_resolution_entity_ids": sorted(self._pending_owned_linked_character_resolutions.keys()),
+            "selected_entity": json.dumps(selected_summary, ensure_ascii=True, sort_keys=True),
+            "local_character": json.dumps(local_character_summary, ensure_ascii=True, sort_keys=True),
+            "owned_entity_ids": json.dumps(sorted(owned_entity_ids), ensure_ascii=True),
+            "dialog_title": str(dialog.windowTitle() if dialog is not None else ""),
+            "dialog_buttons": json.dumps(buttons, ensure_ascii=True),
+        }
+        if detail:
+            scene_entities = []
+            for item in self.canvas.scene().items():
+                if not isinstance(item, EntityItem):
+                    continue
+                scene_entities.append(self._manual_checkpoint_entity_summary(item))
+            payload["scene_entities"] = json.dumps(scene_entities, ensure_ascii=True, sort_keys=True)
+            payload["manual_sheet_hint"] = str(self._manual_test_sheet_name or "")
+            payload["manual_entity_label"] = str(self._manual_test_entity_label or "")
+            payload["manual_test_port"] = int(self._manual_test_port)
+        self._debug_log("manual_checkpoint", **payload)
+        self._append_server_log(
+            f"[INFO] Manual checkpoint ({'detail' if detail else 'basic'}) captured."
+        )
+        return True
+
+    def _handle_manual_test_key(self, event: QKeyEvent, *, watched_in_tree: bool) -> bool:
+        if not getattr(self, "_manual_test_keys_enabled", False):
+            return False
+        if event.modifiers() & (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        ):
+            return False
+        if not self._manual_relevant_focus_active(watched_in_tree):
+            return False
+        key = event.key()
+        handled = False
+        if key == Qt.Key.Key_F13:
+            handled = self._manual_log_checkpoint(detail=False)
+        elif key == Qt.Key.Key_F14:
+            handled = self._manual_activate_dialog_button(0)
+        elif key == Qt.Key.Key_F15:
+            handled = self._manual_activate_dialog_button(1)
+        elif key == Qt.Key.Key_F16:
+            handled = self._manual_activate_dialog_button(2)
+        elif key == Qt.Key.Key_F17:
+            handled = self._manual_activate_dialog_button(3)
+        elif key == Qt.Key.Key_F18:
+            handled = self._manual_cancel_dialog()
+        elif key == Qt.Key.Key_F20:
+            handled = (
+                self._manual_select_first_owned_entity()
+                if self._online_mode == ONLINE_MODE_PLAYER
+                else self._manual_ensure_or_select_scenario_entity()
+            )
+        elif key == Qt.Key.Key_F21:
+            handled = (
+                self._manual_link_selected_owned_entity_to_sheet(self._manual_test_sheet_name)
+                if self._online_mode == ONLINE_MODE_PLAYER
+                else self._manual_assign_selected_entity_to_player_name("Player1")
+            )
+        elif key == Qt.Key.Key_F22:
+            handled = (
+                self._manual_add_item_to_selected_linked_character()
+                if self._online_mode == ONLINE_MODE_PLAYER
+                else self._manual_assign_selected_entity_to_player_name("Player2")
+            )
+        elif key == Qt.Key.Key_F23:
+            handled = (
+                self._manual_log_checkpoint(detail=False)
+                if self._online_mode == ONLINE_MODE_PLAYER
+                else self._manual_assign_selected_entity_to_player_name("")
+            )
+        elif key == Qt.Key.Key_F24:
+            handled = self._manual_log_checkpoint(detail=True)
+        if handled:
+            event.accept()
+        return handled
 
     def _remove_app_event_filter(self) -> None:
         if self._app is not None:
@@ -14215,6 +15541,9 @@ class DungeonAppletWidget(QWidget):
             watched_in_tree = self._watched_is_self_or_descendant(watched)
         except RuntimeError:
             return False
+        if event_type == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+            if self._handle_manual_test_key(event, watched_in_tree=watched_in_tree):
+                return True
         if event_type == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
             if not watched_in_tree:
                 return False
@@ -14491,6 +15820,8 @@ class DungeonAppletWidget(QWidget):
         self.selection_widget.refresh_overlay_positions()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        if self._handle_manual_test_key(event, watched_in_tree=True):
+            return
         focus_widget = QApplication.focusWidget()
         if (
             isinstance(focus_widget, QLineEdit)
@@ -15055,11 +16386,7 @@ class DungeonAppletWidget(QWidget):
             return
         if self._online_mode == ONLINE_MODE_DM_HOST:
             owner_player_id = str(entity.data(ROLE_OWNER_PLAYER_ID) or "").strip()
-            linked_character_id = str(entity.data(ROLE_LINKED_CHARACTER_ID) or "").strip()
-            linked_sheet_id = str(entity.data(ROLE_LINKED_SHEET_ID) or "").strip()
-            if owner_player_id and owner_player_id in self._connected_players and (
-                linked_character_id or linked_sheet_id
-            ):
+            if owner_player_id and owner_player_id in self._connected_players:
                 QMessageBox.information(
                     self,
                     "Link Character",
@@ -15447,9 +16774,10 @@ class DungeonAppletWidget(QWidget):
         if not character_id:
             return None, ""
         sync_payload = self._resolve_local_sheet_sync_payload(character_id) or {}
+        authoritative_sheet_id = str(sync_payload.get("sheet_id") or clean_sheet).strip() or clean_sheet
         sync_request = {
             "character_id": character_id,
-            "sheet_id": clean_sheet,
+            "sheet_id": authoritative_sheet_id,
             "save_revision": int(sync_payload.get("save_revision") or 0),
             "last_saved_at": str(sync_payload.get("last_saved_at") or ""),
             "content_hash": str(sync_payload.get("content_hash") or ""),
@@ -15514,10 +16842,20 @@ class DungeonAppletWidget(QWidget):
             character_id=character_id,
             sheet_id=clean_sheet,
         )
-        if self._online_mode == ONLINE_MODE_DM_HOST and connected_owner_player_id:
-            self._append_server_log(
-                "[WARN] Ignored DM-local linked character save because the assigned player is still authoritative while connected."
-            )
+        authoritative_online_player_id = str(
+            (collection_payload or {}).get("authority_player_id")
+            or (collection_payload or {}).get("owner_player_id")
+            or ""
+        ).strip()
+        if self._online_mode == ONLINE_MODE_DM_HOST and authoritative_online_player_id:
+            if connected_owner_player_id:
+                self._append_server_log(
+                    "[WARN] Ignored DM-local linked character save because the assigned player is still authoritative while connected."
+                )
+            else:
+                self._append_server_log(
+                    "[WARN] Ignored DM-local linked character save because the assigned player remains authoritative for the online state while disconnected."
+                )
             return
         owner = ""
         if self._online_mode == ONLINE_MODE_DM_HOST:

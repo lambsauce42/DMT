@@ -31,7 +31,11 @@ class PlayerSheetsEventTests(unittest.TestCase):
         widget._manager = types.SimpleNamespace(entries=[entry])
         widget._current_entry = entry
         refreshed = {"count": 0}
+        library_refreshes = {"count": 0}
         widget._set_inventory = lambda _entry: refreshed.__setitem__("count", refreshed["count"] + 1)
+        widget._refresh_inventory_library = lambda: library_refreshes.__setitem__(
+            "count", library_refreshes["count"] + 1
+        )
 
         payload = {
             "inventory": [str(Path("tmp") / "item_1.json")],
@@ -50,6 +54,7 @@ class PlayerSheetsEventTests(unittest.TestCase):
         self.assertEqual(entry.gold, 7)
         self.assertEqual(entry.silver, 8)
         self.assertEqual(entry.copper, 9)
+        self.assertEqual(library_refreshes["count"], 1)
         self.assertEqual(refreshed["count"], 1)
 
 

@@ -2228,7 +2228,7 @@ def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
     assert first_item["ac"] == 15
 
 
-def test_host_sync_character_inventory_can_remove_unapproved_unknown_items(
+def test_host_sync_character_inventory_keeps_player_owned_unknown_items_active_when_remove_was_requested(
     monkeypatch, dungeon_widget
 ):
     monkeypatch.setattr(
@@ -2275,8 +2275,8 @@ def test_host_sync_character_inventory_can_remove_unapproved_unknown_items(
     result = host.results[-1][1]
     assert result["ok"] is True
     first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
-    assert first_item["linked_inventory"]["inventory"] == []
-    assert first_item["linked_inventory"]["item_documents"] == {}
+    assert first_item["linked_inventory"]["inventory"][0]["item_id"] == "item_unknown"
+    assert first_item["linked_inventory"]["item_documents"]["item_unknown"]["payload"]["title"] == "Unknown Blade"
 
 
 def test_unknown_item_review_import_failure_is_deduplicated(dungeon_widget, monkeypatch):
@@ -2376,7 +2376,57 @@ def test_review_active_unknown_linked_items_for_dm_reprompts_after_failed_persis
     assert any("not persisted into DM storage" in message for message in log_messages)
 
 
-def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
+def test_review_active_unknown_linked_items_for_dm_recovers_item_document_from_archive(
+    dungeon_widget, monkeypatch
+):
+    prompt_calls: list[dict] = []
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_unknown_items_with_preview",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or False,
+    )
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+
+    archive_inventory = {
+        "inventory": [{"item_id": "item_unknown", "quantity": 1}],
+        "equipment": {},
+        "item_documents": {
+            "item_unknown": build_item_document(
+                {"item_id": "item_unknown", "title": "Unknown Blade"},
+                None,
+            )
+        },
+    }
+    raw_archive = io.BytesIO()
+    with zipfile.ZipFile(raw_archive, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("sheet.pdf", b"%PDF-1.4\n%test\n")
+        archive.writestr("inventory.json", json.dumps(archive_inventory))
+        archive.writestr(
+            "info.json",
+            json.dumps({"archive_version": 2, "updated_at": "2026-03-04T00:00:00+00:00"}),
+        )
+    archive_b64 = base64.b64encode(raw_archive.getvalue()).decode("ascii")
+
+    dungeon_widget._review_active_unknown_linked_items_for_dm(
+        player_id="player-1",
+        character_id="character-1",
+        sheet_name="Hero",
+        inventory_payload={
+            "inventory": [{"item_id": "item_unknown", "quantity": 1}],
+            "equipment": {},
+            "item_documents": {},
+        },
+        archive_b64=archive_b64,
+    )
+
+    assert len(prompt_calls) == 1
+    entries = prompt_calls[0]["entries"]
+    assert isinstance(entries, list) and len(entries) == 1
+    assert entries[0]["item_document"]["payload"]["title"] == "Unknown Blade"
+
+
+def test_host_sync_character_inventory_does_not_kick_player_for_unknown_items(
     monkeypatch, dungeon_widget
 ):
     monkeypatch.setattr(
@@ -2420,12 +2470,55 @@ def test_host_sync_character_inventory_can_kick_player_for_unknown_items(
     )
 
     result = host.results[-1][1]
-    assert result["ok"] is False
-    assert host.kicks == [
-        ("player-1", "DM rejected unknown linked items and removed the player.")
-    ]
+    assert result["ok"] is True
+    assert host.kicks == []
     first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
-    assert first_item["linked_inventory"] == {}
+    assert first_item["linked_inventory"]["inventory"][0]["item_id"] == "item_unknown"
+
+
+def test_host_link_character_entity_defers_unknown_item_review(
+    dungeon_widget,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_review_unknown_linked_items",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("link flow should not block on review")),
+    )
+
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state("e1", "player-1", label="Entity", hp=10, max_hp=10, ac=10),
+        load_state=True,
+    )
+
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        _link_character_payload(
+            entity_id="e1",
+            sheet_id="sheet-1",
+            sheet_name="test",
+            character_id="character-1",
+            inventory={
+                "inventory": [{"item_id": "item_unknown", "quantity": 1}],
+                "equipment": {},
+                "item_documents": {
+                    "item_unknown": build_item_document(
+                        {"item_id": "item_unknown", "title": "Unknown Blade"},
+                        None,
+                    )
+                },
+            },
+            stats={"name": "test", "ac": 17, "hp_max": 23, "hp_current": 14},
+            archive_b64=_valid_archive_b64(),
+        ),
+        request_id="link-unknown-deferred",
+    )
+
+    result = host.results[-1][1]
+    assert result["ok"] is True
+    entity_state = dungeon_widget._dungeons[0]["state"]["items"][0]
+    assert entity_state["linked_inventory"]["inventory"][0]["item_id"] == "item_unknown"
 
 
 def test_host_sync_character_inventory_rejects_unowned_character_target(
@@ -2970,6 +3063,40 @@ def test_host_add_loot_from_inventory_persists_unknown_items_to_dm_storage(dunge
     assert stored_item_id_found
 
 
+def test_persist_item_documents_to_local_library_accepts_fresh_import_from_cached_path(
+    dungeon_widget, monkeypatch, tmp_path
+):
+    items_root = tmp_path / "items"
+    items_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: items_root)
+    monkeypatch.setattr(dungeon_widget, "_linked_item_document_by_id", lambda _item_id: None)
+
+    item_document = build_item_document(
+        {"item_id": "item_unknown", "title": "Unknown Item"},
+        None,
+    )
+
+    persisted, unresolved, messages = dungeon_widget._persist_item_documents_to_local_library(
+        [
+            {
+                "item_id": "item_unknown",
+                "title": "Unknown Item",
+                "item_document": item_document,
+            }
+        ],
+        overwrite_existing=True,
+    )
+
+    assert persisted == ["item_unknown"]
+    assert unresolved == []
+    assert messages == []
+    persisted_files = list(items_root.glob("*.dmtitem"))
+    assert len(persisted_files) == 1
+    persisted_payload = load_item_payload(persisted_files[0])
+    assert isinstance(persisted_payload, dict)
+    assert persisted_payload["item_id"] == "item_unknown"
+
+
 def test_host_add_loot_from_inventory_rejects_missing_inventory_item(dungeon_widget):
     class _HostStub:
         def __init__(self):
@@ -3434,6 +3561,11 @@ def test_client_loot_add_result_syncs_local_inventory_payload(monkeypatch, dunge
         character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_linked_item_document_by_id",
+        lambda item_id: build_item_document({"item_id": item_id, "title": "Known Item"}, None),
+    )
     dungeon_widget._local_player_id = "player-1"
     dungeon_widget._pending_add_loot_from_inventory_requests["loot-sync-1"] = {
         "sheet_id": "sheet-1",
@@ -3518,16 +3650,22 @@ def test_sync_local_sheet_inventory_creates_missing_character_entry(monkeypatch,
         character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_linked_item_document_by_id",
+        lambda item_id: build_item_document({"item_id": item_id, "title": "Known Item"}, None),
+    )
 
     ok, message = dungeon_widget._sync_local_sheet_inventory_from_host(
-        "sheet-1",
+        "character-sheet-1",
         {"inventory": ["item_z"], "equipment": {}},
         sheet_name="Hero Name",
+        sheet_id="sheet-1",
         refresh_entities=False,
     )
 
     assert ok is True
-    assert "synchronized" in message.lower()
+    assert message == "Character downloaded."
     assert calls["character_id"] == "character-sheet-1"
     assert calls["sheet_name"] == "Hero Name"
     assert calls["inventory_payload"]["inventory"] == [
@@ -3555,10 +3693,14 @@ def test_sync_local_sheet_inventory_keeps_embedded_unknown_items_on_player_rejec
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
     monkeypatch.setattr(dungeon_widget, "_linked_item_document_by_id", lambda _item_id: None)
-    monkeypatch.setattr(dungeon_widget, "_prompt_unknown_items_with_preview", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_unknown_local_character_items_resolution",
+        lambda **_kwargs: "embed",
+    )
 
     ok, message = dungeon_widget._sync_local_sheet_inventory_from_host(
-        "sheet-1",
+        "character-sheet-1",
         {
             "inventory": [{"item_id": "item_unknown", "quantity": 2}],
             "equipment": {"head": {"item_id": "item_helm", "quantity": 1}},
@@ -3568,18 +3710,19 @@ def test_sync_local_sheet_inventory_keeps_embedded_unknown_items_on_player_rejec
             },
         },
         sheet_name="Hero Name",
+        sheet_id="sheet-1",
         refresh_entities=False,
     )
 
     assert ok is True
-    assert "synchronized" in message.lower()
+    assert message == "Character downloaded."
     synced_inventory = calls["inventory_payload"]
     assert synced_inventory["inventory"][0]["item_id"] == "item_unknown"
     assert synced_inventory["equipment"]["head"]["item_id"] == "item_helm"
     assert str(synced_inventory.get("inventory_notes") or "") == ""
 
 
-def test_sync_local_sheet_inventory_imports_unknown_items_to_local_storage_on_accept(
+def test_sync_local_sheet_inventory_keeps_embedded_unknown_items_without_local_import(
     monkeypatch,
     dungeon_widget,
     tmp_path,
@@ -3599,10 +3742,14 @@ def test_sync_local_sheet_inventory_imports_unknown_items_to_local_storage_on_ac
     )
     monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
     monkeypatch.setattr("dungeon_applet.items_dir", lambda: tmp_path)
-    monkeypatch.setattr(dungeon_widget, "_prompt_unknown_items_with_preview", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_unknown_local_character_items_resolution",
+        lambda **_kwargs: "embed",
+    )
 
     ok, message = dungeon_widget._sync_local_sheet_inventory_from_host(
-        "sheet-1",
+        "character-sheet-1",
         {
             "inventory": [{"item_id": "item_unknown", "quantity": 2}],
             "equipment": {},
@@ -3620,21 +3767,16 @@ def test_sync_local_sheet_inventory_imports_unknown_items_to_local_storage_on_ac
             },
         },
         sheet_name="Hero Name",
+        sheet_id="sheet-1",
         refresh_entities=False,
     )
 
     assert ok is True
-    assert "synchronized" in message.lower()
+    assert message == "Character downloaded."
     assert calls["character_id"] == "character-sheet-1"
     synced_inventory = calls["inventory_payload"]
     assert synced_inventory["inventory"][0]["item_id"] == "item_unknown"
-
-    stored_item_ids = []
-    for item_path in tmp_path.rglob("*.dmtitem"):
-        payload = load_item_payload(item_path)
-        if isinstance(payload, dict):
-            stored_item_ids.append(str(payload.get("item_id") or ""))
-    assert "item_unknown" in stored_item_ids
+    assert list(tmp_path.rglob("*.dmtitem")) == []
 
 
 def test_takeover_filter_keeps_items_that_exist_in_dm_library(
@@ -3656,6 +3798,23 @@ def test_takeover_filter_keeps_items_that_exist_in_dm_library(
             None,
         ),
     )
+    raw_archive = io.BytesIO()
+    with zipfile.ZipFile(raw_archive, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("sheet.pdf", b"%PDF-1.4\n%test\n")
+        archive.writestr(
+            "inventory.json",
+            json.dumps(
+                {
+                    "inventory": [{"item_id": "item_unknown", "quantity": 1}],
+                    "equipment": {},
+                    "item_documents": {},
+                }
+            ),
+        )
+        archive.writestr(
+            "info.json",
+            json.dumps({"archive_version": 2, "updated_at": "2026-03-04T00:00:00+00:00"}),
+        )
 
     _configure_online_host(
         dungeon_widget,
@@ -3669,6 +3828,8 @@ def test_takeover_filter_keeps_items_that_exist_in_dm_library(
                 "equipment": {},
                 "item_documents": {},
             },
+            linked_sheet_archive_b64=base64.b64encode(raw_archive.getvalue()).decode("ascii"),
+            linked_authority_player_id="player-2",
         ),
         load_state=True,
     )
@@ -3676,12 +3837,16 @@ def test_takeover_filter_keeps_items_that_exist_in_dm_library(
     entity = dungeon_widget._find_entity_by_id("entity-1")
     assert entity is not None
 
-    filtered_inventory, _content_hash = dungeon_widget._takeover_filtered_inventory_for_player(
+    filtered_inventory, filtered_archive_b64, _content_hash = dungeon_widget._takeover_filtered_inventory_for_player(
         dungeon_widget._dungeons[0]["state"]["items"][0],
         player_id="player-1",
     )
 
     assert filtered_inventory["inventory"][0]["item_id"] == "item_unknown"
+    assert filtered_inventory["item_documents"]["item_unknown"]["payload"]["title"] == "Unknown Blade"
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(filtered_archive_b64.encode("ascii"))), "r") as archive:
+        redacted_inventory = json.loads(archive.read("inventory.json").decode("utf-8"))
+    assert redacted_inventory["item_documents"]["item_unknown"]["payload"]["title"] == "Unknown Blade"
 
 
 def test_build_collection_payload_preserves_linked_inventory_item_documents(monkeypatch, dungeon_widget):
@@ -3881,6 +4046,373 @@ def test_external_character_inventory_save_does_not_mutate_collection_backed_onl
     assert item_data["linked_save_revision"] == 4
     assert item_data["linked_content_hash"] == "host-hash"
     assert broadcast_calls == []
+
+
+def test_prepare_incoming_host_inventory_for_local_sync_keeps_embedded_items_without_prompt(
+    dungeon_widget,
+    monkeypatch,
+):
+    embedded_document = build_item_document(
+        {
+            "item_id": "item-unknown",
+            "title": "Embedded Blade",
+            "rarity": "common",
+            "level": 1,
+            "category": "equipment",
+        },
+        None,
+    )
+    monkeypatch.setattr(dungeon_widget, "_linked_item_document_by_id", lambda _item_id: None)
+    prompt_calls = []
+    imported = []
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_unknown_local_character_items_resolution",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or "import",
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_persist_item_documents_to_local_library",
+        lambda entries, **_kwargs: (
+            imported.extend(str(entry.get("item_id") or "") for entry in entries) or ["item-unknown"],
+            [],
+            [],
+        ),
+    )
+
+    ok, payload, converted_notes, message = dungeon_widget._prepare_incoming_host_inventory_for_local_sync(
+        inventory_payload={
+            "inventory": [{"item_id": "item-unknown", "quantity": 1}],
+            "equipment": {},
+            "item_documents": {"item-unknown": embedded_document},
+        },
+        sheet_name="Hero",
+        character_id="character-1",
+    )
+
+    assert ok is True
+    assert message == ""
+    assert converted_notes == []
+    assert len(prompt_calls) == 1
+    assert prompt_calls[0]["allow_import"] is True
+    assert prompt_calls[0]["allow_embed"] is True
+    assert imported == ["item-unknown"]
+    assert payload["item_documents"]["item-unknown"] == embedded_document
+
+
+def test_prepare_incoming_host_inventory_for_local_sync_can_keep_embedded_items_without_local_import(
+    dungeon_widget,
+    monkeypatch,
+):
+    embedded_document = build_item_document(
+        {
+            "item_id": "item-unknown",
+            "title": "Embedded Blade",
+            "rarity": "common",
+            "level": 1,
+            "category": "equipment",
+        },
+        None,
+    )
+    monkeypatch.setattr(dungeon_widget, "_linked_item_document_by_id", lambda _item_id: None)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_unknown_local_character_items_resolution",
+        lambda **_kwargs: "embed",
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_persist_item_documents_to_local_library",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reject should not import")),
+    )
+
+    ok, payload, converted_notes, message = dungeon_widget._prepare_incoming_host_inventory_for_local_sync(
+        inventory_payload={
+            "inventory": [{"item_id": "item-unknown", "quantity": 1}],
+            "equipment": {},
+            "item_documents": {"item-unknown": embedded_document},
+        },
+        sheet_name="Hero",
+        character_id="character-1",
+    )
+
+    assert ok is True
+    assert message == ""
+    assert converted_notes == []
+    assert payload["item_documents"]["item-unknown"] == embedded_document
+
+
+def test_prepare_incoming_host_inventory_for_local_sync_can_convert_unknown_items_to_notes(
+    dungeon_widget,
+    monkeypatch,
+):
+    embedded_document = build_item_document(
+        {
+            "item_id": "item-unknown",
+            "title": "Embedded Blade",
+            "rarity": "common",
+            "level": 1,
+            "category": "equipment",
+        },
+        None,
+    )
+    monkeypatch.setattr(dungeon_widget, "_linked_item_document_by_id", lambda _item_id: None)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_unknown_local_character_items_resolution",
+        lambda **_kwargs: "notes",
+    )
+
+    ok, payload, converted_notes, message = dungeon_widget._prepare_incoming_host_inventory_for_local_sync(
+        inventory_payload={
+            "inventory": [{"item_id": "item-unknown", "quantity": 2}],
+            "equipment": {},
+            "item_documents": {"item-unknown": embedded_document},
+        },
+        sheet_name="Hero",
+        character_id="character-1",
+    )
+
+    assert ok is True
+    assert message == ""
+    assert len(converted_notes) == 1
+    assert payload["inventory"] == []
+    assert "Unknown synced item 'Embedded Blade' x2." in str(payload.get("inventory_notes") or "")
+
+
+def test_prepare_incoming_host_inventory_for_local_sync_missing_embedded_item_documents_can_convert_to_notes(
+    dungeon_widget,
+    monkeypatch,
+):
+    monkeypatch.setattr(dungeon_widget, "_linked_item_document_by_id", lambda _item_id: None)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_unknown_local_character_items_resolution",
+        lambda **kwargs: (
+            kwargs["allow_import"] is False and kwargs["allow_embed"] is False and "notes"
+        ),
+    )
+
+    ok, payload, converted_notes, message = dungeon_widget._prepare_incoming_host_inventory_for_local_sync(
+        inventory_payload={
+            "inventory": [{"item_id": "item-unknown", "quantity": 1}],
+            "equipment": {},
+            "item_documents": {},
+        },
+        sheet_name="Hero",
+        character_id="character-1",
+    )
+
+    assert ok is True
+    assert len(converted_notes) == 1
+    assert payload["inventory"] == []
+    assert "Unknown synced item" in str(payload.get("inventory_notes") or "")
+    assert message == ""
+
+
+def test_apply_claim_entries_to_sheet_can_keep_unknown_embedded_item_as_note(
+    dungeon_widget,
+    monkeypatch,
+):
+    claim_calls = []
+    embedded_document = build_item_document(
+        {"item_id": "item-unknown", "title": "Embedded Blade"},
+        None,
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "player_sheets",
+        types.SimpleNamespace(
+            apply_claim_to_sheet=lambda sheet_id, *, item_ids, note_lines: (
+                claim_calls.append((sheet_id, list(item_ids), list(note_lines))) or True,
+                "Claim applied.",
+                {},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_choose_claimed_item_storage_mode",
+        lambda _entry, _resolved: "note",
+    )
+
+    ok, message = dungeon_widget._apply_claim_entries_to_sheet(
+        "sheet-1",
+        [
+            {
+                "item_id": "item-unknown",
+                "title": "Embedded Blade",
+                "item_document": embedded_document,
+            }
+        ],
+    )
+
+    assert ok is True, message
+    assert claim_calls == [
+        ("sheet-1", [], ["Claimed item 'Embedded Blade' kept as a text entry."])
+    ]
+
+
+def test_resolve_unknown_linked_items_for_host_dismiss_keeps_current_payload_active(
+    dungeon_widget,
+    monkeypatch,
+):
+    unresolved_entry = {"item_id": "item-unknown", "title": "Embedded Blade"}
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_unknown_linked_item_entries",
+        lambda *_args, **_kwargs: [dict(unresolved_entry)],
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_review_unknown_linked_items",
+        lambda **_kwargs: {"action": "dismiss", "selected_item_ids": [], "signature": "sig"},
+    )
+
+    status, payload, note = dungeon_widget._resolve_unknown_linked_items_for_host(
+        player_id="player-1",
+        character_id="character-1",
+        sheet_name="Hero",
+        inventory_payload={"inventory": [{"item_id": "item-unknown", "quantity": 1}]},
+    )
+
+    assert status == "ok"
+    assert payload["inventory"][0]["item_id"] == "item-unknown"
+    assert "kept the current player-owned character active" in note
+
+
+def test_loot_pool_item_for_entry_retries_after_initial_missing_resolution(
+    dungeon_widget,
+    monkeypatch,
+    tmp_path,
+):
+    entry = {"entry_id": "entry-1", "type": "item", "item_id": "item-1", "path": ""}
+    item_path = tmp_path / "item_1.dmtitem"
+    sentinel = object()
+    resolve_calls = {"count": 0}
+
+    def _resolve_item_path(_entry):
+        resolve_calls["count"] += 1
+        if resolve_calls["count"] == 1:
+            return None
+        return item_path
+
+    monkeypatch.setattr(dungeon_widget, "_loot_pool_resolve_item_path", _resolve_item_path)
+    monkeypatch.setitem(
+        sys.modules,
+        "player_sheets",
+        types.SimpleNamespace(_loot_item_from_path=lambda _path: sentinel),
+    )
+
+    first = dungeon_widget._loot_pool_item_for_entry(entry)
+    second = dungeon_widget._loot_pool_item_for_entry(entry)
+
+    assert first is None
+    assert second is sentinel
+
+
+def test_loot_pool_preview_for_entry_does_not_cache_fallback_preview(
+    dungeon_widget,
+    monkeypatch,
+):
+    entry = {"entry_id": "entry-1", "type": "item", "item_id": "item-1", "path": ""}
+    item_calls = {"count": 0}
+    rendered = QPixmap(12, 12)
+    rendered.fill(QColor("#ef4444"))
+    fallback = QPixmap(12, 12)
+    fallback.fill(QColor("#2563eb"))
+
+    def _item_for_entry(_entry):
+        item_calls["count"] += 1
+        if item_calls["count"] == 1:
+            return None
+        return object()
+
+    monkeypatch.setattr(dungeon_widget, "_loot_pool_item_for_entry", _item_for_entry)
+    monkeypatch.setattr(dungeon_widget, "_fallback_loot_preview_pixmap", lambda _entry: fallback)
+    monkeypatch.setitem(
+        sys.modules,
+        "player_sheets",
+        types.SimpleNamespace(_render_item_preview_pixmap=lambda *_args, **_kwargs: rendered),
+    )
+
+    first = dungeon_widget._loot_pool_preview_for_entry(entry)
+    second = dungeon_widget._loot_pool_preview_for_entry(entry)
+
+    assert isinstance(first, QPixmap)
+    assert isinstance(second, QPixmap)
+    assert first.toImage().pixelColor(0, 0) == QColor("#2563eb")
+    assert second.toImage().pixelColor(0, 0) == QColor("#ef4444")
+
+
+def test_sync_local_sheet_inventory_from_host_rejects_unknown_character_without_sheet_id(
+    dungeon_widget,
+    monkeypatch,
+):
+    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
+
+    ok, message = dungeon_widget._sync_local_sheet_inventory_from_host(
+        "remote-character",
+        {"inventory": [{"item_id": "item-1", "quantity": 1}], "equipment": {}},
+    )
+
+    assert ok is False
+    assert "authoritative sheet id" in message
+
+
+def test_takeover_redaction_rewrites_archive_to_filtered_inventory(dungeon_widget, monkeypatch):
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_filter_inventory_payload_to_dm_known_items",
+        lambda payload: (
+            {
+                "inventory": [{"item_id": "item-known", "quantity": 1}],
+                "equipment": {},
+                "item_documents": {
+                    "item-known": build_item_document({"item_id": "item-known", "title": "Known"}, None)
+                },
+            },
+            ["item-unknown"],
+        ),
+    )
+    archive_inventory = {
+        "inventory": [
+            {"item_id": "item-known", "quantity": 1},
+            {"item_id": "item-unknown", "quantity": 1},
+        ],
+        "equipment": {},
+        "item_documents": {
+            "item-known": build_item_document({"item_id": "item-known", "title": "Known"}, None),
+            "item-unknown": build_item_document({"item_id": "item-unknown", "title": "Unknown"}, None),
+        },
+    }
+    raw_archive = io.BytesIO()
+    with zipfile.ZipFile(raw_archive, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("sheet.pdf", b"%PDF-1.4\n%test\n")
+        archive.writestr("inventory.json", json.dumps(archive_inventory))
+        archive.writestr(
+            "info.json",
+            json.dumps({"archive_version": 2, "updated_at": "2026-03-04T00:00:00+00:00"}),
+        )
+    item_data = {
+        "linked_character_id": "character-1",
+        "owner_player_id": "player-new",
+        "linked_authority_player_id": "player-old",
+        "linked_inventory": archive_inventory,
+        "linked_sheet_archive_b64": base64.b64encode(raw_archive.getvalue()).decode("ascii"),
+        "linked_content_hash": "old-hash",
+    }
+
+    filtered_inventory, filtered_archive_b64, _content_hash = dungeon_widget._takeover_filtered_inventory_for_player(
+        item_data,
+        player_id="player-new",
+    )
+
+    assert [entry["item_id"] for entry in filtered_inventory["inventory"]] == ["item-known"]
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(filtered_archive_b64.encode("ascii"))), "r") as archive:
+        redacted_inventory = json.loads(archive.read("inventory.json").decode("utf-8"))
+    assert [entry["item_id"] for entry in redacted_inventory["inventory"]] == ["item-known"]
 
 
 def test_takeover_snapshot_filters_unknown_items_without_mutating_collection(
@@ -6118,6 +6650,7 @@ def test_snapshot_missing_local_character_forwards_entity_context_to_local_sync(
     dungeon_widget, monkeypatch
 ):
     sync_calls = []
+    prompt_calls = []
 
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._local_player_id = "player-local"
@@ -6128,6 +6661,11 @@ def test_snapshot_missing_local_character_forwards_entity_context_to_local_sync(
     )
 
     monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_owned_linked_character_resolution",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or "pull",
+    )
     monkeypatch.setattr(
         dungeon_widget,
         "_sync_local_sheet_inventory_from_host",
@@ -6164,6 +6702,8 @@ def test_snapshot_missing_local_character_forwards_entity_context_to_local_sync(
 
     dungeon_widget._on_client_snapshot_received(snapshot)
 
+    assert len(prompt_calls) == 1
+    assert prompt_calls[0]["local_exists"] is False
     assert len(sync_calls) == 1
     _args, kwargs = sync_calls[0]
     assert kwargs["sheet_id"] == "sheet-1"
@@ -6171,7 +6711,7 @@ def test_snapshot_missing_local_character_forwards_entity_context_to_local_sync(
     assert kwargs["dungeon_id"] == "d1"
 
 
-def test_missing_local_character_auto_saves_locally_without_prompt(dungeon_widget, monkeypatch):
+def test_missing_local_character_pull_downloads_locally_after_prompt(dungeon_widget, monkeypatch):
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._player_connection_ready = True
     dungeon_widget._local_player_id = "player-local"
@@ -6179,8 +6719,8 @@ def test_missing_local_character_auto_saves_locally_without_prompt(dungeon_widge
     monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
     monkeypatch.setattr(
         dungeon_widget,
-        "_prompt_missing_local_linked_character_resolution",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("missing local sync should not prompt")),
+        "_linked_item_document_by_id",
+        lambda item_id: build_item_document({"item_id": item_id, "title": "Known Item"}, None),
     )
 
     applied = {}
@@ -6217,6 +6757,342 @@ def test_missing_local_character_auto_saves_locally_without_prompt(dungeon_widge
     ]
 
 
+def test_snapshot_missing_local_character_queues_resolution_with_character_id_in_real_mode(
+    dungeon_widget, monkeypatch
+):
+    queued_payloads = []
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_queue_owned_linked_character_resolution",
+        lambda payload: queued_payloads.append(dict(payload)),
+    )
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-local",
+                            "linked_sheet_id": "sheet-1",
+                            "linked_sheet_name": "Hero",
+                            "linked_character_id": "character-1",
+                            "linked_save_revision": 5,
+                            "linked_last_saved_at": "2026-03-08T12:00:00Z",
+                            "linked_content_hash": "host-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                            "linked_sheet_archive_b64": _valid_archive_b64(),
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert len(queued_payloads) == 1
+    assert queued_payloads[0]["character_id"] == "character-1"
+    assert queued_payloads[0]["sheet_id"] == "sheet-1"
+    assert queued_payloads[0]["entity_id"] == "entity-1"
+
+
+def test_snapshot_existing_local_character_can_push_local_sheet_to_session(
+    dungeon_widget, monkeypatch
+):
+    push_requests = []
+    prompt_calls = []
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = types.SimpleNamespace(
+        send_command=lambda *_args, **_kwargs: True,
+        disconnect=lambda: None,
+    )
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda character_id: {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": character_id,
+            "save_revision": 7,
+            "last_saved_at": "2026-03-08T12:00:00Z",
+            "content_hash": "local-hash",
+            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+            "stats": {"name": "Hero"},
+            "archive_b64": _valid_archive_b64(),
+        },
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_owned_linked_character_resolution",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or "push",
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_dispatch_player_link_character_request",
+        lambda payload: push_requests.append(dict(payload)) or True,
+    )
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-local",
+                            "linked_sheet_id": "sheet-1",
+                            "linked_sheet_name": "Hero",
+                            "linked_character_id": "character-1",
+                            "linked_save_revision": 3,
+                            "linked_content_hash": "host-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                            "linked_sheet_archive_b64": _valid_archive_b64(),
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert len(prompt_calls) == 1
+    assert prompt_calls[0]["local_exists"] is True
+    assert len(push_requests) == 1
+    assert push_requests[0]["entity_id"] == "entity-1"
+    assert push_requests[0]["dungeon_id"] == "d1"
+    assert push_requests[0]["character_id"] == "character-1"
+    assert push_requests[0]["inventory"]["inventory"] == [
+        {"item_id": "item-local", "normalized_item_name": "item-local", "quantity": 1}
+    ]
+
+
+def test_snapshot_owned_linked_character_can_unlink_without_local_download(
+    dungeon_widget, monkeypatch
+):
+    unlink_requests = []
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = types.SimpleNamespace(
+        send_command=lambda *_args, **_kwargs: True,
+        disconnect=lambda: None,
+    )
+
+    monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", lambda _character_id: None)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_owned_linked_character_resolution",
+        lambda **_kwargs: "unlink",
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_dispatch_player_unlink_character_request",
+        lambda payload: unlink_requests.append(dict(payload)) or True,
+    )
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-local",
+                            "linked_sheet_id": "sheet-1",
+                            "linked_sheet_name": "Hero",
+                            "linked_character_id": "character-1",
+                            "linked_save_revision": 1,
+                            "linked_content_hash": "host-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-1", "quantity": 1}]},
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert unlink_requests == [{"entity_id": "entity-1", "dungeon_id": "d1"}]
+
+
+def test_snapshot_skips_owned_linked_character_prompt_while_resolution_request_is_pending(
+    dungeon_widget, monkeypatch
+):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = types.SimpleNamespace(
+        send_command=lambda *_args, **_kwargs: True,
+        disconnect=lambda: None,
+    )
+    dungeon_widget._pending_link_entity_requests["req-1"] = {"entity_id": "entity-1"}
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda character_id: {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": character_id,
+            "save_revision": 7,
+            "last_saved_at": "2026-03-08T12:00:00Z",
+            "content_hash": "local-hash",
+            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+            "stats": {"name": "Hero"},
+            "archive_b64": _valid_archive_b64(),
+        },
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_owned_linked_character_resolution",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("prompt should be suppressed while request is pending")),
+    )
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-local",
+                            "linked_sheet_id": "sheet-1",
+                            "linked_sheet_name": "Hero",
+                            "linked_character_id": "character-1",
+                            "linked_save_revision": 3,
+                            "linked_content_hash": "host-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                            "linked_sheet_archive_b64": _valid_archive_b64(),
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+
+def test_snapshot_does_not_reprompt_after_successful_pull_for_same_host_state(
+    dungeon_widget, monkeypatch
+):
+    prompt_calls = []
+    sync_calls = []
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = types.SimpleNamespace(
+        send_command=lambda *_args, **_kwargs: True,
+        disconnect=lambda: None,
+    )
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda character_id: {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": character_id,
+            "save_revision": 0,
+            "last_saved_at": "",
+            "content_hash": "local-stale-hash",
+            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+            "stats": {"name": "Hero"},
+            "archive_b64": _valid_archive_b64(),
+        },
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_owned_linked_character_resolution",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or "pull",
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_sync_local_sheet_inventory_from_host",
+        lambda *args, **kwargs: sync_calls.append((args, kwargs)) or (True, "ok"),
+    )
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-local",
+                            "linked_sheet_id": "sheet-1",
+                            "linked_sheet_name": "Hero",
+                            "linked_character_id": "character-1",
+                            "linked_save_revision": 5,
+                            "linked_last_saved_at": "2026-03-08T12:00:00Z",
+                            "linked_content_hash": "host-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                            "linked_sheet_archive_b64": _valid_archive_b64(),
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert len(prompt_calls) == 1
+    assert len(sync_calls) == 1
+
+
 def test_sync_local_sheet_inventory_does_not_map_character_id_as_sheet_id(dungeon_widget, monkeypatch):
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._player_connection_ready = True
@@ -6246,6 +7122,11 @@ def test_sync_local_sheet_inventory_does_not_map_character_id_as_sheet_id(dungeo
         return True, "Character synchronized.", inventory_payload
 
     monkeypatch.setattr(dungeon_widget, "_resolve_local_sheet_sync_payload", _resolve_local)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_linked_item_document_by_id",
+        lambda item_id: build_item_document({"item_id": item_id, "title": "Known Item"}, None),
+    )
     monkeypatch.setitem(
         sys.modules,
         "player_sheets",
@@ -6267,7 +7148,7 @@ def test_sync_local_sheet_inventory_does_not_map_character_id_as_sheet_id(dungeo
     )
 
     assert ok is True
-    assert message == "Inventory synchronized."
+    assert message == "Character downloaded."
     assert applied["character_id"] == "remote-character-id"
 
 def test_player_state_update_is_queued_when_send_fails_and_flushed_after_snapshot(

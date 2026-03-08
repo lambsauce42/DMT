@@ -56,13 +56,17 @@ class OnlineSessionClient(QObject):
     ) -> None:
         next_name = name.strip()
         previous_name = self._requested_name
+        previous_persistent_player_id = str(self._persistent_player_id or "").strip()
         self._requested_name = next_name
         self._player_id = None
         # Always start each transport connection with a fresh frame buffer.
         self._decoder = FrameDecoder()
         # Reset per-call so stale values from previous joins are never reused.
         self._persistent_player_id = str(persistent_player_id or "").strip()
-        if persistent_player_id is None and previous_name and previous_name != next_name:
+        if (
+            self._persistent_player_id != previous_persistent_player_id
+            or (persistent_player_id is None and previous_name and previous_name != next_name)
+        ):
             self._session_token = ""
         target_host, rewritten = _normalize_connect_host(host)
         if rewritten:

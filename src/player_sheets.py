@@ -235,10 +235,61 @@ def _entry_item_documents(entry: "PlayerSheetEntry") -> dict[str, dict]:
     return _normalized_item_documents_map(getattr(entry, "item_documents", {}))
 
 
+def _local_item_document_for_item_id(item_id: str) -> dict | None:
+    clean_item_id = str(item_id or "").strip()
+    if not clean_item_id:
+        return None
+    candidate_path = Path(clean_item_id).expanduser()
+    if candidate_path.exists():
+        document = load_item_document(candidate_path)
+        if isinstance(document, dict):
+            return document
+    for root in _loot_item_dirs():
+        if not root.exists():
+            continue
+        for path in list_item_file_paths(root):
+            payload = load_item_payload(path)
+            if not isinstance(payload, dict):
+                continue
+            if item_id_from_payload(payload, fallback_path=path) != clean_item_id:
+                continue
+            document = load_item_document(path)
+            if isinstance(document, dict):
+                return document
+            icon_source = payload.get("icon_path") or payload.get("icon") or payload.get("preview_image")
+            try:
+                return build_item_document(payload, str(icon_source or ""))
+            except Exception:
+                logger.exception("Failed to build local item document for %s", clean_item_id)
+                return None
+    return None
+
+
+def _entry_embedded_item_documents(entry: "PlayerSheetEntry") -> dict[str, dict]:
+    embedded_documents = _entry_item_documents(entry)
+    referenced_item_ids: set[str] = {
+        str(item_id or "").strip()
+        for item_id in getattr(entry, "inventory", [])
+        if str(item_id or "").strip()
+    }
+    for item_id in getattr(entry, "equipment", {}).values():
+        clean_item_id = str(item_id or "").strip()
+        if clean_item_id:
+            referenced_item_ids.add(clean_item_id)
+
+    for item_id in sorted(referenced_item_ids):
+        if item_id in embedded_documents:
+            continue
+        document = _local_item_document_for_item_id(item_id)
+        if isinstance(document, dict):
+            embedded_documents[item_id] = document
+    return embedded_documents
+
+
 def _sync_entry_item_document_cache(entry: "PlayerSheetEntry") -> None:
     sheet_id = sheet_id_for_entry(entry)
     target_dir = linked_character_item_cache_dir(sheet_id)
-    item_documents = _entry_item_documents(entry)
+    item_documents = _entry_embedded_item_documents(entry)
     if not item_documents:
         try:
             if target_dir.exists():
@@ -294,6 +345,27 @@ def _read_archive_bytes_for_entry(entry: "PlayerSheetEntry") -> bytes | None:
         except Exception:
             return None
     return None
+
+
+def _archive_matches_entry(entry: "PlayerSheetEntry", archive_path: Path) -> bool:
+    if not archive_path.exists():
+        return False
+    try:
+        archive_inventory = normalize_inventory_payload(read_character_inventory(archive_path))
+    except Exception:
+        return False
+    expected_inventory = _entry_inventory_payload(entry)
+    if archive_inventory != expected_inventory:
+        return False
+    try:
+        archive_meta = read_character_meta(archive_path)
+    except Exception:
+        return False
+    if str(archive_meta.get("sheet_id") or "").strip() != sheet_id_for_entry(entry):
+        return False
+    if str(archive_meta.get("character_id") or "").strip() != character_id_for_entry(entry):
+        return False
+    return True
 
 
 def _flatten_canonical_inventory_entries(entries: object) -> list[str]:
@@ -1484,6 +1556,7 @@ def entry_to_dict(entry: PlayerSheetEntry) -> dict:
         "copper": entry.copper,
         "item_documents": _entry_item_documents(entry),
         "managed_linked": bool(getattr(entry, "managed_linked", False)),
+        "managed_scope": str(getattr(entry, "managed_scope", "") or ""),
         "save_revision": int(entry.save_revision),
         "last_saved_at": str(entry.last_saved_at or ""),
         "content_hash": str(entry.content_hash or ""),
@@ -1529,6 +1602,7 @@ def entry_from_dict(payload: dict) -> Optional[PlayerSheetEntry]:
         copper=_read_currency(payload.get("copper", 0)),
         item_documents=item_documents,
         managed_linked=bool(payload.get("managed_linked", False)),
+        managed_scope=str(payload.get("managed_scope", "") or "").strip(),
         save_revision=_read_currency(payload.get("save_revision", 0)),
         last_saved_at=str(payload.get("last_saved_at", "") or "").strip(),
         content_hash=str(payload.get("content_hash", "") or "").strip(),
@@ -1553,6 +1627,7 @@ class PlayerSheetEntry:
     copper: int = 0
     item_documents: dict[str, dict] = field(default_factory=dict)
     managed_linked: bool = False
+    managed_scope: str = ""
     save_revision: int = 0
     last_saved_at: str = ""
     content_hash: str = ""
@@ -1566,6 +1641,7 @@ class PlayerSheetEntry:
         self.equipment = _normalize_equipment(self.equipment)
         self.item_documents = _normalized_item_documents_map(self.item_documents)
         self.managed_linked = bool(self.managed_linked)
+        self.managed_scope = str(self.managed_scope or "").strip()
         try:
             self.gold = max(0, int(self.gold))
         except (TypeError, ValueError):
@@ -1610,7 +1686,7 @@ def _entry_inventory_payload(entry: PlayerSheetEntry) -> dict:
             "gold": entry.gold,
             "silver": entry.silver,
             "copper": entry.copper,
-            "item_documents": _entry_item_documents(entry),
+            "item_documents": _entry_embedded_item_documents(entry),
         }
     )
 
@@ -1626,6 +1702,7 @@ def _entry_meta_payload(entry: PlayerSheetEntry, *, created_at: str | None = Non
         "tags": [str(tag).strip() for tag in entry.tags if str(tag).strip()],
         "created_at": str(created_at or "").strip(),
         "managed_linked": bool(getattr(entry, "managed_linked", False)),
+        "managed_scope": str(getattr(entry, "managed_scope", "") or "").strip(),
         "save_revision": int(entry.save_revision),
         "last_saved_at": str(entry.last_saved_at or ""),
         "content_hash": str(entry.content_hash or ""),
@@ -1646,6 +1723,8 @@ def _apply_entry_meta(entry: PlayerSheetEntry, meta: dict) -> None:
         entry.character_id = str(meta.get("character_id") or "").strip()
     if "managed_linked" in meta:
         entry.managed_linked = bool(meta.get("managed_linked"))
+    if "managed_scope" in meta:
+        entry.managed_scope = str(meta.get("managed_scope") or "").strip()
     if "save_revision" in meta:
         try:
             entry.save_revision = max(0, int(meta.get("save_revision") or 0))
@@ -1751,6 +1830,11 @@ def ensure_entry_archive(entry: PlayerSheetEntry) -> bool:
     _ensure_entry_character_id(entry)
     archive_path = _entry_archive_path(entry)
     if archive_path.exists():
+        if not _archive_matches_entry(entry, archive_path):
+            ok = sync_entry_archive(entry, preserve_revision=True)
+            if not ok:
+                logger.warning("Existing character archive is stale but could not be refreshed: %s", archive_path)
+                return False
         entry.archive_path = str(archive_path)
         archive_meta = read_character_meta(archive_path)
         _apply_entry_meta(entry, archive_meta)
@@ -1981,7 +2065,8 @@ def inventory_payload_for_sheet_id(sheet_id: str) -> Optional[dict]:
         if sheet_id_for_entry(entry) != target:
             continue
         archive_path = _entry_archive_path(entry)
-        if archive_path.exists():
+        archive_ready = ensure_entry_archive(entry)
+        if archive_ready and archive_path.exists():
             return read_character_inventory(archive_path)
         return _entry_inventory_payload(entry)
     return None
@@ -1992,7 +2077,8 @@ def inventory_payload_for_character_id(character_id: str) -> Optional[dict]:
     if entry is None:
         return None
     archive_path = _entry_archive_path(entry)
-    if archive_path.exists():
+    archive_ready = ensure_entry_archive(entry)
+    if archive_ready and archive_path.exists():
         return read_character_inventory(archive_path)
     return _entry_inventory_payload(entry)
 
@@ -2001,21 +2087,35 @@ def archive_bytes_for_character_id(character_id: str) -> Optional[bytes]:
     entry = entry_for_character_id(character_id)
     if entry is None:
         return None
+    ensure_entry_archive(entry)
     return _read_archive_bytes_for_entry(entry)
 
 
-def cleanup_managed_linked_entries(active_character_ids: set[str]) -> int:
+def cleanup_managed_linked_entries(
+    active_character_ids: set[str],
+    *,
+    managed_scope: str = "",
+) -> int:
     active_ids = {
         str(character_id or "").strip()
         for character_id in active_character_ids
         if str(character_id or "").strip()
     }
+    clean_scope = str(managed_scope or "").strip()
     entries = load_entries_from_storage()
     kept_entries: list[PlayerSheetEntry] = []
     removed = 0
     for entry in entries:
         character_id = character_id_for_entry(entry)
         if not getattr(entry, "managed_linked", False):
+            kept_entries.append(entry)
+            continue
+        entry_scope = str(getattr(entry, "managed_scope", "") or "").strip()
+        if clean_scope:
+            if entry_scope != clean_scope:
+                kept_entries.append(entry)
+                continue
+        elif entry_scope:
             kept_entries.append(entry)
             continue
         if character_id and character_id in active_ids:
@@ -2087,17 +2187,24 @@ def ensure_network_linked_character_entry(
     sheet_name: str,
     inventory_payload: dict,
     *,
+    sheet_id: str = "",
+    managed_scope: str = "",
     emit_event: bool = True,
 ) -> tuple[bool, str, Optional[dict]]:
     target = str(character_id or "").strip()
     if not target:
         return False, "Missing character selection.", None
+    clean_sheet_id = str(sheet_id or "").strip()
+    clean_scope = str(managed_scope or "").strip()
 
     entries = load_entries_from_storage()
     target_entry = next(
         (entry for entry in entries if character_id_for_entry(entry) == target),
         None,
     )
+
+    if target_entry is not None and not getattr(target_entry, "managed_linked", False):
+        return False, "Remote character id conflicts with an existing personal local sheet.", None
 
     if target_entry is None:
         display_name = str(sheet_name or "").strip() or target
@@ -2106,6 +2213,8 @@ def ensure_network_linked_character_entry(
             pdf_path="",
             character_id=target,
             managed_linked=True,
+            managed_scope=clean_scope,
+            sheet_id=clean_sheet_id,
         )
         storage_name = _ensure_entry_sheet_id(target_entry)
         archive_path = character_sheet_archive_path(storage_name)
@@ -2125,6 +2234,13 @@ def ensure_network_linked_character_entry(
         entries.append(target_entry)
     else:
         target_entry.managed_linked = True
+        if clean_scope:
+            target_entry.managed_scope = clean_scope
+        existing_sheet_id = sheet_id_for_entry(target_entry)
+        if clean_sheet_id and existing_sheet_id and existing_sheet_id != clean_sheet_id:
+            return False, "Managed linked character uses a different authoritative sheet id.", None
+        if clean_sheet_id and not existing_sheet_id:
+            target_entry.sheet_id = clean_sheet_id
 
     _apply_inventory_payload_to_entry(target_entry, inventory_payload)
     sync_entry_archive(target_entry)
@@ -2242,6 +2358,8 @@ def apply_remote_character_package_for_character_id(
     sheet_name: str,
     inventory_payload: dict,
     *,
+    sheet_id: str = "",
+    managed_scope: str = "",
     archive_bytes: bytes | None = None,
     save_revision: int = 0,
     last_saved_at: str = "",
@@ -2251,6 +2369,8 @@ def apply_remote_character_package_for_character_id(
     target = str(character_id or "").strip()
     if not target:
         return False, "Missing character selection.", None
+    clean_sheet_id = str(sheet_id or "").strip()
+    clean_scope = str(managed_scope or "").strip()
     if archive_bytes and not validate_character_archive_bytes(archive_bytes):
         return False, "Unable to synchronize linked character archive.", None
     entries = load_entries_from_storage()
@@ -2258,11 +2378,15 @@ def apply_remote_character_package_for_character_id(
         (entry for entry in entries if character_id_for_entry(entry) == target),
         None,
     )
+    if target_entry is not None and not getattr(target_entry, "managed_linked", False):
+        return False, "Remote character id conflicts with an existing personal local sheet.", None
     if target_entry is None:
         ok, message, _payload = ensure_network_linked_character_entry(
             target,
             sheet_name,
             inventory_payload,
+            sheet_id=clean_sheet_id,
+            managed_scope=clean_scope,
             emit_event=False,
         )
         if not ok:
@@ -2274,6 +2398,14 @@ def apply_remote_character_package_for_character_id(
         )
         if target_entry is None:
             return False, "Character not found.", None
+    elif clean_scope:
+        target_entry.managed_scope = clean_scope
+
+    existing_sheet_id = sheet_id_for_entry(target_entry)
+    if clean_sheet_id and existing_sheet_id and existing_sheet_id != clean_sheet_id:
+        return False, "Managed linked character uses a different authoritative sheet id.", None
+    if clean_sheet_id and not existing_sheet_id:
+        target_entry.sheet_id = clean_sheet_id
 
     if archive_bytes:
         archive_path = _entry_archive_path(target_entry)
@@ -4678,6 +4810,9 @@ class PlayerSheetsWidget(QWidget):
             self._select_entry_by_sheet_id(target_sheet)
             return
         _apply_inventory_payload_to_entry(target_entry, inventory_payload)
+        refresh_library = getattr(self, "_refresh_inventory_library", None)
+        if callable(refresh_library):
+            refresh_library()
         if self._current_entry is target_entry:
             self._set_inventory(target_entry)
 
