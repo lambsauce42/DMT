@@ -96,7 +96,7 @@ def test_open_applet_overlay_is_visible_before_build_starts(qtbot, monkeypatch) 
 
     assert build_trace["overlay_hidden"] is False
     assert build_trace["spinner_active"] is True
-    assert build_trace["message"] == "Loading Item Creator..."
+    assert build_trace["message"] == "Loading Items..."
 
 
 def test_open_applet_does_not_pump_events_during_busy_build(qtbot, monkeypatch) -> None:

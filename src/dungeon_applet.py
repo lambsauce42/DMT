@@ -5088,7 +5088,6 @@ class DungeonAppletWidget(QWidget):
         else:
             self._server_log_panel.set_ignore_overwrite_checked(False)
             self._last_host_scene_signature = self._current_players_scene_signature()
-            self._host_scene_watchdog_timer.start()
             if not self._loot_claim_reservation_timer.isActive():
                 self._loot_claim_reservation_timer.start()
         if mode == ONLINE_MODE_PLAYER:
@@ -6024,6 +6023,15 @@ class DungeonAppletWidget(QWidget):
         item_id_path = Path(item_id).expanduser()
         if item_id_path.exists():
             return item_id_path
+        local_library_path = self._linked_item_document_library_path_by_id(item_id)
+        if local_library_path is not None and local_library_path.exists():
+            try:
+                local_resolved = local_library_path.resolve()
+            except Exception:
+                local_resolved = local_library_path
+            self._loot_pool_item_path_by_id[item_id] = local_resolved
+            self._loot_pool_item_path_by_id[str(local_resolved)] = local_resolved
+            return local_resolved
         cached = self._loot_pool_item_path_by_id.get(item_id)
         if cached is not None and cached.exists():
             return cached
@@ -9067,6 +9075,13 @@ class DungeonAppletWidget(QWidget):
         self._host_scene_sync_pending = True
         self._host_scene_sync_timer.start()
 
+    def _host_scene_sync_should_defer(self) -> bool:
+        try:
+            active_buttons = QApplication.mouseButtons()
+        except Exception:
+            active_buttons = Qt.MouseButton.NoButton
+        return bool(active_buttons and active_buttons != Qt.MouseButton.NoButton)
+
     def _refresh_scene_item_references(self, _regions: object = None) -> None:
         # PySide can drop wrappers for Python-defined QGraphicsItems loaded
         # from serialized state unless we keep references on the Python side.
@@ -9075,11 +9090,16 @@ class DungeonAppletWidget(QWidget):
     def _flush_host_scene_sync(self, *, force: bool = False) -> None:
         if not force and not self._host_scene_sync_pending:
             return
-        self._host_scene_sync_pending = False
         if self._online_mode != ONLINE_MODE_DM_HOST:
             return
         if self._suppress_change_tracking or self._suppress_network_sync:
             return
+        if self._host_scene_sync_should_defer():
+            self._host_scene_sync_pending = True
+            self._host_scene_sync_timer.start()
+            self._debug_log("host_scene_sync_defer_interaction")
+            return
+        self._host_scene_sync_pending = False
         current_sig = self._current_players_scene_signature()
         if current_sig and current_sig == self._last_host_scene_signature:
             self._debug_log("host_scene_sync_skip_unchanged")
@@ -13371,7 +13391,7 @@ class DungeonAppletWidget(QWidget):
         choice: dict[str, str] = {"action": "", "sheet_id": ""}
 
         save_btn = QPushButton("Save Character Locally", dialog)
-        save_btn.setObjectName("SecondaryButton")
+        save_btn.setObjectName("PrimaryButton")
         save_btn.setMinimumHeight(36)
         save_btn.clicked.connect(
             lambda: (choice.update(action="save_local", sheet_id=""), dialog.accept())
@@ -13451,8 +13471,9 @@ class DungeonAppletWidget(QWidget):
                 f"This entity is linked to '{linked_name}', and you already have a local copy.\n\n"
                 f"Sheet: {linked_sheet}\n"
                 f"Character id: {linked_character}\n\n"
-                "Choose whether to push your local sheet to the session, pull the session version "
-                "into your local sheets, or unlink the character from this entity."
+                "Choose whether to back up your current local copy and pull the session version "
+                "into place, replace your local copy directly, push your local sheet to the "
+                "session, or unlink the character from this entity."
             )
         else:
             summary_text = (
@@ -13478,8 +13499,9 @@ class DungeonAppletWidget(QWidget):
             return button
 
         if local_exists:
-            _add_action_button("Push My Sheet To Session", "push", primary=True)
-            _add_action_button("Pull From Session", "pull")
+            _add_action_button("Pull And Backup Local Copy", "pull", primary=True)
+            _add_action_button("Push My Sheet To Session", "push")
+            _add_action_button("Replace Local Copy", "pull_replace")
         else:
             _add_action_button("Download Character", "pull", primary=True)
         _add_action_button("Unlink Character", "unlink")
@@ -13675,8 +13697,9 @@ class DungeonAppletWidget(QWidget):
                 f"This entity is linked to '{sheet_name}', and you already have a local copy.\n\n"
                 f"Sheet: {sheet_id or 'unknown'}\n"
                 f"Character id: {character_id}\n\n"
-                "Choose whether to push your local sheet to the session, pull the session version "
-                "into your local sheets, or unlink the character from this entity."
+                "Choose whether to back up your current local copy and pull the session version "
+                "into place, replace your local copy directly, push your local sheet to the "
+                "session, or unlink the character from this entity."
             )
         else:
             summary_text = (
@@ -13701,8 +13724,9 @@ class DungeonAppletWidget(QWidget):
             layout.addWidget(button)
 
         if local_exists:
-            _add_action_button("Push My Sheet To Session", "push", primary=True)
-            _add_action_button("Pull From Session", "pull")
+            _add_action_button("Pull And Backup Local Copy", "pull", primary=True)
+            _add_action_button("Push My Sheet To Session", "push")
+            _add_action_button("Replace Local Copy", "pull_replace")
         else:
             _add_action_button("Download Character", "pull", primary=True)
         _add_action_button("Unlink Character", "unlink")
@@ -13727,6 +13751,25 @@ class DungeonAppletWidget(QWidget):
                     fallback_sheet_name=sheet_name,
                 )
             elif action == "pull":
+                ok, message = self._sync_local_sheet_inventory_from_host(
+                    str(resolution_payload.get("character_id") or "").strip(),
+                    resolution_payload.get("inventory") or {},
+                    sheet_name=sheet_name,
+                    archive_b64=str(resolution_payload.get("archive_b64") or ""),
+                    save_revision=int(resolution_payload.get("save_revision") or 0),
+                    last_saved_at=str(resolution_payload.get("last_saved_at") or ""),
+                    content_hash=str(resolution_payload.get("content_hash") or ""),
+                    refresh_entities=True,
+                    sheet_id=sheet_id,
+                    entity_id=entity_id,
+                    dungeon_id=str(resolution_payload.get("dungeon_id") or "").strip(),
+                    backup_existing_local_entry=local_exists,
+                )
+                if ok:
+                    self._resolved_owned_linked_character_pull_signatures[entity_id] = str(
+                        resolution_payload.get("signature") or ""
+                    )
+            elif action == "pull_replace":
                 ok, message = self._sync_local_sheet_inventory_from_host(
                     str(resolution_payload.get("character_id") or "").strip(),
                     resolution_payload.get("inventory") or {},
@@ -13808,6 +13851,7 @@ class DungeonAppletWidget(QWidget):
         sheet_id: str = "",
         entity_id: str = "",
         dungeon_id: str = "",
+        backup_existing_local_entry: bool = False,
     ) -> tuple[bool, str]:
         clean_character = str(character_id or "").strip()
         if not clean_character:
@@ -13883,6 +13927,10 @@ class DungeonAppletWidget(QWidget):
                 save_revision=resolved_save_revision,
                 last_saved_at=resolved_last_saved_at,
                 content_hash=resolved_content_hash,
+                allow_overwrite_personal_entry=isinstance(local_sync_payload, dict),
+                backup_existing_local_entry=(
+                    backup_existing_local_entry and isinstance(local_sync_payload, dict)
+                ),
                 emit_event=True,
             )
         finally:
@@ -13902,6 +13950,8 @@ class DungeonAppletWidget(QWidget):
             )
         if created_local_character:
             return True, "Character downloaded."
+        if backup_existing_local_entry and message:
+            return True, str(message)
         return True, "Inventory synchronized."
 
     def _local_character_sheet_exists(self, character_id: str) -> bool:
@@ -14128,7 +14178,7 @@ class DungeonAppletWidget(QWidget):
                             level = "[INFO]" if ok else "[WARN]"
                             self._append_server_log(f"{level} {message}")
                         continue
-                    if resolution_action != "pull":
+                    if resolution_action not in {"pull", "pull_replace"}:
                         continue
                 else:
                     queued_payload = dict(sync_payload)
@@ -14142,6 +14192,9 @@ class DungeonAppletWidget(QWidget):
                     "last_saved_at": str(sync_payload.get("last_saved_at") or ""),
                     "content_hash": str(sync_payload.get("content_hash") or ""),
                     "refresh_entities": True,
+                    "backup_existing_local_entry": (
+                        resolution_action == "pull" and isinstance(local_payload, dict)
+                    ),
                 }
                 if local_payload is None:
                     sync_kwargs.update(

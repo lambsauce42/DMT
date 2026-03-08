@@ -647,6 +647,39 @@ def test_host_scene_change_debounce_broadcasts_without_undo_push(dungeon_widget,
     assert calls
 
 
+def test_host_scene_change_debounce_waits_until_interaction_ends(dungeon_widget, qtbot, monkeypatch):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+
+    calls: list[str] = []
+    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: calls.append("sent"))
+
+    entity = EntityItem(QPointF(10.0, 10.0))
+    dungeon_widget.canvas.scene().addItem(entity)
+    QApplication.processEvents()
+    qtbot.wait(220)
+    calls.clear()
+
+    defer_sync = {"active": True}
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_host_scene_sync_should_defer",
+        lambda: bool(defer_sync["active"]),
+    )
+
+    entity.setPos(QPointF(160.0, 180.0))
+    QApplication.processEvents()
+    qtbot.wait(260)
+
+    assert calls == []
+
+    defer_sync["active"] = False
+    qtbot.wait(260)
+
+    assert calls == ["sent"]
+
+
 def test_switching_back_to_local_mode_hides_online_panels(dungeon_widget):
     dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
     dungeon_widget._set_online_mode(ONLINE_MODE_LOCAL_DM)
@@ -1220,6 +1253,64 @@ def test_loot_pool_resolve_item_path_materializes_item_document(dungeon_widget, 
     assert isinstance(loaded, dict)
     assert loaded.get("title") == "Blade"
     assert str(loaded.get("icon_path") or "").strip()
+
+
+def test_loot_pool_resolve_item_path_prefers_known_local_library_item_over_materialized_copy(
+    dungeon_widget, monkeypatch, tmp_path
+):
+    items_root = tmp_path / "items"
+    items_root.mkdir(parents=True, exist_ok=True)
+    local_item_path = items_root / "creator_item.dmtitem"
+    write_item_document(
+        local_item_path,
+        build_item_document(
+            {
+                "item_id": "creator-item",
+                "title": "Creator Item",
+                "rarity": "common",
+                "level": 1,
+            },
+            "",
+        ),
+    )
+    materialized_path = tmp_path / "materialized" / "creator_item_temp.dmtitem"
+    materialized_path.parent.mkdir(parents=True, exist_ok=True)
+    write_item_document(
+        materialized_path,
+        build_item_document(
+            {
+                "item_id": "creator-item",
+                "title": "Creator Item",
+                "rarity": "common",
+                "level": 1,
+            },
+            "",
+        ),
+    )
+    dungeon_widget._loot_pool_item_path_by_id["creator-item"] = materialized_path
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: items_root)
+
+    resolved = dungeon_widget._loot_pool_resolve_item_path(
+        {
+            "entry_id": "loot-known-1",
+            "type": "item",
+            "item_id": "creator-item",
+            "title": "Creator Item",
+            "path": "",
+            "item_document": build_item_document(
+                {
+                    "item_id": "creator-item",
+                    "title": "Creator Item",
+                    "rarity": "common",
+                    "level": 1,
+                },
+                "",
+            ),
+        }
+    )
+
+    assert resolved == local_item_path
+    assert dungeon_widget._loot_pool_item_path_by_id["creator-item"] == local_item_path
 
 
 def test_unknown_item_prompt_rows_show_icons_and_hover_preview(dungeon_widget, monkeypatch):
@@ -7132,6 +7223,82 @@ def test_snapshot_does_not_reprompt_after_successful_pull_for_same_host_state(
     assert len(sync_calls) == 1
 
 
+def test_snapshot_pull_defaults_to_backing_up_existing_local_character(
+    dungeon_widget, monkeypatch
+):
+    sync_calls = []
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = types.SimpleNamespace(
+        send_command=lambda *_args, **_kwargs: True,
+        disconnect=lambda: None,
+    )
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda character_id: {
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "character_id": character_id,
+            "save_revision": 0,
+            "last_saved_at": "",
+            "content_hash": "local-stale-hash",
+            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+            "stats": {"name": "Hero"},
+            "archive_b64": _valid_archive_b64(),
+        },
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_owned_linked_character_resolution",
+        lambda **_kwargs: "pull",
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_sync_local_sheet_inventory_from_host",
+        lambda *args, **kwargs: sync_calls.append((args, kwargs)) or (True, "ok"),
+    )
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "entity-1",
+                            "owner_player_id": "player-local",
+                            "linked_sheet_id": "sheet-1",
+                            "linked_sheet_name": "Hero",
+                            "linked_character_id": "character-1",
+                            "linked_save_revision": 5,
+                            "linked_last_saved_at": "2026-03-08T12:00:00Z",
+                            "linked_content_hash": "host-hash",
+                            "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                            "linked_sheet_archive_b64": _valid_archive_b64(),
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert len(sync_calls) == 1
+    _args, kwargs = sync_calls[0]
+    assert kwargs["backup_existing_local_entry"] is True
+
+
 def test_sync_local_sheet_inventory_does_not_map_character_id_as_sheet_id(dungeon_widget, monkeypatch):
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._player_connection_ready = True
@@ -7189,6 +7356,70 @@ def test_sync_local_sheet_inventory_does_not_map_character_id_as_sheet_id(dungeo
     assert ok is True
     assert message == "Character downloaded."
     assert applied["character_id"] == "remote-character-id"
+
+
+def test_sync_local_sheet_inventory_allows_explicit_pull_to_overwrite_personal_local_sheet(
+    dungeon_widget, monkeypatch
+):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._local_player_id = "player-local"
+
+    applied = {}
+
+    def _apply_remote(character_id, sheet_name, inventory_payload, **kwargs):
+        applied["character_id"] = character_id
+        applied["sheet_name"] = sheet_name
+        applied["inventory"] = inventory_payload
+        applied["kwargs"] = dict(kwargs)
+        return True, "Character synchronized.", inventory_payload
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda character_id: {
+            "sheet_id": "sheet-local",
+            "sheet_name": "Local Hero",
+            "character_id": character_id,
+            "save_revision": 2,
+            "last_saved_at": "2026-03-07T10:00:00Z",
+            "content_hash": "local-hash",
+            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+            "stats": {"name": "Local Hero"},
+            "archive_b64": _valid_archive_b64(),
+        },
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_linked_item_document_by_id",
+        lambda item_id: build_item_document({"item_id": item_id, "title": "Known Item"}, None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "player_sheets",
+        types.SimpleNamespace(
+            character_id_for_sheet_id=lambda _sheet_id: "character-sheet-1",
+            apply_remote_character_package_for_character_id=_apply_remote,
+        ),
+    )
+
+    ok, message = dungeon_widget._sync_local_sheet_inventory_from_host(
+        "character-sheet-1",
+        {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+        sheet_name="Remote Hero",
+        sheet_id="sheet-host",
+        entity_id="entity-1",
+        dungeon_id="d1",
+        refresh_entities=False,
+    )
+
+    assert ok is True
+    assert message == "Inventory synchronized."
+    assert applied["character_id"] == "character-sheet-1"
+    assert applied["kwargs"]["allow_overwrite_personal_entry"] is True
+    assert applied["kwargs"]["backup_existing_local_entry"] is False
+    assert applied["kwargs"]["sheet_id"] == "sheet-host"
+
 
 def test_player_state_update_is_queued_when_send_fails_and_flushed_after_snapshot(
     dungeon_widget, monkeypatch

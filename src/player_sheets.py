@@ -1505,6 +1505,70 @@ def _ensure_entry_character_id(entry: PlayerSheetEntry) -> str:
     return entry.character_id
 
 
+def _next_backup_entry_name(entries: List["PlayerSheetEntry"], current_name: str) -> str:
+    base_name = str(current_name or "").strip() or "Character"
+    existing_names = {
+        str(getattr(entry, "name", "") or "").strip().casefold()
+        for entry in entries
+        if str(getattr(entry, "name", "") or "").strip()
+    }
+    backup_name = f"{base_name}_bak"
+    if backup_name.casefold() not in existing_names:
+        return backup_name
+    suffix = 2
+    while True:
+        candidate = f"{base_name}_bak{suffix}"
+        if candidate.casefold() not in existing_names:
+            return candidate
+        suffix += 1
+
+
+def _create_backup_entry_for_remote_overwrite(
+    entry: "PlayerSheetEntry",
+    entries: List["PlayerSheetEntry"],
+) -> tuple[bool, str, Optional["PlayerSheetEntry"]]:
+    backup_name = _next_backup_entry_name(entries, str(getattr(entry, "name", "") or ""))
+    backup_entry = PlayerSheetEntry(
+        name=backup_name,
+        pdf_path="",
+        character_id=generate_named_object_id(backup_name, "character"),
+        world=getattr(entry, "world", None),
+        campaign=getattr(entry, "campaign", None),
+        group=getattr(entry, "group", None),
+        tags=list(getattr(entry, "tags", []) or []),
+        inventory=list(getattr(entry, "inventory", []) or []),
+        inventory_notes=str(getattr(entry, "inventory_notes", "") or ""),
+        equipment=dict(getattr(entry, "equipment", {}) or {}),
+        gold=int(getattr(entry, "gold", 0) or 0),
+        silver=int(getattr(entry, "silver", 0) or 0),
+        copper=int(getattr(entry, "copper", 0) or 0),
+        item_documents=_entry_item_documents(entry),
+        managed_linked=False,
+        managed_scope="",
+    )
+    backup_sheet_id = _ensure_entry_sheet_id(backup_entry)
+    backup_pdf_path = character_sheet_pdf_path(backup_sheet_id)
+    backup_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    source_pdf = Path(str(getattr(entry, "pdf_path", "") or "")).expanduser()
+    if source_pdf.exists():
+        try:
+            shutil.copyfile(source_pdf, backup_pdf_path)
+        except OSError:
+            logger.exception("Failed to copy player sheet PDF for backup: %s", source_pdf)
+            return False, "Unable to create a local backup before replacing the character.", None
+    else:
+        source_archive = _entry_archive_path(entry)
+        if not source_archive.exists() or not extract_character_pdf(source_archive, backup_pdf_path):
+            return False, "Unable to create a local backup before replacing the character.", None
+
+    backup_entry.pdf_path = str(backup_pdf_path)
+    backup_entry.archive_path = str(character_sheet_archive_path(backup_sheet_id))
+    if not sync_entry_archive(backup_entry):
+        return False, "Unable to create a local backup before replacing the character.", None
+    return True, backup_name, backup_entry
+
+
 def move_entry_files_to_trash(entry: PlayerSheetEntry) -> Optional[str]:
     sheet_id = sheet_id_for_entry(entry)
     storage_path = character_sheet_pdf_path(sheet_id)
@@ -2439,6 +2503,8 @@ def apply_remote_character_package_for_character_id(
     save_revision: int = 0,
     last_saved_at: str = "",
     content_hash: str = "",
+    allow_overwrite_personal_entry: bool = False,
+    backup_existing_local_entry: bool = False,
     emit_event: bool = True,
 ) -> tuple[bool, str, Optional[dict]]:
     target = str(character_id or "").strip()
@@ -2453,8 +2519,29 @@ def apply_remote_character_package_for_character_id(
         (entry for entry in entries if character_id_for_entry(entry) == target),
         None,
     )
-    if target_entry is not None and not getattr(target_entry, "managed_linked", False):
-        return False, "Remote character id conflicts with an existing personal local sheet.", None
+    backup_name = ""
+    if backup_existing_local_entry:
+        allow_overwrite_personal_entry = True
+    previous_sheet_id = ""
+    previous_archive_path: Path | None = None
+    previous_cache_pdf_path: Path | None = None
+    if target_entry is not None:
+        if not getattr(target_entry, "managed_linked", False) and not allow_overwrite_personal_entry:
+            return False, "Remote character id conflicts with an existing personal local sheet.", None
+        if backup_existing_local_entry:
+            ok, backup_name, backup_entry = _create_backup_entry_for_remote_overwrite(
+                target_entry,
+                entries,
+            )
+            if not ok or backup_entry is None:
+                return False, backup_name or "Unable to create a local backup before replacing the character.", None
+            entries.append(backup_entry)
+        previous_sheet_id = str(sheet_id_for_entry(target_entry) or "").strip()
+        if previous_sheet_id and clean_sheet_id and previous_sheet_id != clean_sheet_id:
+            previous_archive_path = _entry_archive_path(target_entry)
+            previous_cache_pdf_path = character_sheet_pdf_path(previous_sheet_id)
+            target_entry.sheet_id = clean_sheet_id
+            target_entry.archive_path = str(character_sheet_archive_path(clean_sheet_id))
     if target_entry is None:
         ok, message, _payload = ensure_network_linked_character_entry(
             target,
@@ -2475,6 +2562,10 @@ def apply_remote_character_package_for_character_id(
             return False, "Character not found.", None
     elif clean_scope:
         target_entry.managed_scope = clean_scope
+    if allow_overwrite_personal_entry and target_entry is not None:
+        target_entry.managed_linked = True
+        if clean_scope:
+            target_entry.managed_scope = clean_scope
 
     existing_sheet_id = sheet_id_for_entry(target_entry)
     if clean_sheet_id and existing_sheet_id and existing_sheet_id != clean_sheet_id:
@@ -2505,9 +2596,20 @@ def apply_remote_character_package_for_character_id(
 
     sync_entry_archive(target_entry, preserve_revision=True)
     save_entries_to_storage(entries)
+    if previous_sheet_id and clean_sheet_id and previous_sheet_id != clean_sheet_id:
+        for stale_path in (previous_archive_path, previous_cache_pdf_path):
+            if stale_path is None:
+                continue
+            try:
+                if stale_path.exists():
+                    stale_path.unlink()
+            except OSError:
+                logger.exception("Failed to remove stale player sheet artifact: %s", stale_path)
     payload = _entry_inventory_payload(target_entry)
     if emit_event:
         PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id_for_entry(target_entry), payload)
+    if backup_name:
+        return True, f"Character synchronized. Backed up the previous local copy as '{backup_name}'.", payload
     return True, "Character synchronized.", payload
 
 
@@ -5756,7 +5858,7 @@ class PlayerSheetsWidget(QWidget):
             QMessageBox.information(
                 self,
                 "No Items Available",
-                "No items found in the loot library. Create items in Item Creator first.",
+                "No items found in the loot library. Create items in Items first.",
             )
             return
         dialog = InventoryItemPickerDialog(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -214,6 +216,129 @@ class ItemPreviewWidget(QWidget):
         self.update()
 
 
+class _ItemLibraryDialog(QDialog):
+    def __init__(
+        self,
+        items: List[Dict[str, str]],
+        open_item: Callable[[str], bool],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Item Library")
+        self.resize(820, 480)
+        self._items = list(items)
+        self._open_item = open_item
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(12)
+        controls.addWidget(QLabel("Sort By", self))
+
+        self._sort_combo = QComboBox(self)
+        self._sort_combo.setFixedHeight(36)
+        self._sort_combo.addItems(["Title", "Category"])
+        self._sort_combo.currentTextChanged.connect(self._populate_rows)
+        controls.addWidget(self._sort_combo)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self._table = QTableWidget(0, 4, self)
+        self._table.setHorizontalHeaderLabels(["Title", "Category", "Rarity", "Level"])
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        self._table.horizontalHeader().setSectionResizeMode(0, self._table.horizontalHeader().ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(1, self._table.horizontalHeader().ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(2, self._table.horizontalHeader().ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, self._table.horizontalHeader().ResizeMode.ResizeToContents)
+        self._table.itemDoubleClicked.connect(lambda *_args: self._open_selected())
+        self._table.itemSelectionChanged.connect(self._sync_buttons)
+        layout.addWidget(self._table, 1)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(12)
+        button_row.addStretch(1)
+
+        self._load_button = QPushButton("Load Selected", self)
+        self._load_button.setObjectName("PrimaryButton")
+        self._load_button.setFixedHeight(36)
+        self._load_button.setMinimumWidth(132)
+        self._load_button.clicked.connect(self._open_selected)
+        button_row.addWidget(self._load_button)
+
+        close_button = QPushButton("Close", self)
+        close_button.setObjectName("SecondaryButton")
+        close_button.setFixedHeight(36)
+        close_button.setMinimumWidth(96)
+        close_button.clicked.connect(self.close)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+        self._populate_rows()
+
+    def _sorted_items(self) -> List[Dict[str, str]]:
+        mode = self._sort_combo.currentText().strip().lower()
+        if mode == "category":
+            return sorted(
+                self._items,
+                key=lambda item: (
+                    str(item.get("category_sort") or "").casefold(),
+                    str(item.get("title") or "").casefold(),
+                ),
+            )
+        return sorted(
+            self._items,
+            key=lambda item: (
+                str(item.get("title") or "").casefold(),
+                str(item.get("category_sort") or "").casefold(),
+            ),
+        )
+
+    def _populate_rows(self) -> None:
+        rows = self._sorted_items()
+        self._table.setRowCount(len(rows))
+        for row, item in enumerate(rows):
+            title_item = QTableWidgetItem(str(item.get("title") or "Untitled Item"))
+            title_item.setData(Qt.ItemDataRole.UserRole, str(item.get("path") or ""))
+            category_item = QTableWidgetItem(str(item.get("category") or "Uncategorized"))
+            rarity_item = QTableWidgetItem(str(item.get("rarity") or "common"))
+            level_item = QTableWidgetItem(str(item.get("level") or ""))
+            for col, table_item in enumerate((title_item, category_item, rarity_item, level_item)):
+                self._table.setItem(row, col, table_item)
+        if rows:
+            self._table.selectRow(0)
+        self._sync_buttons()
+
+    def _selected_path(self) -> str:
+        row = self._table.currentRow()
+        if row < 0:
+            return ""
+        item = self._table.item(row, 0)
+        if item is None:
+            return ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+
+    def _sync_buttons(self) -> None:
+        self._load_button.setEnabled(bool(self._selected_path()))
+
+    def _open_selected(self) -> None:
+        path = self._selected_path()
+        if not path:
+            return
+        if self._open_item(path):
+            self.close()
+            return
+        QMessageBox.warning(self, "Load Failed", f"Unable to load item:\n{path}")
+
+
 class ItemCreatorWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -225,7 +350,9 @@ class ItemCreatorWidget(QWidget):
         self._dirty = False
         self._item_id = ""
         self._last_save_path: Optional[str] = None
+        self._last_saved_base_name: Optional[str] = None
         self._level_value = 1
+        self._library_dialogs: List[QDialog] = []
         self._preview_fast_timer = QTimer(self)
         self._preview_fast_timer.setSingleShot(True)
         self._preview_fast_timer.timeout.connect(self._render_preview)
@@ -266,6 +393,13 @@ class ItemCreatorWidget(QWidget):
         self.export_png_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "image.svg")))
         self.export_png_button.setToolTip("Export PNG")
 
+        self.show_library_button = QPushButton("Show Item Library", self)
+        self.show_library_button.setObjectName("SecondaryButton")
+        self.show_library_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "list.svg")))
+        self.show_library_button.setToolTip("Show Item Library")
+        self.show_library_button.setFixedHeight(36)
+        self.show_library_button.setCursor(Qt.CursorShape.PointingHandCursor)
+
         top_action_button_style = (
             "QToolButton#SecondaryButton {"
             "padding: 4px;"
@@ -284,7 +418,7 @@ class ItemCreatorWidget(QWidget):
             btn.setStyleSheet(top_action_button_style)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             action_row.addWidget(btn)
-            
+        action_row.addWidget(self.show_library_button)
         action_row.addStretch(1)
         form_layout.addLayout(action_row)
 
@@ -729,6 +863,7 @@ class ItemCreatorWidget(QWidget):
         self.save_to_button.clicked.connect(self._save_item_as)
         self.export_button.clicked.connect(self._export_pdf)
         self.export_png_button.clicked.connect(self._export_png)
+        self.show_library_button.clicked.connect(self._show_item_library)
 
         self.title_edit.textChanged.connect(self._mark_dirty)
         self.rarity_combo.currentTextChanged.connect(self._mark_dirty)
@@ -1082,6 +1217,85 @@ class ItemCreatorWidget(QWidget):
         base = "".join(cleaned).strip("-")
         return base or "item"
 
+    def _default_item_save_path(self, *, directory: Optional[str] = None) -> str:
+        target_dir = str(directory or self._base_save_dir or "").strip() or self._base_save_dir
+        return os.path.join(target_dir, self._default_base_name() + ITEM_FILE_EXTENSION)
+
+    def _save_item_document(self, item_path: str) -> str:
+        spec = self._current_spec()
+        payload = spec_to_dict(spec)
+        payload.pop("item_id", None)
+        document = build_item_document(payload, spec.icon_path)
+        write_item_document(Path(item_path), document)
+        payload = document.get("payload")
+        if isinstance(payload, dict):
+            self._item_id = str(payload.get("item_id") or "").strip()
+        self._last_save_path = item_path
+        self._last_saved_base_name = self._default_base_name()
+        save_dir = os.path.dirname(item_path)
+        if save_dir:
+            self._base_save_dir = save_dir
+        self._set_dirty(False)
+        return item_path
+
+    def _item_library_rows(self) -> List[Dict[str, str]]:
+        rows: List[Dict[str, str]] = []
+        for path in list_item_file_paths(Path(self._base_save_dir)):
+            payload = load_item_payload(path)
+            if not isinstance(payload, dict):
+                print(f"[WARN] Skipping unreadable item library entry: {path}", file=sys.stderr)
+                continue
+            raw_tags = [str(tag).strip() for tag in (payload.get("tags") or []) if str(tag).strip()]
+            categories = ", ".join(tag.capitalize() for tag in raw_tags) or "Uncategorized"
+            rows.append(
+                {
+                    "path": str(path),
+                    "title": str(payload.get("title") or "Untitled Item"),
+                    "category": categories,
+                    "category_sort": categories,
+                    "rarity": str(payload.get("rarity") or "common"),
+                    "level": str(payload.get("level") or ""),
+                }
+            )
+        return rows
+
+    def _show_item_library(self) -> None:
+        rows = self._item_library_rows()
+        if not rows:
+            QMessageBox.information(self, "Item Library", "No saved items found.")
+            return
+        dialog = _ItemLibraryDialog(rows, self._load_item_from_path, self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda *_args, d=dialog: self._discard_library_dialog(d))
+        self._library_dialogs.append(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _discard_library_dialog(self, dialog: QDialog) -> None:
+        self._library_dialogs = [candidate for candidate in self._library_dialogs if candidate is not dialog]
+
+    def _load_item_from_path(self, path: str) -> bool:
+        clean_path = str(path or "").strip()
+        if not clean_path:
+            return False
+        try:
+            data = load_item_payload(Path(clean_path))
+            if data is None:
+                raise ValueError("Invalid item file")
+            spec = spec_from_dict(data)
+        except Exception as exc:
+            print(f"[WARN] Failed to load item '{clean_path}': {exc}", file=sys.stderr)
+            return False
+        self._apply_spec(spec)
+        loaded_path = Path(clean_path)
+        if loaded_path.suffix.lower() == ITEM_FILE_EXTENSION:
+            self._last_save_path = str(loaded_path)
+        else:
+            self._last_save_path = str(loaded_path.with_suffix(ITEM_FILE_EXTENSION))
+        self._last_saved_base_name = self._default_base_name()
+        self._set_dirty(False)
+        return True
 
     def _save_item(self) -> None:
         if not RENDERER_AVAILABLE:
@@ -1092,6 +1306,10 @@ class ItemCreatorWidget(QWidget):
         if not self._last_save_path:
             self._save_item_as()
             return
+        if self._last_saved_base_name and self._default_base_name() != self._last_saved_base_name:
+            current_dir = os.path.dirname(self._last_save_path) or self._base_save_dir
+            self._save_item_as(default_path=self._default_item_save_path(directory=current_dir))
+            return
 
         save_path = self._last_save_path
         if Path(save_path).suffix.lower() != ITEM_FILE_EXTENSION:
@@ -1100,29 +1318,18 @@ class ItemCreatorWidget(QWidget):
         base_dir = os.path.dirname(save_path)
         try:
             os.makedirs(base_dir, exist_ok=True)
-            spec = self._current_spec()
-            payload = spec_to_dict(spec)
-            payload.pop("item_id", None)
-            document = build_item_document(payload, spec.icon_path)
-            write_item_document(Path(save_path), document)
-            payload = document.get("payload")
-            if isinstance(payload, dict):
-                self._item_id = str(payload.get("item_id") or "").strip()
-            self._set_dirty(False)
+            self._save_item_document(save_path)
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
 
-    def _save_item_as(self) -> None:
+    def _save_item_as(self, default_path: Optional[str] = None) -> None:
         if not RENDERER_AVAILABLE:
             QMessageBox.warning(
                 self, "Renderer Unavailable", f"Cannot save: {RENDERER_ERROR}"
             )
             return
 
-        default_name = self._default_base_name() + ITEM_FILE_EXTENSION
-        default_path = self._last_save_path or os.path.join(
-            self._base_save_dir, default_name
-        )
+        default_path = str(default_path or "").strip() or self._last_save_path or self._default_item_save_path()
 
         while True:
             item_path, _ = QFileDialog.getSaveFileName(
@@ -1130,10 +1337,11 @@ class ItemCreatorWidget(QWidget):
             )
             if not item_path:
                 return
+            selected_dir = os.path.dirname(item_path) or self._base_save_dir
             base_name = os.path.splitext(os.path.basename(item_path))[0]
             if not base_name:
                 base_name = self._default_base_name()
-            base_path = os.path.join(self._base_save_dir, base_name)
+            base_path = os.path.join(selected_dir, base_name)
             item_path = base_path + ITEM_FILE_EXTENSION
 
             if os.path.exists(item_path):
@@ -1155,18 +1363,11 @@ class ItemCreatorWidget(QWidget):
                     return
             break
 
-        spec = self._current_spec()
         try:
-            os.makedirs(self._base_save_dir, exist_ok=True)
-            payload = spec_to_dict(spec)
-            payload.pop("item_id", None)
-            document = build_item_document(payload, spec.icon_path)
-            write_item_document(Path(item_path), document)
-            payload = document.get("payload")
-            if isinstance(payload, dict):
-                self._item_id = str(payload.get("item_id") or "").strip()
-            self._last_save_path = item_path
-            self._set_dirty(False)
+            save_dir = os.path.dirname(item_path)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            self._save_item_document(item_path)
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
 
@@ -1300,22 +1501,8 @@ class ItemCreatorWidget(QWidget):
         )
         if not path:
             return
-        try:
-            data = load_item_payload(Path(path))
-            if data is None:
-                raise ValueError("Invalid item file")
-            spec = spec_from_dict(data)
-        except Exception as exc:
-            QMessageBox.critical(self, "Load Failed", str(exc))
-            return
-
-        self._apply_spec(spec)
-        loaded_path = Path(path)
-        if loaded_path.suffix.lower() == ITEM_FILE_EXTENSION:
-            self._last_save_path = str(loaded_path)
-        else:
-            self._last_save_path = str(loaded_path.with_suffix(ITEM_FILE_EXTENSION))
-        self._set_dirty(False)
+        if not self._load_item_from_path(path):
+            QMessageBox.critical(self, "Load Failed", "Invalid item file")
 
     def open_linked_item(self, item_id: str) -> bool:
         clean_id = str(item_id or "").strip()
@@ -1331,17 +1518,7 @@ class ItemCreatorWidget(QWidget):
                 break
         if target_path is None:
             return False
-        try:
-            data = load_item_payload(target_path)
-            if data is None:
-                return False
-            spec = spec_from_dict(data)
-        except Exception:
-            return False
-        self._apply_spec(spec)
-        self._last_save_path = str(target_path)
-        self._set_dirty(False)
-        return True
+        return self._load_item_from_path(str(target_path))
 
     def update_preview(self) -> None:
         self._preview_fast_timer.start(70)

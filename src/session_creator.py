@@ -151,9 +151,9 @@ SESSION_LINK_APPLET_DEFINITIONS: dict[str, dict[str, object]] = {
     },
     "item_creator": {
         "key": "item_creator",
-        "tab": "Item Creator",
-        "title": "Item Creator",
-        "subtitle": "Create item PDFs",
+        "tab": "Items",
+        "title": "Items",
+        "subtitle": "Create and browse items",
         "actions": [],
         "panels": [],
     },

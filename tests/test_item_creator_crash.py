@@ -75,6 +75,9 @@ def test_item_toolbar_buttons(item_widget, qtbot, monkeypatch):
     # Click Export (might fail due to renderer but shouldn't crash)
     qtbot.mouseClick(item_widget.export_button, Qt.MouseButton.LeftButton)
 
+    # Click Show Item Library
+    qtbot.mouseClick(item_widget.show_library_button, Qt.MouseButton.LeftButton)
+
 def test_item_toolbar_buttons_are_square(item_widget):
     for btn in (
         item_widget.load_button,
@@ -90,6 +93,8 @@ def test_item_toolbar_buttons_are_square(item_widget):
         assert "max-width: 36px;" in style
         assert "min-height: 36px;" in style
         assert "max-height: 36px;" in style
+    assert item_widget.show_library_button.height() == 36
+    assert item_widget.show_library_button.width() >= item_widget.show_library_button.height()
 
 def test_item_stats_buttons(item_widget, qtbot):
     """
@@ -124,8 +129,9 @@ def test_click_all_item_buttons(item_widget, qtbot):
             qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
 
 
-def test_editing_loaded_item_creates_new_item_version(item_widget, monkeypatch, tmp_path):
+def test_editing_loaded_item_prompts_for_new_filename_on_title_change(item_widget, monkeypatch, tmp_path):
     item_path = tmp_path / "loaded_item.dmtitem"
+    renamed_item_path = tmp_path / "healing-potion-updated.dmtitem"
     document = build_item_document({"title": "Healing Potion", "rarity": "common"}, None)
     write_item_document(item_path, document)
     initial_payload = load_item_payload(item_path)
@@ -134,15 +140,52 @@ def test_editing_loaded_item_creates_new_item_version(item_widget, monkeypatch, 
     assert initial_item_id
 
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(item_path), "DMT Item"))
+    seen_default_paths: list[str] = []
+
+    def _save_dialog(*args):
+        seen_default_paths.append(str(args[2]))
+        return (str(renamed_item_path), "DMT Item")
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", _save_dialog)
 
     item_widget._load_item()
     item_widget.title_edit.setText("Healing Potion Updated")
     item_widget._save_item()
 
-    saved_payload = load_item_payload(item_path)
-    assert isinstance(saved_payload, dict)
-    assert saved_payload["item_id"] != initial_item_id
-    assert saved_payload["normalized_item_name"] == "healing potion updated"
+    original_payload = load_item_payload(item_path)
+    renamed_payload = load_item_payload(renamed_item_path)
+    assert isinstance(original_payload, dict)
+    assert isinstance(renamed_payload, dict)
+    assert original_payload["item_id"] == initial_item_id
+    assert renamed_payload["item_id"] != initial_item_id
+    assert renamed_payload["normalized_item_name"] == "healing potion updated"
+    assert seen_default_paths == [str(renamed_item_path)]
+
+
+def test_show_item_library_collects_items_and_sorts_by_category(item_widget, qtbot, tmp_path):
+    first_path = tmp_path / "blade.dmtitem"
+    second_path = tmp_path / "potion.dmtitem"
+    write_item_document(
+        first_path,
+        build_item_document({"title": "Blade", "rarity": "rare", "tags": ["equipment"]}, None),
+    )
+    write_item_document(
+        second_path,
+        build_item_document({"title": "Potion", "rarity": "common", "tags": ["consumables"]}, None),
+    )
+    item_widget._base_save_dir = str(tmp_path)
+
+    item_widget._show_item_library()
+
+    assert item_widget._library_dialogs
+    dialog = item_widget._library_dialogs[-1]
+    table = dialog._table
+    assert table.rowCount() == 2
+    assert table.item(0, 0).text() == "Blade"
+
+    dialog._sort_combo.setCurrentText("Category")
+    qtbot.waitUntil(lambda: table.item(0, 1).text() == "Consumables")
+    assert table.item(0, 0).text() == "Potion"
 
 
 def test_saving_existing_item_writes_new_item_version(item_widget, monkeypatch, tmp_path):

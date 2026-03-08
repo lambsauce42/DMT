@@ -254,6 +254,86 @@ def test_apply_remote_character_package_does_not_overwrite_existing_personal_she
     assert entry.inventory == ["item-personal"]
 
 
+def test_apply_remote_character_package_can_overwrite_existing_personal_sheet_when_explicitly_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    personal_pdf = tmp_path / "personal.pdf"
+    personal_pdf.write_bytes(b"%PDF-1.4 personal")
+    personal_entry = player_sheets.PlayerSheetEntry(
+        name="Personal Hero",
+        pdf_path=str(personal_pdf),
+        character_id="character-shared",
+        inventory=["item-personal"],
+        managed_linked=False,
+    )
+    assert player_sheets.ensure_entry_archive(personal_entry)
+    player_sheets.save_entries_to_storage([personal_entry])
+
+    ok, message, payload = player_sheets.apply_remote_character_package_for_character_id(
+        "character-shared",
+        "Remote Hero",
+        {"inventory": ["item-remote"]},
+        sheet_id="sheet-host",
+        allow_overwrite_personal_entry=True,
+        emit_event=False,
+    )
+
+    assert ok is True, message
+    assert isinstance(payload, dict)
+    entries = player_sheets.load_entries_from_storage()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert player_sheets.sheet_id_for_entry(entry) == "sheet-host"
+    assert entry.managed_linked is True
+    assert entry.inventory == ["item-remote"]
+
+
+def test_apply_remote_character_package_can_backup_existing_local_sheet_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    personal_pdf = tmp_path / "personal.pdf"
+    personal_pdf.write_bytes(b"%PDF-1.4 personal")
+    personal_entry = player_sheets.PlayerSheetEntry(
+        name="Personal Hero",
+        pdf_path=str(personal_pdf),
+        character_id="character-shared",
+        inventory=["item-personal"],
+        managed_linked=False,
+    )
+    assert player_sheets.ensure_entry_archive(personal_entry)
+    player_sheets.save_entries_to_storage([personal_entry])
+
+    ok, message, payload = player_sheets.apply_remote_character_package_for_character_id(
+        "character-shared",
+        "Remote Hero",
+        {"inventory": ["item-remote"]},
+        sheet_id="sheet-host",
+        backup_existing_local_entry=True,
+        emit_event=False,
+    )
+
+    assert ok is True, message
+    assert "Personal Hero_bak" in message
+    assert isinstance(payload, dict)
+    entries = player_sheets.load_entries_from_storage()
+    assert len(entries) == 2
+    real_entry = next(
+        entry for entry in entries if player_sheets.character_id_for_entry(entry) == "character-shared"
+    )
+    backup_entry = next(
+        entry for entry in entries if player_sheets.character_id_for_entry(entry) != "character-shared"
+    )
+    assert player_sheets.sheet_id_for_entry(real_entry) == "sheet-host"
+    assert real_entry.managed_linked is True
+    assert real_entry.inventory == ["item-remote"]
+    assert backup_entry.name == "Personal Hero_bak"
+    assert backup_entry.managed_linked is False
+    assert backup_entry.inventory == ["item-personal"]
+    assert player_sheets.character_id_for_entry(backup_entry) != "character-shared"
+
+
 def test_apply_remote_character_package_uses_authoritative_sheet_id_for_new_managed_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

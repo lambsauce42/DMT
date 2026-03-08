@@ -1018,9 +1018,9 @@ APPLET_DEFINITIONS: List[Dict[str, object]] = [
     },
     {
         "key": "item_creator",
-        "tab": "Item Creator",
-        "title": "Item Creator",
-        "subtitle": "Create item PDFs",
+        "tab": "Items",
+        "title": "Items",
+        "subtitle": "Create and browse items",
         "icon": "itemcreator.png",
         "actions": ["New Item", "Import PDF", "Open JSON"],
         "panels": ["Item List", "Inspector"],
