@@ -147,9 +147,13 @@ from item_file_format import (
     ITEM_FILE_EXTENSION,
     ITEM_FILE_FORMAT,
     build_item_document,
+    indexed_item_record_by_id,
+    indexed_item_records,
+    indexed_item_records_by_document,
+    indexed_item_records_by_normalized_name,
+    invalidate_item_library_index,
     item_document_matches,
     item_id_from_payload,
-    list_item_file_paths,
     load_item_document,
     load_item_payload,
     normalized_item_name_from_payload,
@@ -5726,23 +5730,23 @@ class DungeonAppletWidget(QWidget):
             canonical_path: Path | None = None
             same_name_paths: list[Path] = []
             same_name_item_ids: list[str] = []
+            if payload_item_id:
+                existing_record = indexed_item_record_by_id(library_root, payload_item_id)
+                if existing_record is not None:
+                    canonical_path = existing_record.path
+            if canonical_path is None and isinstance(item_document, dict):
+                matching_records = indexed_item_records_by_document(library_root, item_document)
+                if matching_records:
+                    canonical_path = matching_records[0].path
             if payload_normalized_name:
-                for existing_path in list_item_file_paths(library_root):
-                    existing_payload = load_item_payload(existing_path)
-                    if not isinstance(existing_payload, dict):
-                        continue
-                    existing_normalized_name = normalized_item_name_from_payload(
-                        existing_payload,
-                        fallback_path=existing_path,
-                    )
-                    if existing_normalized_name != payload_normalized_name:
-                        continue
-                    same_name_paths.append(existing_path)
-                    existing_item_id = item_id_from_payload(existing_payload, fallback_path=existing_path)
-                    if existing_item_id:
-                        same_name_item_ids.append(existing_item_id)
-                    if canonical_path is None:
-                        canonical_path = existing_path
+                same_name_records = indexed_item_records_by_normalized_name(
+                    library_root,
+                    payload_normalized_name,
+                )
+                same_name_paths = [record.path for record in same_name_records]
+                same_name_item_ids = [record.item_id for record in same_name_records if record.item_id]
+                if canonical_path is None and same_name_records:
+                    canonical_path = same_name_records[0].path
 
             if canonical_path is not None:
                 existing_payload = load_item_payload(canonical_path)
@@ -5781,6 +5785,7 @@ class DungeonAppletWidget(QWidget):
                             try:
                                 if duplicate_path.exists():
                                     duplicate_path.unlink()
+                                    invalidate_item_library_index(path=duplicate_path)
                             except Exception:
                                 logger.exception(
                                     "Failed to prune replaced item definition: %s",
@@ -6047,14 +6052,10 @@ class DungeonAppletWidget(QWidget):
         root = items_dir()
         if not root.exists():
             return None
-        for item_path in list_item_file_paths(root):
-            payload = load_item_payload(item_path)
-            if not isinstance(payload, dict):
-                continue
-            candidate_id = item_id_from_payload(payload, fallback_path=item_path)
-            if candidate_id:
-                self._loot_pool_item_path_by_id.setdefault(candidate_id, item_path)
-            self._loot_pool_item_path_by_id.setdefault(str(item_path.resolve()), item_path)
+        for record in indexed_item_records(root):
+            if record.item_id:
+                self._loot_pool_item_path_by_id.setdefault(record.item_id, record.path)
+            self._loot_pool_item_path_by_id.setdefault(str(record.path.resolve()), record.path)
         resolved = self._loot_pool_item_path_by_id.get(item_id)
         if resolved is None or not resolved.exists():
             return None
@@ -6821,13 +6822,13 @@ class DungeonAppletWidget(QWidget):
             library: list[tuple[str, str, str]] = []
             root = items_dir()
             if root.exists():
-                for item_path in list_item_file_paths(root):
-                    data = load_item_payload(item_path)
-                    if not isinstance(data, dict):
-                        continue
-                    title = str(data.get("title") or data.get("name") or item_path.stem).strip()
-                    item_id = item_id_from_payload(data, fallback_path=item_path)
-                    library.append((title, item_id, str(item_path)))
+                for record in indexed_item_records(root):
+                    title = str(
+                        record.payload.get("title")
+                        or record.payload.get("name")
+                        or record.path.stem
+                    ).strip()
+                    library.append((title, record.item_id, str(record.path)))
             if not library:
                 QMessageBox.information(self, "Loot Pool", "No item library entries found.")
                 return
@@ -9474,6 +9475,219 @@ class DungeonAppletWidget(QWidget):
         normalized.setdefault("layer", LAYER_FG)
         return normalized
 
+    def _find_live_player_stroke_item(
+        self,
+        stroke_id: str,
+        *,
+        owner_player_id: str = "",
+    ) -> QGraphicsPathItem | None:
+        clean_stroke_id = str(stroke_id or "").strip()
+        clean_owner = str(owner_player_id or "").strip()
+        if not clean_stroke_id:
+            return None
+        for item in self.canvas.scene().items():
+            if not isinstance(item, QGraphicsPathItem):
+                continue
+            if str(item.data(ROLE_KIND) or "").strip() != "stroke":
+                continue
+            if str(item.data(ROLE_ENTITY_ID) or "").strip() != clean_stroke_id:
+                continue
+            if clean_owner and str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip() != clean_owner:
+                continue
+            return item
+        return None
+
+    def _apply_player_owned_entity_state_to_live_item(
+        self,
+        entity: EntityItem,
+        item_data: dict,
+    ) -> None:
+        pos = item_data.get("pos")
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            try:
+                entity.setPos(float(pos[0]), float(pos[1]))
+            except (TypeError, ValueError):
+                pass
+        if "z" in item_data:
+            try:
+                entity.setZValue(float(item_data.get("z")))
+            except (TypeError, ValueError):
+                pass
+        if "color" in item_data:
+            next_color = QColor(str(item_data.get("color") or entity._color.name()))
+            if next_color.isValid() and next_color != entity._color:
+                entity._color = next_color
+                entity.update()
+        if "max_hp" in item_data:
+            try:
+                entity._max_hp = max(0, int(item_data.get("max_hp") or 0))
+            except (TypeError, ValueError):
+                pass
+        if "hp" in item_data:
+            try:
+                entity.hp = int(item_data.get("hp") or 0)
+            except (TypeError, ValueError):
+                pass
+        if "ac" in item_data:
+            try:
+                entity.ac = int(item_data.get("ac") or 0)
+            except (TypeError, ValueError):
+                pass
+        for attr in (
+            "strength",
+            "dexterity",
+            "constitution",
+            "intelligence",
+            "wisdom",
+            "charisma",
+        ):
+            if attr not in item_data:
+                continue
+            try:
+                setattr(entity, attr, int(item_data.get(attr) or 0))
+            except (TypeError, ValueError):
+                continue
+        if "actions" in item_data:
+            entity.actions = str(item_data.get("actions") or "")
+        if "description" in item_data:
+            entity.description = str(item_data.get("description") or "")
+        if "layer" in item_data:
+            entity.setData(ROLE_LAYER, item_data.get("layer") or LAYER_FG)
+        if "label" in item_data:
+            entity.setData(ROLE_LABEL, str(item_data.get("label") or ""))
+        if "lock_square" in item_data or "size_w_cells" in item_data or "size_h_cells" in item_data:
+            next_lock_square = bool(item_data.get("lock_square", entity.lock_square))
+            next_size_w = int(item_data.get("size_w_cells", entity.size_w_cells) or entity.size_w_cells)
+            next_size_h = int(item_data.get("size_h_cells", entity.size_h_cells) or entity.size_h_cells)
+            entity.lock_square = False
+            entity.size_w_cells = next_size_w
+            entity.size_h_cells = next_size_h
+            entity.lock_square = next_lock_square
+
+    def _build_live_player_strokes_by_key(self, player_id: str) -> dict[str, QGraphicsPathItem]:
+        player_strokes: dict[str, QGraphicsPathItem] = {}
+        clean_player = str(player_id or "").strip()
+        for item in self.canvas.scene().items():
+            if not isinstance(item, QGraphicsPathItem):
+                continue
+            if str(item.data(ROLE_KIND) or "").strip() != "stroke":
+                continue
+            if str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip() != clean_player:
+                continue
+            stroke_key = self._stroke_sync_key(
+                {
+                    "stroke_id": str(item.data(ROLE_ENTITY_ID) or "").strip(),
+                    "entity_id": str(item.data(ROLE_ENTITY_ID) or "").strip(),
+                    "owner_player_id": clean_player,
+                    "pos": [float(item.pos().x()), float(item.pos().y())],
+                    "path": _serialize_path(item.path()),
+                    "layer": item.data(ROLE_LAYER) or LAYER_FG,
+                    "pen_color": item.pen().color().name() or WALL_COLOR,
+                    "pen_width": float(item.pen().widthF() or WALL_WIDTH),
+                }
+            )
+            player_strokes[stroke_key] = item
+        return player_strokes
+
+    def _apply_player_stroke_state_to_live_item(
+        self,
+        stroke: QGraphicsPathItem,
+        item_data: dict,
+    ) -> None:
+        path = _deserialize_path(item_data.get("path", []))
+        if not path.isEmpty():
+            stroke.setPath(path)
+        pen_color = QColor(str(item_data.get("pen_color") or WALL_COLOR))
+        try:
+            pen_width = float(item_data.get("pen_width") or WALL_WIDTH)
+        except (TypeError, ValueError):
+            pen_width = float(WALL_WIDTH)
+        stroke.setPen(QPen(pen_color, pen_width))
+        try:
+            stroke.setZValue(float(item_data.get("z", _default_item_z("stroke", item_data.get("layer", LAYER_FG)))))
+        except (TypeError, ValueError):
+            stroke.setZValue(_default_item_z("stroke", item_data.get("layer", LAYER_FG)))
+        stroke.setData(ROLE_KIND, "stroke")
+        stroke.setData(ROLE_LAYER, item_data.get("layer", LAYER_FG) or LAYER_FG)
+        stroke.setData(ROLE_LOCKED, False)
+        stroke.setData(ROLE_OWNER_PLAYER_ID, str(item_data.get("owner_player_id") or "").strip())
+        stroke_id = str(item_data.get("stroke_id") or item_data.get("entity_id") or "").strip()
+        if stroke_id:
+            stroke.setData(ROLE_ENTITY_ID, stroke_id)
+        pos = item_data.get("pos", [0.0, 0.0])
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            try:
+                stroke.setPos(float(pos[0]), float(pos[1]))
+            except (TypeError, ValueError):
+                pass
+
+    def _apply_player_state_update_to_active_scene(
+        self,
+        *,
+        player_id: str,
+        target_state: dict,
+    ) -> bool:
+        expected_entities: dict[str, dict] = {}
+        expected_strokes: dict[str, dict] = {}
+        clean_player = str(player_id or "").strip()
+        items = target_state.get("items")
+        if not isinstance(items, list):
+            return False
+        for item_data in items:
+            if not isinstance(item_data, dict):
+                continue
+            item_type = str(item_data.get("type") or "").strip()
+            if item_type == "entity":
+                if str(item_data.get("owner_player_id") or "").strip() != clean_player:
+                    continue
+                entity_id = str(item_data.get("entity_id") or "").strip()
+                if not entity_id:
+                    return False
+                expected_entities[entity_id] = item_data
+                continue
+            if item_type != "stroke":
+                continue
+            if str(item_data.get("owner_player_id") or "").strip() != clean_player:
+                continue
+            expected_strokes[self._stroke_sync_key(item_data)] = item_data
+
+        was_suppressed = self._suppress_change_tracking
+        self._suppress_change_tracking = True
+        try:
+            for entity_id, item_data in expected_entities.items():
+                target_entity = self._find_entity_by_id(entity_id)
+                if not isinstance(target_entity, EntityItem):
+                    return False
+                self._apply_player_owned_entity_state_to_live_item(target_entity, item_data)
+
+            scene = self.canvas.scene()
+            live_strokes = self._build_live_player_strokes_by_key(clean_player)
+            for stroke_key, live_stroke in list(live_strokes.items()):
+                if stroke_key in expected_strokes:
+                    continue
+                if live_stroke.scene() is scene:
+                    scene.removeItem(live_stroke)
+            for stroke_key, item_data in expected_strokes.items():
+                live_stroke = live_strokes.get(stroke_key)
+                if live_stroke is None:
+                    live_stroke = self._find_live_player_stroke_item(
+                        str(item_data.get("stroke_id") or item_data.get("entity_id") or "").strip(),
+                        owner_player_id=clean_player,
+                    )
+                if live_stroke is None:
+                    live_stroke = QGraphicsPathItem()
+                    live_stroke.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsSelectable, True)
+                    live_stroke.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsMovable, True)
+                    scene.addItem(live_stroke)
+                self._apply_player_stroke_state_to_live_item(live_stroke, item_data)
+        finally:
+            self._suppress_change_tracking = was_suppressed
+
+        self._refresh_scene_item_references()
+        self._refresh_entity_duplicate_badges()
+        self._apply_online_permissions()
+        return True
+
     def _apply_player_state_update(
         self,
         *,
@@ -9570,7 +9784,12 @@ class DungeonAppletWidget(QWidget):
         self._suppress_network_sync = True
         try:
             if str(target_dungeon.get("id") or "") == str(self._active_dungeon_id or ""):
-                self._load_dungeon_state(target_dungeon["state"])
+                applied_live = self._apply_player_state_update_to_active_scene(
+                    player_id=player_id,
+                    target_state=target_dungeon["state"],
+                )
+                if not applied_live:
+                    self._load_dungeon_state(target_dungeon["state"])
         finally:
             self._suppress_network_sync = False
         self._refresh_collection_dirty()
@@ -12154,24 +12373,17 @@ class DungeonAppletWidget(QWidget):
         root = items_dir()
         if not root.exists():
             return None
-        for item_path in list_item_file_paths(root):
-            payload = load_item_payload(item_path)
-            if not isinstance(payload, dict):
-                continue
-            candidate_id = item_id_from_payload(payload, fallback_path=item_path)
-            if candidate_id == clean_item_id:
-                return item_path
-        return None
+        record = indexed_item_record_by_id(root, clean_item_id)
+        return record.path if record is not None else None
 
     def _linked_item_document_by_id(self, item_id: str) -> dict | None:
         clean_item_id = str(item_id or "").strip()
         if not clean_item_id:
             return None
-        library_path = self._linked_item_document_library_path_by_id(clean_item_id)
-        if library_path is not None:
-            document = load_item_document(library_path)
-            if isinstance(document, dict):
-                return document
+        record = indexed_item_record_by_id(items_dir(), clean_item_id)
+        if record is not None and isinstance(record.document, dict):
+            self._loot_pool_item_path_by_id[clean_item_id] = record.path
+            return dict(record.document)
         return None
 
     def _authoritative_item_document_for_item_id(
@@ -12665,6 +12877,11 @@ class DungeonAppletWidget(QWidget):
         messages: list[str] = []
         library_root = items_dir()
         library_root.mkdir(parents=True, exist_ok=True)
+        existing_records_by_id = {
+            record.item_id: record
+            for record in indexed_item_records(library_root)
+            if record.item_id
+        }
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -12674,8 +12891,13 @@ class DungeonAppletWidget(QWidget):
                 messages.append(f"Unable to import '{item_id or 'item'}' because its item document is missing.")
                 continue
             item_document = self._clone_item_document_with_item_id(item_document, item_id)
-            existing_document = self._linked_item_document_by_id(item_id)
-            target_path = self._linked_item_document_library_path_by_id(item_id)
+            existing_record = existing_records_by_id.get(item_id)
+            existing_document = (
+                dict(existing_record.document)
+                if existing_record is not None and isinstance(existing_record.document, dict)
+                else None
+            )
+            target_path = existing_record.path if existing_record is not None else None
             if existing_document is not None and not overwrite_existing:
                 continue
             if target_path is None:
@@ -16833,9 +17055,32 @@ class DungeonAppletWidget(QWidget):
 
     def _refresh_entity_duplicate_badges(self) -> None:
         scene = self.canvas.scene()
-        for item in scene.items():
-            if isinstance(item, EntityItem):
-                item.update()
+        entities: list[EntityItem] = [
+            item for item in scene.items() if isinstance(item, EntityItem)
+        ]
+        grouped: dict[str, list[EntityItem]] = {}
+        for entity in entities:
+            grouped.setdefault(entity._entity_type_key(), []).append(entity)
+
+        for same_type_entities in grouped.values():
+            if len(same_type_entities) < 2:
+                for entity in same_type_entities:
+                    entity._set_duplicate_instance_badge_text("")
+                continue
+
+            def _sort_key(item: EntityItem) -> tuple[int, str, float, float, int]:
+                entity_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
+                return (
+                    0 if entity_id else 1,
+                    entity_id.casefold(),
+                    round(item.pos().y(), 3),
+                    round(item.pos().x(), 3),
+                    id(item),
+                )
+
+            same_type_entities.sort(key=_sort_key)
+            for index, entity in enumerate(same_type_entities, start=1):
+                entity._set_duplicate_instance_badge_text(str(index) if index <= 99 else "99+")
 
     def _mark_active_dungeon_dirty(self) -> None:
         dungeon = self._current_dungeon()

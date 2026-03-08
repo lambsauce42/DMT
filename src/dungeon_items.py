@@ -296,6 +296,10 @@ class EntityItem(QGraphicsItem):
         self._icon_cache_key: str | None = None
         self._icon_cache_pixmap = QPixmap()
         self._player_stats_visible = False
+        self._duplicate_badge_text_cache = ""
+        self._duplicate_badge_cache_valid = False
+        self._duplicate_badge_cache_type_key = ""
+        self._duplicate_badge_cache_entity_id = ""
 
         self.setPos(position)
         self.setZValue(10)  # Entities on top
@@ -443,7 +447,24 @@ class EntityItem(QGraphicsItem):
             return "entity"
         return label.casefold()
 
-    def _duplicate_instance_badge_text(self) -> str:
+    def _set_duplicate_instance_badge_text(self, text: str) -> None:
+        normalized = str(text or "").strip()
+        current_type_key = self._entity_type_key()
+        current_entity_id = str(self.data(ROLE_ENTITY_ID) or "").strip()
+        if (
+            self._duplicate_badge_cache_valid
+            and self._duplicate_badge_text_cache == normalized
+            and self._duplicate_badge_cache_type_key == current_type_key
+            and self._duplicate_badge_cache_entity_id == current_entity_id
+        ):
+            return
+        self._duplicate_badge_text_cache = normalized
+        self._duplicate_badge_cache_valid = True
+        self._duplicate_badge_cache_type_key = current_type_key
+        self._duplicate_badge_cache_entity_id = current_entity_id
+        self.update()
+
+    def _compute_duplicate_instance_badge_text(self) -> str:
         scene = self.scene()
         if scene is None:
             return ""
@@ -473,6 +494,22 @@ class EntityItem(QGraphicsItem):
         except ValueError:
             return ""
         return str(index) if index <= 99 else "99+"
+
+    def _duplicate_instance_badge_text(self) -> str:
+        current_type_key = self._entity_type_key()
+        current_entity_id = str(self.data(ROLE_ENTITY_ID) or "").strip()
+        if (
+            self._duplicate_badge_cache_valid
+            and self._duplicate_badge_cache_type_key == current_type_key
+            and self._duplicate_badge_cache_entity_id == current_entity_id
+        ):
+            return self._duplicate_badge_text_cache
+        badge_text = self._compute_duplicate_instance_badge_text()
+        self._duplicate_badge_text_cache = badge_text
+        self._duplicate_badge_cache_valid = True
+        self._duplicate_badge_cache_type_key = current_type_key
+        self._duplicate_badge_cache_entity_id = current_entity_id
+        return badge_text
     
     def mouseReleaseEvent(self, event):
         """Snap position to cell center on release."""

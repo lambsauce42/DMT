@@ -17,8 +17,9 @@ from item_file_format import (
     ITEM_FILE_EXTENSION,
     ITEM_FILE_FORMAT,
     build_item_document,
+    indexed_item_record_by_id,
+    indexed_item_records,
     item_id_from_payload,
-    list_item_file_paths,
     load_item_document,
     load_item_payload,
     normalized_item_name_from_payload,
@@ -248,21 +249,21 @@ def _local_item_document_for_item_id(item_id: str) -> dict | None:
     for root in _loot_item_dirs():
         if not root.exists():
             continue
-        for path in list_item_file_paths(root):
-            payload = load_item_payload(path)
-            if not isinstance(payload, dict):
-                continue
-            if item_id_from_payload(payload, fallback_path=path) != clean_item_id:
-                continue
-            document = load_item_document(path)
-            if isinstance(document, dict):
-                return document
-            icon_source = payload.get("icon_path") or payload.get("icon") or payload.get("preview_image")
-            try:
-                return build_item_document(payload, str(icon_source or ""))
-            except Exception:
-                logger.exception("Failed to build local item document for %s", clean_item_id)
-                return None
+        record = indexed_item_record_by_id(root, clean_item_id)
+        if record is None:
+            continue
+        if isinstance(record.document, dict):
+            return dict(record.document)
+        icon_source = (
+            record.payload.get("icon_path")
+            or record.payload.get("icon")
+            or record.payload.get("preview_image")
+        )
+        try:
+            return build_item_document(record.payload, str(icon_source or ""))
+        except Exception:
+            logger.exception("Failed to build local item document for %s", clean_item_id)
+            return None
     return None
 
 
@@ -1064,14 +1065,14 @@ def _load_loot_item_library() -> tuple[List[LootItem], dict[str, LootItem]]:
     for root in _loot_item_dirs():
         if not root.exists():
             continue
-        for path in list_item_file_paths(root):
-            item = _loot_item_from_path(path)
+        for record in indexed_item_records(root):
+            item = _loot_item_from_path(record.path)
             if not item or item.item_id in item_by_id:
                 continue
             items.append(item)
             item_by_id[item.item_id] = item
             try:
-                item_by_id.setdefault(str(Path(path).resolve()), item)
+                item_by_id.setdefault(str(Path(record.path).resolve()), item)
             except Exception:
                 pass
     items.sort(key=lambda entry: entry.title.lower())
@@ -4218,6 +4219,8 @@ class PlayerSheetsWidget(QWidget):
         self._header_link_overflow = 0
         self._header_name_text = "Character: None"
         self._sheet_unsaved = False
+        self._sheet_panel_unsaved = False
+        self._sheet_data_unsaved = False
         self._sheet_expanded = False
         self._detail_splitter: Optional[QSplitter] = None
         self._details_panel: Optional[QFrame] = None
@@ -5124,6 +5127,24 @@ class PlayerSheetsWidget(QWidget):
             sync_entry_archive(entry)
         save_entries_to_storage(self._manager.entries)
 
+    def _refresh_sheet_unsaved_indicator(self) -> None:
+        self._sheet_unsaved = bool(self._sheet_panel_unsaved or self._sheet_data_unsaved)
+        self._update_header_labels()
+        self._sync_sheet_toolbar_title()
+
+    def _set_sheet_panel_unsaved(self, unsaved: bool) -> None:
+        self._sheet_panel_unsaved = bool(unsaved)
+        self._refresh_sheet_unsaved_indicator()
+
+    def _set_sheet_data_unsaved(self, unsaved: bool) -> None:
+        self._sheet_data_unsaved = bool(unsaved)
+        self._refresh_sheet_unsaved_indicator()
+
+    def _mark_current_sheet_data_dirty(self) -> None:
+        if self._current_entry is None:
+            return
+        self._set_sheet_data_unsaved(True)
+
     def _on_external_inventory_saved(self, sheet_id: str, inventory_payload: dict) -> None:
         target_sheet = str(sheet_id or "").strip()
         if not target_sheet:
@@ -5313,7 +5334,8 @@ class PlayerSheetsWidget(QWidget):
 
     def _set_details(self, entry: Optional[PlayerSheetEntry]) -> None:
         self._current_entry = entry
-        self._set_unsaved_indicator(False)
+        self._set_sheet_panel_unsaved(False)
+        self._set_sheet_data_unsaved(False)
         if not entry:
             self._set_header_name("Character: None")
             self._set_header_links([])
@@ -5616,6 +5638,7 @@ class PlayerSheetsWidget(QWidget):
         else:
             return
         self._save_entries()
+        self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
         self._set_equipment_selection(slot_id)
 
@@ -5629,6 +5652,7 @@ class PlayerSheetsWidget(QWidget):
         self._current_entry.inventory.append(item_id)
         self._current_entry.equipment[source_slot] = None
         self._save_entries()
+        self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
         self._clear_equipment_selection()
 
@@ -5848,6 +5872,7 @@ class PlayerSheetsWidget(QWidget):
         elif field == "copper":
             self._current_entry.copper = value
         self._save_entries()
+        self._mark_current_sheet_data_dirty()
 
     def _open_inventory_picker(self) -> None:
         if not self._current_entry:
@@ -5879,6 +5904,7 @@ class PlayerSheetsWidget(QWidget):
             return
         self._current_entry.inventory.append(item_id)
         self._save_entries()
+        self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
         if self._inventory_list.count() > 0:
             self._inventory_list.setCurrentRow(self._inventory_list.count() - 1)
@@ -5892,6 +5918,7 @@ class PlayerSheetsWidget(QWidget):
             return
         self._current_entry.inventory_notes = self._inventory_notepad.toPlainText()
         self._save_entries()
+        self._mark_current_sheet_data_dirty()
 
     def _remove_inventory_item(self) -> None:
         if not self._current_entry:
@@ -5904,6 +5931,7 @@ class PlayerSheetsWidget(QWidget):
                 return
             self._current_entry.equipment[slot_id] = None
             self._save_entries()
+            self._mark_current_sheet_data_dirty()
             self._set_inventory(self._current_entry)
             self._clear_equipment_selection()
             return
@@ -5929,6 +5957,7 @@ class PlayerSheetsWidget(QWidget):
                 inventory.append(item_id)
         self._current_entry.inventory = inventory
         self._save_entries()
+        self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
 
     def _show_inventory_preview_for_item(self, item: QListWidgetItem) -> None:
@@ -6062,7 +6091,7 @@ class PlayerSheetsWidget(QWidget):
         QTimer.singleShot(0, _restore)
 
     def _on_sheet_unsaved_changed(self, modified: bool) -> None:
-        self._set_unsaved_indicator(bool(modified))
+        self._set_sheet_panel_unsaved(bool(modified))
         if not modified and self._pending_switch_item is not None:
             target = self._pending_switch_item
             self._pending_switch_item = None
@@ -6220,7 +6249,7 @@ class PlayerSheetsWidget(QWidget):
         target: QListWidgetItem,
         previous: Optional[QListWidgetItem],
     ) -> None:
-        self._set_unsaved_indicator(bool(modified))
+        self._refresh_sheet_unsaved_indicator()
         if not modified:
             self._switch_to_item(target)
             return
@@ -6268,6 +6297,9 @@ class PlayerSheetsWidget(QWidget):
             self._current_entry.pdf_path = str(current_pdf_path)
             sync_entry_archive(self._current_entry, pdf_source=current_pdf_path)
         self._save_entries()
+        self._set_sheet_data_unsaved(False)
+        if self._sheet_panel is None or not self._sheet_panel.is_modified():
+            self._set_sheet_panel_unsaved(False)
         sheet_id = sheet_id_for_entry(self._current_entry)
         PLAYER_SHEET_EVENTS.inventorySaved.emit(sheet_id, _entry_inventory_payload(self._current_entry))
 
@@ -6660,9 +6692,9 @@ class PlayerSheetsWidget(QWidget):
         self._detail_splitter.setSizes([primary, secondary])
 
     def _set_unsaved_indicator(self, unsaved: bool) -> None:
-        self._sheet_unsaved = unsaved
-        self._update_header_labels()
-        self._sync_sheet_toolbar_title()
+        self._sheet_panel_unsaved = False
+        self._sheet_data_unsaved = bool(unsaved)
+        self._refresh_sheet_unsaved_indicator()
 
     def _set_header_name(self, text: str) -> None:
         self._header_name_text = text

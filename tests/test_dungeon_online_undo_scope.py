@@ -130,6 +130,51 @@ def test_player_undo_only_reverts_player_actions_and_syncs(online_host_and_playe
     assert player_positions_after_undo["dm-entity"] == start_dm_pos
 
 
+def test_player_move_keeps_host_inspector_open_for_same_entity(online_host_and_player, qtbot):
+    host, player = online_host_and_player
+    host_entity = host._find_entity_by_id("player-entity")
+    player_entity = player._find_entity_by_id("player-entity")
+    assert host_entity is not None
+    assert player_entity is not None
+
+    host_entity.setSelected(True)
+    host.inspector.set_entity(host_entity)
+    assert host.inspector.isVisible()
+    assert host.inspector._entity is host_entity
+
+    start_player_pos = QPointF(player_entity.pos())
+    moved_player_pos = QPointF(start_player_pos.x() + 58.0, start_player_pos.y() + 58.0)
+    player_entity.setPos(moved_player_pos)
+    player.canvas.undo_stack.push(MoveItemsCommand([player_entity], {player_entity: start_player_pos}))
+    qtbot.wait(30)
+
+    updated_host_entity = host._find_entity_by_id("player-entity")
+    assert updated_host_entity is host_entity
+    assert updated_host_entity.pos() == moved_player_pos
+    assert host.inspector.isVisible()
+    assert host.inspector._entity is updated_host_entity
+
+
+def test_player_move_updates_active_host_scene_without_full_reload(online_host_and_player, qtbot, monkeypatch):
+    host, player = online_host_and_player
+    player_entity = player._find_entity_by_id("player-entity")
+    assert player_entity is not None
+
+    reload_calls: list[str] = []
+    monkeypatch.setattr(host, "_load_dungeon_state", lambda _state: reload_calls.append("reload"))
+
+    start_player_pos = QPointF(player_entity.pos())
+    moved_player_pos = QPointF(start_player_pos.x() + 58.0, start_player_pos.y() + 58.0)
+    player_entity.setPos(moved_player_pos)
+    player.canvas.undo_stack.push(MoveItemsCommand([player_entity], {player_entity: start_player_pos}))
+    qtbot.wait(30)
+
+    host_entity = host._find_entity_by_id("player-entity")
+    assert host_entity is not None
+    assert host_entity.pos() == moved_player_pos
+    assert reload_calls == []
+
+
 def test_dm_undo_only_reverts_dm_actions_and_syncs(online_host_and_player, qtbot):
     host, player = online_host_and_player
     dm_entity = host._find_entity_by_id("dm-entity")

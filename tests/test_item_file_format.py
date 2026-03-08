@@ -12,6 +12,7 @@ from item_file_format import (
     ITEM_FILE_EXTENSION,
     ITEM_FILE_FORMAT,
     build_item_document,
+    indexed_item_record_by_id,
     item_id_from_payload,
     list_item_file_paths,
     load_item_document,
@@ -110,3 +111,34 @@ def test_load_item_payload_rejects_non_dmtitem_format(tmp_path: Path) -> None:
 
     loaded = load_item_payload(legacy_path)
     assert loaded is None
+
+
+def test_indexed_item_record_by_id_sees_new_file_after_cache_was_built(tmp_path: Path) -> None:
+    root = tmp_path / "items"
+    root.mkdir(parents=True, exist_ok=True)
+
+    first_path = root / "first.dmtitem"
+    write_item_document(
+        first_path,
+        build_item_document(
+            {"item_id": "item-first", "title": "First", "rarity": "common", "level": 1},
+            None,
+        ),
+    )
+
+    first_record = indexed_item_record_by_id(root, "item-first")
+    assert first_record is not None
+    assert first_record.path == first_path
+
+    second_path = root / "second.dmtitem"
+    write_item_document(
+        second_path,
+        build_item_document(
+            {"item_id": "item-second", "title": "Second", "rarity": "common", "level": 1},
+            None,
+        ),
+    )
+
+    second_record = indexed_item_record_by_id(root, "item-second")
+    assert second_record is not None
+    assert second_record.path == second_path

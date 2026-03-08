@@ -1313,6 +1313,38 @@ def test_loot_pool_resolve_item_path_prefers_known_local_library_item_over_mater
     assert dungeon_widget._loot_pool_item_path_by_id["creator-item"] == local_item_path
 
 
+def test_linked_item_document_by_id_sees_new_library_item_without_manual_refresh(
+    dungeon_widget, monkeypatch, tmp_path
+):
+    items_root = tmp_path / "items"
+    items_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("dungeon_applet.items_dir", lambda: items_root)
+
+    first_path = items_root / "first_item.dmtitem"
+    write_item_document(
+        first_path,
+        build_item_document(
+            {"item_id": "item-first", "title": "First", "rarity": "common", "level": 1},
+            "",
+        ),
+    )
+    first_document = dungeon_widget._linked_item_document_by_id("item-first")
+    assert isinstance(first_document, dict)
+
+    second_path = items_root / "second_item.dmtitem"
+    write_item_document(
+        second_path,
+        build_item_document(
+            {"item_id": "item-second", "title": "Second", "rarity": "common", "level": 1},
+            "",
+        ),
+    )
+
+    second_document = dungeon_widget._linked_item_document_by_id("item-second")
+    assert isinstance(second_document, dict)
+    assert second_document["payload"]["item_id"] == "item-second"
+
+
 def test_unknown_item_prompt_rows_show_icons_and_hover_preview(dungeon_widget, monkeypatch):
     icon = QPixmap(10, 10)
     icon.fill(QColor("#ffffff"))

@@ -110,6 +110,26 @@ def test_character_unsaved_indicator_stays_on_name_not_links(tmp_path, qtbot, mo
     ]
 
 
+def test_inventory_and_equipment_changes_mark_character_dirty_indicator(tmp_path, qtbot, monkeypatch):
+    _seed_character_entries(tmp_path, monkeypatch)
+
+    widget = PlayerSheetsWidget()
+    qtbot.addWidget(widget)
+    widget._sheet_list.setCurrentRow(0)
+
+    assert widget._header_name.text() == "Character: Hero One"
+
+    widget._add_inventory_item("item-a")
+    assert widget._header_name.text() == "Character: Hero One *"
+
+    widget._set_sheet_data_unsaved(False)
+    widget._on_equipment_slot_dropped(
+        "head",
+        {"item_id": "item-a", "source": "backpack", "index": 0},
+    )
+    assert widget._header_name.text() == "Character: Hero One *"
+
+
 def test_character_overflow_opens_linked_npc_picker(tmp_path, qtbot, monkeypatch):
     _seed_character_entries(tmp_path, monkeypatch)
     monkeypatch.setattr(

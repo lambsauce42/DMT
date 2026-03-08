@@ -9,6 +9,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from PySide6.QtCore import Qt, QSize, QTimer, Signal, QEvent
 from PySide6.QtGui import (
     QColor,
+    QCursor,
     QFontMetrics,
     QIcon,
     QImage,
@@ -55,6 +56,7 @@ from item_file_format import (
     load_item_payload,
     write_item_document,
 )
+from loot_applet import LootPreviewTooltip
 
 PREVIEW_WIDTH = 350  # Match export width for 1:1 display
 EXPORT_WIDTH = 350   # Keep layout scale consistent with the renderer default
@@ -221,46 +223,168 @@ class _ItemLibraryDialog(QDialog):
         self,
         items: List[Dict[str, str]],
         open_item: Callable[[str], bool],
+        preview_item: Callable[[str], tuple[Optional[QImage], str]],
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Item Library")
-        self.resize(820, 480)
+        self.resize(980, 560)
         self._items = list(items)
         self._open_item = open_item
+        self._preview_item = preview_item
+        self._preview_tooltip = LootPreviewTooltip()
+        self._preview_cache: Dict[str, Optional[QPixmap]] = {}
+        self._hovered_path: Optional[str] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
-        controls = QHBoxLayout()
-        controls.setContentsMargins(0, 0, 0, 0)
+        controls_frame = QFrame(self)
+        controls_frame.setStyleSheet(
+            "QFrame {"
+            "background-color: #0f141b;"
+            "border: 1px solid #30363d;"
+            "border-radius: 8px;"
+            "}"
+        )
+        controls = QHBoxLayout(controls_frame)
         controls.setSpacing(12)
-        controls.addWidget(QLabel("Sort By", self))
+        controls.setContentsMargins(12, 12, 12, 12)
 
-        self._sort_combo = QComboBox(self)
+        search_height = QFontMetrics(self.font()).height() + 14
+        self._search_container = QWidget(controls_frame)
+        self._search_container.setFixedHeight(search_height)
+        search_layout = QHBoxLayout(self._search_container)
+        search_layout.setContentsMargins(8, 0, 8, 0)
+        search_layout.setSpacing(6)
+
+        self._search_input = QLineEdit(self._search_container)
+        self._search_input.setPlaceholderText("Search items...")
+        self._search_input.setFixedHeight(search_height)
+        self._search_input.setStyleSheet("QLineEdit { padding: 6px 8px; }")
+        self._search_input.textChanged.connect(self._populate_rows)
+        self._search_input.textChanged.connect(self._sync_search_clear)
+        search_layout.addWidget(self._search_input, 1)
+
+        self._search_clear_button = QToolButton(self._search_container)
+        self._search_clear_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "close.svg")))
+        self._search_clear_button.setToolTip("Clear")
+        self._search_clear_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._search_clear_button.setFixedSize(18, 18)
+        self._search_clear_button.setIconSize(QSize(12, 12))
+        self._search_clear_button.setStyleSheet(
+            "QToolButton { padding: 0px; border: none; }"
+        )
+        self._search_clear_button.clicked.connect(self._search_input.clear)
+        search_layout.addWidget(self._search_clear_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        controls.addWidget(self._search_container, 1)
+
+        category_label = QLabel("Category", controls_frame)
+        category_label.setStyleSheet("color: #8b949e; font-size: 12px; font-weight: 600;")
+        controls.addWidget(category_label)
+
+        self._category_combo = QComboBox(controls_frame)
+        self._category_combo.setFixedHeight(36)
+        self._category_combo.setFixedWidth(190)
+        self._category_combo.addItem("All Categories")
+        known_categories = sorted(
+            {
+                category
+                for item in self._items
+                for category in item.get("category_values", [])
+                if str(category).strip()
+            },
+            key=str.casefold,
+        )
+        self._category_combo.addItems(known_categories)
+        self._category_combo.currentTextChanged.connect(self._populate_rows)
+        controls.addWidget(self._category_combo)
+
+        sort_label = QLabel("Sort By", controls_frame)
+        sort_label.setStyleSheet("color: #8b949e; font-size: 12px; font-weight: 600;")
+        controls.addWidget(sort_label)
+
+        self._sort_combo = QComboBox(controls_frame)
         self._sort_combo.setFixedHeight(36)
         self._sort_combo.addItems(["Title", "Category"])
         self._sort_combo.currentTextChanged.connect(self._populate_rows)
+        self._sort_combo.setFixedWidth(170)
         controls.addWidget(self._sort_combo)
-        controls.addStretch(1)
-        layout.addLayout(controls)
+        layout.addWidget(controls_frame)
 
-        self._table = QTableWidget(0, 4, self)
+        table_frame = QFrame(self)
+        table_frame.setStyleSheet(
+            "QFrame {"
+            "background-color: #11161d;"
+            "border: 1px solid #30363d;"
+            "border-radius: 8px;"
+            "}"
+        )
+        table_layout = QVBoxLayout(table_frame)
+        table_layout.setContentsMargins(12, 12, 12, 12)
+        table_layout.setSpacing(8)
+
+        table_label = QLabel("Saved Items", table_frame)
+        table_label.setStyleSheet("color: #8b949e; font-size: 12px; font-weight: 700;")
+        table_layout.addWidget(table_label)
+
+        self._table = QTableWidget(0, 4, table_frame)
         self._table.setHorizontalHeaderLabels(["Title", "Category", "Rarity", "Level"])
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(40)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
         self._table.setShowGrid(False)
+        self._table.setMouseTracking(True)
+        self._table.viewport().setMouseTracking(True)
+        self._table.viewport().installEventFilter(self)
         self._table.horizontalHeader().setSectionResizeMode(0, self._table.horizontalHeader().ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, self._table.horizontalHeader().ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(2, self._table.horizontalHeader().ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(3, self._table.horizontalHeader().ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setHighlightSections(False)
+        self._table.horizontalHeader().setSectionsClickable(False)
+        self._table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._table.setStyleSheet("""
+            QTableWidget {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                selection-background-color: #1d4f78;
+                gridline-color: transparent;
+                padding: 0px;
+                margin: 0px;
+            }
+            QTableWidget::item {
+                padding-left: 10px;
+                padding-right: 10px;
+                border-bottom: 1px solid #21262d;
+            }
+            QHeaderView::section {
+                background-color: #161b22;
+                border: none;
+                border-bottom: 1px solid #30363d;
+                padding-left: 14px;
+                height: 36px;
+                color: #8b949e;
+                font-weight: 600;
+                text-align: left;
+                margin: 0px;
+            }
+            QHeaderView {
+                background-color: transparent;
+                border: none;
+                margin: 0px;
+                padding: 0px;
+            }
+        """)
         self._table.itemDoubleClicked.connect(lambda *_args: self._open_selected())
         self._table.itemSelectionChanged.connect(self._sync_buttons)
-        layout.addWidget(self._table, 1)
+        table_layout.addWidget(self._table, 1)
+        layout.addWidget(table_frame, 1)
 
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
@@ -271,31 +395,47 @@ class _ItemLibraryDialog(QDialog):
         self._load_button.setObjectName("PrimaryButton")
         self._load_button.setFixedHeight(36)
         self._load_button.setMinimumWidth(132)
+        self._load_button.setMaximumWidth(132)
         self._load_button.clicked.connect(self._open_selected)
         button_row.addWidget(self._load_button)
 
         close_button = QPushButton("Close", self)
         close_button.setObjectName("SecondaryButton")
         close_button.setFixedHeight(36)
-        close_button.setMinimumWidth(96)
+        close_button.setMinimumWidth(132)
+        close_button.setMaximumWidth(132)
         close_button.clicked.connect(self.close)
         button_row.addWidget(close_button)
         layout.addLayout(button_row)
 
         self._populate_rows()
+        self._sync_search_clear()
 
     def _sorted_items(self) -> List[Dict[str, str]]:
+        query = self._search_input.text().strip().lower()
+        parts = [part for part in query.split() if part]
+        category_filter = self._category_combo.currentText().strip()
+        filtered = []
+        for item in self._items:
+            search_text = str(item.get("search_text") or "").strip().lower()
+            if parts and not all(part in search_text for part in parts):
+                continue
+            category_values = [str(value).strip() for value in item.get("category_values", []) if str(value).strip()]
+            if category_filter and category_filter != "All Categories" and category_filter not in category_values:
+                continue
+            filtered.append(item)
+
         mode = self._sort_combo.currentText().strip().lower()
         if mode == "category":
             return sorted(
-                self._items,
+                filtered,
                 key=lambda item: (
                     str(item.get("category_sort") or "").casefold(),
                     str(item.get("title") or "").casefold(),
                 ),
             )
         return sorted(
-            self._items,
+            filtered,
             key=lambda item: (
                 str(item.get("title") or "").casefold(),
                 str(item.get("category_sort") or "").casefold(),
@@ -313,9 +453,12 @@ class _ItemLibraryDialog(QDialog):
             level_item = QTableWidgetItem(str(item.get("level") or ""))
             for col, table_item in enumerate((title_item, category_item, rarity_item, level_item)):
                 self._table.setItem(row, col, table_item)
+        self._table.resizeColumnToContents(2)
+        self._table.resizeColumnToContents(3)
         if rows:
             self._table.selectRow(0)
         self._sync_buttons()
+        self._hide_preview()
 
     def _selected_path(self) -> str:
         row = self._table.currentRow()
@@ -329,6 +472,44 @@ class _ItemLibraryDialog(QDialog):
     def _sync_buttons(self) -> None:
         self._load_button.setEnabled(bool(self._selected_path()))
 
+    def _sync_search_clear(self) -> None:
+        self._search_clear_button.setVisible(bool(self._search_input.text()))
+
+    def _show_preview_for_path(self, path: str) -> None:
+        if not path:
+            return
+        pixmap = self._preview_cache.get(path)
+        if path not in self._preview_cache:
+            image, _status = self._preview_item(path)
+            pixmap = QPixmap.fromImage(image) if image is not None else None
+            self._preview_cache[path] = pixmap
+        if pixmap is None or pixmap.isNull():
+            return
+        self._preview_tooltip.show_preview(pixmap, QCursor.pos())
+        self._hovered_path = path
+
+    def _hide_preview(self) -> None:
+        self._hovered_path = None
+        self._preview_tooltip.hide_preview()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self._table.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                pos = event.position().toPoint()
+                item = self._table.itemAt(pos)
+                path = ""
+                if item is not None:
+                    title_item = self._table.item(item.row(), 0)
+                    if title_item is not None:
+                        path = str(title_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+                if path:
+                    self._show_preview_for_path(path)
+                else:
+                    self._hide_preview()
+            elif event.type() == QEvent.Type.Leave:
+                self._hide_preview()
+        return super().eventFilter(obj, event)
+
     def _open_selected(self) -> None:
         path = self._selected_path()
         if not path:
@@ -337,6 +518,10 @@ class _ItemLibraryDialog(QDialog):
             self.close()
             return
         QMessageBox.warning(self, "Load Failed", f"Unable to load item:\n{path}")
+
+    def closeEvent(self, event) -> None:
+        self._hide_preview()
+        super().closeEvent(event)
 
 
 class ItemCreatorWidget(QWidget):
@@ -393,12 +578,10 @@ class ItemCreatorWidget(QWidget):
         self.export_png_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "image.svg")))
         self.export_png_button.setToolTip("Export PNG")
 
-        self.show_library_button = QPushButton("Show Item Library", self)
+        self.show_library_button = QToolButton(self)
         self.show_library_button.setObjectName("SecondaryButton")
         self.show_library_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "list.svg")))
         self.show_library_button.setToolTip("Show Item Library")
-        self.show_library_button.setFixedHeight(36)
-        self.show_library_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
         top_action_button_style = (
             "QToolButton#SecondaryButton {"
@@ -410,7 +593,7 @@ class ItemCreatorWidget(QWidget):
             "border-radius: 6px;"
             "}"
         )
-        for btn in (self.load_button, self.save_button, self.save_to_button, self.export_button, self.export_png_button):
+        for btn in (self.load_button, self.save_button, self.save_to_button, self.export_button, self.export_png_button, self.show_library_button):
             btn.setProperty("compact", True)
             btn.setIconSize(QSize(20, 20))
             btn.setFixedSize(36, 36)
@@ -418,7 +601,6 @@ class ItemCreatorWidget(QWidget):
             btn.setStyleSheet(top_action_button_style)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             action_row.addWidget(btn)
-        action_row.addWidget(self.show_library_button)
         action_row.addStretch(1)
         form_layout.addLayout(action_row)
 
@@ -1246,25 +1428,67 @@ class ItemCreatorWidget(QWidget):
                 print(f"[WARN] Skipping unreadable item library entry: {path}", file=sys.stderr)
                 continue
             raw_tags = [str(tag).strip() for tag in (payload.get("tags") or []) if str(tag).strip()]
-            categories = ", ".join(tag.capitalize() for tag in raw_tags) or "Uncategorized"
+            category_values = [tag.capitalize() for tag in raw_tags] or ["Uncategorized"]
+            categories = ", ".join(category_values)
+            title = str(payload.get("title") or "Untitled Item")
+            rarity = str(payload.get("rarity") or "common")
+            level = str(payload.get("level") or "")
             rows.append(
                 {
                     "path": str(path),
-                    "title": str(payload.get("title") or "Untitled Item"),
+                    "title": title,
                     "category": categories,
                     "category_sort": categories,
-                    "rarity": str(payload.get("rarity") or "common"),
-                    "level": str(payload.get("level") or ""),
+                    "category_values": category_values,
+                    "rarity": rarity,
+                    "level": level,
+                    "search_text": " ".join(
+                        [
+                            title.lower(),
+                            categories.lower(),
+                            rarity.lower(),
+                            level.lower(),
+                        ]
+                    ).strip(),
                 }
             )
         return rows
+
+    def _library_preview_for_path(self, path: str) -> tuple[Optional[QImage], str]:
+        clean_path = str(path or "").strip()
+        if not clean_path:
+            return None, ""
+        if not RENDERER_AVAILABLE:
+            return None, "Renderer unavailable"
+        try:
+            data = load_item_payload(Path(clean_path))
+            if data is None:
+                raise ValueError("Invalid item file")
+            spec = spec_from_dict(data)
+            rendered = render_item_card(
+                spec,
+                RenderOptions(
+                    width=EXPORT_WIDTH,
+                    scale=2.4,
+                    title_scale=self._title_scale,
+                    body_scale=self._body_scale,
+                    label_scale=self._label_scale,
+                    icon_bg_curve=self._icon_bg_curve,
+                ),
+            )
+            if rendered is None or getattr(rendered, "image", None) is None:
+                return None, "Preview unavailable"
+            return _pil_to_qimage(rendered.image), ""
+        except Exception as exc:
+            print(f"[WARN] Failed to render library preview for '{clean_path}': {exc}", file=sys.stderr)
+            return None, "Preview unavailable"
 
     def _show_item_library(self) -> None:
         rows = self._item_library_rows()
         if not rows:
             QMessageBox.information(self, "Item Library", "No saved items found.")
             return
-        dialog = _ItemLibraryDialog(rows, self._load_item_from_path, self)
+        dialog = _ItemLibraryDialog(rows, self._load_item_from_path, self._library_preview_for_path, self)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.destroyed.connect(lambda *_args, d=dialog: self._discard_library_dialog(d))
         self._library_dialogs.append(dialog)

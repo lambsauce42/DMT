@@ -84,6 +84,7 @@ def test_item_toolbar_buttons_are_square(item_widget):
         item_widget.save_button,
         item_widget.save_to_button,
         item_widget.export_button,
+        item_widget.show_library_button,
     ):
         assert btn.width() == btn.height()
         assert btn.width() >= 36
@@ -93,8 +94,7 @@ def test_item_toolbar_buttons_are_square(item_widget):
         assert "max-width: 36px;" in style
         assert "min-height: 36px;" in style
         assert "max-height: 36px;" in style
-    assert item_widget.show_library_button.height() == 36
-    assert item_widget.show_library_button.width() >= item_widget.show_library_button.height()
+    assert item_widget.show_library_button.text() == ""
 
 def test_item_stats_buttons(item_widget, qtbot):
     """
@@ -162,9 +162,10 @@ def test_editing_loaded_item_prompts_for_new_filename_on_title_change(item_widge
     assert seen_default_paths == [str(renamed_item_path)]
 
 
-def test_show_item_library_collects_items_and_sorts_by_category(item_widget, qtbot, tmp_path):
+def test_show_item_library_supports_search_category_filter_and_sort(item_widget, qtbot, tmp_path):
     first_path = tmp_path / "blade.dmtitem"
     second_path = tmp_path / "potion.dmtitem"
+    third_path = tmp_path / "gem.dmtitem"
     write_item_document(
         first_path,
         build_item_document({"title": "Blade", "rarity": "rare", "tags": ["equipment"]}, None),
@@ -173,6 +174,10 @@ def test_show_item_library_collects_items_and_sorts_by_category(item_widget, qtb
         second_path,
         build_item_document({"title": "Potion", "rarity": "common", "tags": ["consumables"]}, None),
     )
+    write_item_document(
+        third_path,
+        build_item_document({"title": "Gem", "rarity": "epic", "tags": ["valuables"]}, None),
+    )
     item_widget._base_save_dir = str(tmp_path)
 
     item_widget._show_item_library()
@@ -180,11 +185,22 @@ def test_show_item_library_collects_items_and_sorts_by_category(item_widget, qtb
     assert item_widget._library_dialogs
     dialog = item_widget._library_dialogs[-1]
     table = dialog._table
-    assert table.rowCount() == 2
     assert table.item(0, 0).text() == "Blade"
+    assert dialog._category_combo.currentText() == "All Categories"
 
+    dialog._search_input.setText("pot")
+    qtbot.waitUntil(lambda: table.rowCount() == 1)
+    assert table.item(0, 0).text() == "Potion"
+
+    dialog._search_input.clear()
+    dialog._category_combo.setCurrentText("Valuables")
+    qtbot.waitUntil(lambda: table.rowCount() == 1)
+    assert table.item(0, 0).text() == "Gem"
+
+    dialog._category_combo.setCurrentText("All Categories")
     dialog._sort_combo.setCurrentText("Category")
-    qtbot.waitUntil(lambda: table.item(0, 1).text() == "Consumables")
+    qtbot.waitUntil(lambda: table.rowCount() == 3)
+    assert table.item(0, 1).text() == "Consumables"
     assert table.item(0, 0).text() == "Potion"
 
 
