@@ -862,6 +862,43 @@ def test_inventory_loot_rows_include_equipment_slots(monkeypatch, dungeon_widget
     assert "Equipment: Head" in str(equipment_rows[0].get("label") or "")
 
 
+def test_inventory_loot_rows_keep_embedded_item_documents_when_local_file_is_missing(
+    monkeypatch,
+    dungeon_widget,
+):
+    embedded_document = build_item_document(
+        {
+            "item_id": "item_unknown",
+            "title": "Embedded Blade",
+            "rarity": "common",
+            "level": 1,
+            "category": "equipment",
+        },
+        None,
+    )
+    fake_module = types.SimpleNamespace(
+        inventory_payload_for_sheet_id=lambda _sheet_id: {
+            "inventory": [{"item_id": "item_unknown", "quantity": 1}],
+            "equipment": {},
+            "item_documents": {"item_unknown": embedded_document},
+            "inventory_notes": "",
+            "gold": 0,
+            "silver": 0,
+            "copper": 0,
+        },
+        EQUIPMENT_SLOT_LABELS={},
+        loot_item_path_for_id=lambda _item_id: None,
+    )
+    monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+
+    rows = dungeon_widget._inventory_loot_rows_for_sheet("sheet-1")
+
+    assert len(rows) == 1
+    assert rows[0]["item_id"] == "item_unknown"
+    assert rows[0]["title"] == "Embedded Blade"
+    assert rows[0]["item_document"] == embedded_document
+
+
 def test_player_loot_add_from_inventory_sends_source_metadata(dungeon_widget, monkeypatch):
     class _ClientStub:
         def __init__(self):
@@ -3771,6 +3808,78 @@ def test_external_character_inventory_save_does_not_overwrite_connected_owner(du
     item_data = dungeon_widget._dungeons[0]["state"]["items"][0]
     assert item_data["linked_inventory"]["inventory"][0]["item_id"] == "item-host"
     assert item_data["linked_save_revision"] == 4
+    assert broadcast_calls == []
+
+
+def test_external_character_inventory_save_does_not_mutate_collection_backed_online_state_when_owner_disconnected(
+    dungeon_widget,
+    monkeypatch,
+):
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._connected_players = {}
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-1",
+                        "linked_authority_player_id": "player-1",
+                        "linked_save_revision": 4,
+                        "linked_last_saved_at": "2026-03-01T10:15:00+00:00",
+                        "linked_content_hash": "host-hash",
+                        "linked_inventory": {"inventory": [{"item_id": "item-host", "quantity": 1}]},
+                        "linked_sheet_archive_b64": _valid_archive_b64(),
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    broadcast_calls = []
+    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: broadcast_calls.append(True))
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda character_id: {
+            "character_id": character_id,
+            "sheet_id": "sheet-1",
+            "sheet_name": "Hero",
+            "save_revision": 5,
+            "last_saved_at": "2026-03-01T11:00:00+00:00",
+            "content_hash": "dm-local-hash",
+            "inventory": {"inventory": [{"item_id": "item-local", "quantity": 1}]},
+            "stats": {"name": "Hero"},
+            "archive_b64": _valid_archive_b64(),
+        },
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "player_sheets",
+        types.SimpleNamespace(
+            character_id_for_sheet_id=lambda _sheet_id: "character-1",
+            inventory_payload_for_sheet_id=lambda _sheet_id: None,
+        ),
+    )
+
+    dungeon_widget._on_external_character_inventory_saved(
+        "sheet-1",
+        {"inventory": [{"item_id": "item-local", "quantity": 1}], "equipment": {}},
+    )
+
+    item_data = dungeon_widget._dungeons[0]["state"]["items"][0]
+    assert item_data["linked_inventory"]["inventory"][0]["item_id"] == "item-host"
+    assert item_data["linked_save_revision"] == 4
+    assert item_data["linked_content_hash"] == "host-hash"
     assert broadcast_calls == []
 
 

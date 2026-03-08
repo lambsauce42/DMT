@@ -221,6 +221,39 @@ def test_apply_remote_character_package_can_create_managed_copy_despite_same_nam
     ) == ["character-local", "character-remote"]
 
 
+def test_apply_remote_character_package_does_not_overwrite_existing_personal_sheet_on_character_id_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(player_sheets, "default_sheet_save_dir", lambda: str(tmp_path))
+    personal_pdf = tmp_path / "personal.pdf"
+    personal_pdf.write_bytes(b"%PDF-1.4 personal")
+    personal_entry = player_sheets.PlayerSheetEntry(
+        name="Personal Hero",
+        pdf_path=str(personal_pdf),
+        character_id="character-shared",
+        inventory=["item-personal"],
+        managed_linked=False,
+    )
+    assert player_sheets.ensure_entry_archive(personal_entry)
+    player_sheets.save_entries_to_storage([personal_entry])
+
+    ok, message, payload = player_sheets.apply_remote_character_package_for_character_id(
+        "character-shared",
+        "Remote Hero",
+        {"inventory": ["item-remote"]},
+        emit_event=False,
+    )
+
+    assert ok is False, message
+    assert payload is None
+    entries = player_sheets.load_entries_from_storage()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.name == "Personal Hero"
+    assert entry.managed_linked is False
+    assert entry.inventory == ["item-personal"]
+
+
 def test_character_archive_round_trip_and_inventory_schema(tmp_path: Path) -> None:
     source_pdf = tmp_path / "sheet.pdf"
     source_pdf.write_bytes(b"%PDF-1.4 test sheet")
