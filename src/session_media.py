@@ -243,6 +243,9 @@ class SessionMediaPlaybackEngine(QObject):
         self._mute_effects = False
         self._music_loop = False
         self._active_music_source = ""
+        self._music_source_ready = False
+        self._pending_music_position_ms: int | None = None
+        self._pending_music_action = ""
         self._duration_ms = 0
         self._pending_effect_downloads: dict[str, bool] = {}
         self._pending_effect_plays: set[str] = set()
@@ -318,6 +321,10 @@ class SessionMediaPlaybackEngine(QObject):
             return "paused"
         return "stopped"
 
+    @property
+    def active_music_source(self) -> str:
+        return str(self._active_music_source or "")
+
     def set_mix_levels(self, *, music_mix: int | None = None, effects_mix: int | None = None) -> None:
         if music_mix is not None:
             self._music_mix_volume = max(0, min(100, int(music_mix)))
@@ -367,8 +374,16 @@ class SessionMediaPlaybackEngine(QObject):
         self._music_loop = bool(loop)
         next_source = str(source or "")
         if next_source and next_source != self._active_music_source:
+            self._music_source_ready = False
+            self._pending_music_position_ms = max(0, int(position_ms))
+            self._pending_music_action = "pause" if paused else "play"
             self._music_player.setSource(_source_to_qurl(next_source))
             self._active_music_source = next_source
+            return
+        if not self._music_source_ready:
+            self._pending_music_position_ms = max(0, int(position_ms))
+            self._pending_music_action = "pause" if paused else "play"
+            return
         if position_ms >= 0:
             self._music_player.setPosition(int(position_ms))
         if paused:
@@ -382,10 +397,16 @@ class SessionMediaPlaybackEngine(QObject):
 
     def stop_music(self) -> None:
         if self._music_player is not None:
+            self._pending_music_position_ms = None
+            self._pending_music_action = ""
+            self._music_source_ready = False
             self._music_player.stop()
 
     def seek_music(self, position_ms: int) -> None:
         if self._music_player is not None:
+            if not self._music_source_ready:
+                self._pending_music_position_ms = max(0, int(position_ms))
+                return
             self._music_player.setPosition(max(0, int(position_ms)))
 
     def play_effect(self, *, cache_key: str, source: str) -> None:
@@ -492,6 +513,21 @@ class SessionMediaPlaybackEngine(QObject):
         status_name = getattr(status, "name", str(status))
         if self._music_player is None:
             return
+        lowered = str(status_name)
+        if "NoMedia" in lowered or "InvalidMedia" in lowered or "LoadingMedia" in lowered:
+            self._music_source_ready = False
+        if "LoadedMedia" in lowered or "BufferedMedia" in lowered:
+            self._music_source_ready = True
+            pending_position = self._pending_music_position_ms
+            pending_action = self._pending_music_action
+            self._pending_music_position_ms = None
+            self._pending_music_action = ""
+            if pending_position is not None and pending_position > 0:
+                self._music_player.setPosition(int(pending_position))
+            if pending_action == "pause":
+                self._music_player.pause()
+            elif pending_action == "play":
+                self._music_player.play()
         if "EndOfMedia" in str(status_name) and self._music_loop:
             self._music_player.setPosition(0)
             self._music_player.play()

@@ -2,6 +2,7 @@ import os
 import sys
 
 import pytest
+from PySide6.QtWidgets import QCheckBox
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -30,6 +31,9 @@ def test_media_button_is_square_and_visible_in_local_dm(dungeon_widget):
 
 
 def test_media_panel_hides_dm_controls_for_player(dungeon_widget):
+    dungeon_widget._media_library["effects"] = [
+        {"asset_id": "fx-1", "title": "Thunder", "path": "C:/fx/thunder.ogg", "icon_path": ""}
+    ]
     dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
     dungeon_widget._refresh_media_panel()
 
@@ -38,6 +42,8 @@ def test_media_panel_hides_dm_controls_for_player(dungeon_widget):
     assert dungeon_widget._media_effects_dm_controls.isHidden()
     assert not dungeon_widget._media_personal_music_row.isHidden()
     assert not dungeon_widget._media_personal_effects_row.isHidden()
+    assert "fx-1" in dungeon_widget._media_effect_buttons
+    assert not dungeon_widget._media_effect_buttons["fx-1"].isEnabled()
 
 
 def test_media_snapshot_contains_state(dungeon_widget):
@@ -67,12 +73,12 @@ def test_media_snapshot_contains_state(dungeon_widget):
 
 
 def test_media_profile_persists_library_and_audio_preferences(dungeon_widget, tmp_path, monkeypatch):
-    profile_path = tmp_path / "dungeon_profile.json"
-    monkeypatch.setattr(dungeon_widget, "_local_profile_path", lambda: profile_path)
+    profile_path = tmp_path / "media_profile.json"
+    monkeypatch.setattr(dungeon_widget, "_media_profile_path", lambda: profile_path)
 
     dungeon_widget._media_library = {
         "music": [{"asset_id": "m1", "title": "Rain", "path": "C:/music/rain.mp3"}],
-        "effects": [{"asset_id": "e1", "title": "Bell", "path": "C:/fx/bell.ogg"}],
+        "effects": [{"asset_id": "e1", "title": "Bell", "path": "C:/fx/bell.ogg", "icon_path": "C:/icons/bell.svg"}],
     }
     dungeon_widget._audio_preferences = {
         "music_volume": 33,
@@ -81,13 +87,66 @@ def test_media_profile_persists_library_and_audio_preferences(dungeon_widget, tm
         "mute_effects": False,
     }
 
-    dungeon_widget._save_local_profile()
-    loaded = dungeon_widget._load_or_create_local_profile()
+    dungeon_widget._save_media_profile()
+    loaded = dungeon_widget._load_or_create_media_profile()
 
     assert loaded["media_library"]["music"][0]["title"] == "Rain"
     assert loaded["media_library"]["effects"][0]["asset_id"] == "e1"
+    assert loaded["media_library"]["effects"][0]["icon_path"] == "C:/icons/bell.svg"
     assert loaded["audio_preferences"]["music_volume"] == 33
     assert loaded["audio_preferences"]["mute_music"] is True
+
+
+def test_soundboard_pad_buttons_are_square(dungeon_widget):
+    dungeon_widget._media_library["effects"] = [
+        {"asset_id": "fx-1", "title": "Thunder", "path": "C:/fx/thunder.ogg", "icon_path": ""}
+    ]
+
+    dungeon_widget._refresh_media_panel()
+
+    pad = dungeon_widget._media_effect_buttons["fx-1"]
+    assert pad.width() == pad.height()
+
+
+def test_media_slider_rows_do_not_end_with_checkboxes(dungeon_widget):
+    dungeon_widget._refresh_media_panel()
+
+    assert dungeon_widget._media_personal_music_row.findChildren(QCheckBox) == []
+    assert dungeon_widget._media_personal_effects_row.findChildren(QCheckBox) == []
+    assert dungeon_widget._media_personal_music_value.text().endswith("%")
+    assert dungeon_widget._media_personal_effects_value.text().endswith("%")
+
+
+def test_media_peer_buttons_share_widths(dungeon_widget):
+    dungeon_widget._refresh_media_panel()
+
+    transport_widths = {
+        dungeon_widget._media_music_play_btn.width(),
+        dungeon_widget._media_music_pause_btn.width(),
+        dungeon_widget._media_music_stop_btn.width(),
+        dungeon_widget._media_music_loop.width(),
+    }
+    music_manage_widths = {
+        dungeon_widget._media_music_add_btn.width(),
+        dungeon_widget._media_music_remove_btn.width(),
+        dungeon_widget._media_music_rename_btn.width(),
+    }
+    soundboard_manage_widths = {
+        dungeon_widget._media_effects_add_btn.width(),
+        dungeon_widget._media_effects_icon_btn.width(),
+        dungeon_widget._media_effects_rename_btn.width(),
+        dungeon_widget._media_effects_remove_btn.width(),
+        dungeon_widget._media_effects_stop_btn.width(),
+    }
+    mute_widths = {
+        dungeon_widget._media_personal_music_mute.width(),
+        dungeon_widget._media_personal_effects_mute.width(),
+    }
+
+    assert len(transport_widths) == 1
+    assert len(music_manage_widths) == 1
+    assert len(soundboard_manage_widths) == 1
+    assert len(mute_widths) == 1
 
 
 def test_snapshot_media_state_does_not_overwrite_local_audio_preferences(dungeon_widget):

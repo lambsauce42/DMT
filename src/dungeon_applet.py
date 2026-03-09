@@ -132,6 +132,7 @@ from save_paths import (
     default_dnd_save_dir,
     dnd_saves_dir,
     items_dir,
+    media_settings_path,
     online_icon_cache_dir,
     online_media_cache_dir,
     online_loot_item_cache_dir,
@@ -259,6 +260,12 @@ def _default_media_library() -> dict[str, list[dict]]:
     return {"music": [], "effects": []}
 
 
+def _default_media_icon_path(kind: str) -> str:
+    icon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+    filename = "lightning.svg" if str(kind or "").strip() == "effects" else "play.svg"
+    return os.path.join(icon_dir, filename)
+
+
 def _default_audio_preferences() -> dict[str, object]:
     return {
         "music_volume": 100,
@@ -289,10 +296,24 @@ def _sanitize_media_library(payload: object) -> dict[str, list[dict]]:
                     "asset_id": asset_id,
                     "title": str(entry.get("title") or Path(path).stem or asset_id).strip() or asset_id,
                     "path": path,
+                    "icon_path": str(entry.get("icon_path") or "").strip(),
                 }
             )
         library[key] = normalized_entries
     return library
+
+
+def _clear_layout(layout) -> None:
+    while layout.count():
+        child = layout.takeAt(0)
+        widget = child.widget()
+        nested_layout = child.layout()
+        if nested_layout is not None:
+            _clear_layout(nested_layout)
+        if widget is not None:
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
 
 
 def _sanitize_audio_preferences(payload: object) -> dict[str, object]:
@@ -4300,6 +4321,7 @@ class DungeonAppletWidget(QWidget):
         self._local_player_id: str | None = None
         self._local_player_name: str = ""
         self._local_profile = self._load_or_create_local_profile()
+        self._media_profile = self._load_or_create_media_profile()
         self._persistent_local_player_id: str = get_or_create_local_player_id()
         self._character_id_registry: dict[str, str] = dict(
             self._local_profile.get("character_ids", {})
@@ -4311,9 +4333,9 @@ class DungeonAppletWidget(QWidget):
             if isinstance(self._local_profile.get("known_players"), dict)
             else {}
         )
-        self._media_library: dict[str, list[dict]] = _sanitize_media_library(self._local_profile.get("media_library"))
+        self._media_library: dict[str, list[dict]] = _sanitize_media_library(self._media_profile.get("media_library"))
         self._audio_preferences: dict[str, object] = _sanitize_audio_preferences(
-            self._local_profile.get("audio_preferences")
+            self._media_profile.get("audio_preferences")
         )
         self._media_state: dict = {
             "server": {"active": False, "port": 0, "token": ""},
@@ -4332,6 +4354,12 @@ class DungeonAppletWidget(QWidget):
                 "active_titles": [],
             },
         }
+        self._media_selected_music_asset_id: str = ""
+        self._media_selected_effect_asset_id: str = ""
+        self._media_music_library_signature: tuple = ()
+        self._media_effect_library_signature: tuple = ()
+        self._media_music_buttons: dict[str, QToolButton] = {}
+        self._media_effect_buttons: dict[str, QToolButton] = {}
         self._media_status_line: str = ""
         self._media_host_server: SessionMediaHttpServer | None = None
         self._media_engine = SessionMediaPlaybackEngine(self)
@@ -4533,9 +4561,28 @@ class DungeonAppletWidget(QWidget):
         self._media_btn.setObjectName("SecondaryButton")
         self._media_btn.setToolTip("Show Media")
         self._media_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._media_btn.setFixedSize(40, 40)
+        self._media_btn.setProperty("compact", "true")
+        self._media_btn.setFixedSize(34, 34)
         self._media_btn.setIcon(QIcon(icon_media))
-        self._media_btn.setIconSize(QSize(22, 22))
+        self._media_btn.setIconSize(QSize(18, 18))
+        self._media_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._media_btn.setStyleSheet(
+            "QToolButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+            "border: 1px solid #3b424b;"
+            "border-radius: 6px;"
+            "padding: 4px;"
+            "margin: 0px;"
+            "min-width: 34px;"
+            "max-width: 34px;"
+            "min-height: 34px;"
+            "max-height: 34px;"
+            "}"
+            "QToolButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+            "border-color: #58a6ff;"
+            "}"
+        )
         self._media_btn.clicked.connect(self._toggle_media_panel)
         self._media_btn.setVisible(True)
         self._media_panel = self._build_media_panel(icon_dir)
@@ -5193,7 +5240,7 @@ class DungeonAppletWidget(QWidget):
         if hasattr(self, "_loot_pool_btn") and self._loot_pool_btn is not None:
             btn_size = self._loot_pool_btn.size()
             btn_x = max(8, self.width() - btn_size.width() - 108)
-            btn_y = 12
+            btn_y = 20
             self._loot_pool_btn.move(btn_x, btn_y)
             self._loot_pool_btn.raise_()
             if hasattr(self, "_loot_pool_badge"):
@@ -5204,7 +5251,7 @@ class DungeonAppletWidget(QWidget):
         if hasattr(self, "_media_btn") and self._media_btn is not None:
             btn_size = self._media_btn.size()
             btn_x = max(8, self.width() - btn_size.width() - 64)
-            self._media_btn.move(btn_x, 12)
+            self._media_btn.move(btn_x, 20)
             self._media_btn.raise_()
         if hasattr(self, "_media_panel") and self._media_panel is not None and self._media_panel.isVisible():
             media_anim = getattr(self, "_media_panel_anim", None)
@@ -5261,8 +5308,8 @@ class DungeonAppletWidget(QWidget):
         margin = 12
         available_w = max(260, self.width() - (margin * 2))
         available_h = max(260, self.height() - (margin * 2))
-        panel_w = max(460, int(available_w * 0.42))
-        panel_h = max(360, int(available_h * 0.52))
+        panel_w = max(680, int(available_w * 0.62))
+        panel_h = max(430, int(available_h * 0.58))
         panel_w = min(panel_w, available_w)
         panel_h = min(panel_h, available_h)
         panel_x = max(8, int((self.width() - panel_w) / 2))
@@ -6383,190 +6430,376 @@ class DungeonAppletWidget(QWidget):
     def _build_media_panel(self, icon_dir: str) -> QFrame:
         panel = QFrame(self)
         panel.setObjectName("SubPanel")
-        panel.setMinimumSize(460, 360)
+        panel.setMinimumSize(660, 430)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(6)
+        header.setSpacing(10)
+        header_text = QVBoxLayout()
+        header_text.setContentsMargins(0, 0, 0, 0)
+        header_text.setSpacing(2)
         title = QLabel("Media", panel)
         title.setObjectName("PanelTitle")
-        header.addWidget(title)
+        header_text.addWidget(title)
+        subtitle = QLabel("Stream the room, fire pads fast, and keep personal volume separate.", panel)
+        subtitle.setStyleSheet("color: #94a3b8;")
+        header_text.addWidget(subtitle)
+        header.addLayout(header_text, 1)
         header.addStretch(1)
-        self._media_collapse_btn = QPushButton("Collapse", panel)
-        self._media_collapse_btn.setObjectName("SecondaryButton")
-        self._media_collapse_btn.setProperty("compact", "true")
+        self._media_collapse_btn = QToolButton(panel)
+        self._media_collapse_btn.setToolTip("Close Media")
+        self._media_collapse_btn.setIcon(QIcon(os.path.join(icon_dir, "close.svg")))
+        self._media_collapse_btn.setIconSize(QSize(18, 18))
+        self._media_collapse_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._media_collapse_btn.setFixedSize(34, 34)
+        self._media_collapse_btn.setStyleSheet(
+            "QToolButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+            "border: 1px solid #3b424b;"
+            "border-radius: 6px;"
+            "padding: 4px;"
+            "min-width: 34px;"
+            "max-width: 34px;"
+            "min-height: 34px;"
+            "max-height: 34px;"
+            "}"
+            "QToolButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+            "border-color: #58a6ff;"
+            "}"
+        )
         self._media_collapse_btn.clicked.connect(self._toggle_media_panel)
         header.addWidget(self._media_collapse_btn)
         layout.addLayout(header)
 
-        self._media_tabs = QTabWidget(panel)
-        layout.addWidget(self._media_tabs, 1)
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(10)
+        layout.addLayout(content, 1)
 
-        music_tab = QWidget(self._media_tabs)
-        music_layout = QVBoxLayout(music_tab)
-        music_layout.setContentsMargins(0, 0, 0, 0)
-        music_layout.setSpacing(8)
+        row_label_width = 92
+        row_value_width = 48
+        transport_button_width = 86
+        library_button_width = 94
+        soundboard_button_width = 94
+        toggle_button_width = 120
+        media_button_height = 36
+        media_row_height = 42
 
-        self._media_music_title = QLabel("No track selected", music_tab)
-        self._media_music_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
-        music_layout.addWidget(self._media_music_title)
+        def _make_media_row_label(text: str, parent: QWidget) -> QLabel:
+            label = QLabel(text, parent)
+            label.setFixedWidth(row_label_width)
+            label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            label.setStyleSheet("color: #cbd5e1; font-weight: 600;")
+            return label
 
-        self._media_music_status = QLabel("Stopped", music_tab)
-        self._media_music_status.setStyleSheet("color: #94a3b8; font-size: 11px;")
-        music_layout.addWidget(self._media_music_status)
+        def _make_media_value_label(text: str, parent: QWidget) -> QLabel:
+            label = QLabel(text, parent)
+            label.setFixedWidth(row_value_width)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet(
+                "color: #e5e7eb; background-color: rgba(15, 23, 42, 150); border: 1px solid #334155; border-radius: 6px; padding: 3px 6px;"
+            )
+            return label
 
-        self._media_music_list = QListWidget(music_tab)
-        self._media_music_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._media_music_list.itemSelectionChanged.connect(self._on_media_music_selection_changed)
-        music_layout.addWidget(self._media_music_list, 1)
+        def _configure_media_row(row_widget: QWidget, row_layout: QHBoxLayout) -> None:
+            row_widget.setFixedHeight(media_row_height)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
 
-        self._media_music_dm_controls = QWidget(music_tab)
-        dm_music_layout = QHBoxLayout(self._media_music_dm_controls)
-        dm_music_layout.setContentsMargins(0, 0, 0, 0)
-        dm_music_layout.setSpacing(6)
-        self._media_music_add_btn = QPushButton("Add", self._media_music_dm_controls)
-        self._media_music_add_btn.setObjectName("SecondaryButton")
-        self._media_music_add_btn.clicked.connect(lambda: self._on_media_add_requested("music"))
-        dm_music_layout.addWidget(self._media_music_add_btn)
-        self._media_music_remove_btn = QPushButton("Remove", self._media_music_dm_controls)
-        self._media_music_remove_btn.setObjectName("SecondaryButton")
-        self._media_music_remove_btn.clicked.connect(lambda: self._on_media_remove_requested("music"))
-        dm_music_layout.addWidget(self._media_music_remove_btn)
-        self._media_music_rename_btn = QPushButton("Rename", self._media_music_dm_controls)
-        self._media_music_rename_btn.setObjectName("SecondaryButton")
-        self._media_music_rename_btn.clicked.connect(lambda: self._on_media_rename_requested("music"))
-        dm_music_layout.addWidget(self._media_music_rename_btn)
-        dm_music_layout.addStretch(1)
-        music_layout.addWidget(self._media_music_dm_controls)
+        def _configure_media_button_row(row_widget: QWidget, row_layout: QHBoxLayout) -> None:
+            row_widget.setFixedHeight(media_row_height)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
 
-        self._media_music_transport = QWidget(music_tab)
+        def _make_media_action_button(
+            text: str,
+            parent: QWidget,
+            *,
+            width: int,
+            checkable: bool = False,
+        ) -> QPushButton:
+            button = QPushButton(text, parent)
+            button.setObjectName("SecondaryButton")
+            button.setCheckable(checkable)
+            button.setFixedHeight(media_button_height)
+            button.setFixedWidth(width)
+            button.setStyleSheet(
+                f"min-height: {media_button_height}px; max-height: {media_button_height}px; padding: 4px 10px;"
+            )
+            return button
+
+        music_column = QVBoxLayout()
+        music_column.setContentsMargins(0, 0, 0, 0)
+        music_column.setSpacing(10)
+        content.addLayout(music_column, 5)
+
+        soundboard_column = QVBoxLayout()
+        soundboard_column.setContentsMargins(0, 0, 0, 0)
+        soundboard_column.setSpacing(10)
+        content.addLayout(soundboard_column, 6)
+
+        self._media_now_playing_card = QFrame(panel)
+        self._media_now_playing_card.setObjectName("SubPanel")
+        now_layout = QVBoxLayout(self._media_now_playing_card)
+        now_layout.setContentsMargins(12, 12, 12, 12)
+        now_layout.setSpacing(8)
+        now_label = QLabel("Now Playing", self._media_now_playing_card)
+        now_label.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        now_layout.addWidget(now_label)
+
+        self._media_music_title = QLabel("No track selected", self._media_now_playing_card)
+        self._media_music_title.setStyleSheet("font-weight: 600; color: #f8fafc; font-size: 15px;")
+        self._media_music_title.setWordWrap(True)
+        now_layout.addWidget(self._media_music_title)
+
+        self._media_music_status = QLabel("Stopped", self._media_now_playing_card)
+        self._media_music_status.setStyleSheet("color: #94a3b8;")
+        now_layout.addWidget(self._media_music_status)
+
+        self._media_music_seek = QSlider(Qt.Orientation.Horizontal, self._media_now_playing_card)
+        self._media_music_seek.setRange(0, 0)
+        self._media_music_seek.sliderReleased.connect(self._on_media_music_seek_released)
+        now_layout.addWidget(self._media_music_seek)
+
+        self._media_music_transport = QWidget(self._media_now_playing_card)
         transport_layout = QHBoxLayout(self._media_music_transport)
-        transport_layout.setContentsMargins(0, 0, 0, 0)
-        transport_layout.setSpacing(6)
-        self._media_music_play_btn = QPushButton("Play", self._media_music_transport)
-        self._media_music_play_btn.setObjectName("SecondaryButton")
+        _configure_media_button_row(self._media_music_transport, transport_layout)
+        self._media_music_play_btn = _make_media_action_button(
+            "Play",
+            self._media_music_transport,
+            width=transport_button_width,
+        )
         self._media_music_play_btn.clicked.connect(self._on_media_music_play_requested)
         transport_layout.addWidget(self._media_music_play_btn)
-        self._media_music_pause_btn = QPushButton("Pause", self._media_music_transport)
-        self._media_music_pause_btn.setObjectName("SecondaryButton")
+        self._media_music_pause_btn = _make_media_action_button(
+            "Pause",
+            self._media_music_transport,
+            width=transport_button_width,
+        )
         self._media_music_pause_btn.clicked.connect(self._on_media_music_pause_requested)
         transport_layout.addWidget(self._media_music_pause_btn)
-        self._media_music_stop_btn = QPushButton("Stop", self._media_music_transport)
-        self._media_music_stop_btn.setObjectName("SecondaryButton")
+        self._media_music_stop_btn = _make_media_action_button(
+            "Stop",
+            self._media_music_transport,
+            width=transport_button_width,
+        )
         self._media_music_stop_btn.clicked.connect(self._on_media_music_stop_requested)
         transport_layout.addWidget(self._media_music_stop_btn)
-        self._media_music_loop = QCheckBox("Loop", self._media_music_transport)
+        self._media_music_loop = _make_media_action_button(
+            "Loop",
+            self._media_music_transport,
+            width=transport_button_width,
+            checkable=True,
+        )
         self._media_music_loop.toggled.connect(self._on_media_music_loop_toggled)
         transport_layout.addWidget(self._media_music_loop)
         transport_layout.addStretch(1)
-        music_layout.addWidget(self._media_music_transport)
+        now_layout.addWidget(self._media_music_transport)
 
-        self._media_music_seek = QSlider(Qt.Orientation.Horizontal, music_tab)
-        self._media_music_seek.setRange(0, 0)
-        self._media_music_seek.sliderReleased.connect(self._on_media_music_seek_released)
-        music_layout.addWidget(self._media_music_seek)
-
-        self._media_music_mix_row = QWidget(music_tab)
+        self._media_music_mix_row = QWidget(self._media_now_playing_card)
         mix_layout = QHBoxLayout(self._media_music_mix_row)
-        mix_layout.setContentsMargins(0, 0, 0, 0)
-        mix_layout.setSpacing(6)
-        mix_layout.addWidget(QLabel("DM Music Mix", self._media_music_mix_row))
+        _configure_media_row(self._media_music_mix_row, mix_layout)
+        mix_layout.addWidget(_make_media_row_label("DM Music", self._media_music_mix_row))
         self._media_music_mix_slider = QSlider(Qt.Orientation.Horizontal, self._media_music_mix_row)
         self._media_music_mix_slider.setRange(0, 100)
         self._media_music_mix_slider.valueChanged.connect(self._on_media_music_mix_changed)
         mix_layout.addWidget(self._media_music_mix_slider, 1)
-        self._media_music_mix_value = QLabel("100%", self._media_music_mix_row)
+        self._media_music_mix_value = _make_media_value_label("100%", self._media_music_mix_row)
         mix_layout.addWidget(self._media_music_mix_value)
-        music_layout.addWidget(self._media_music_mix_row)
+        now_layout.addWidget(self._media_music_mix_row)
 
-        self._media_personal_music_row = QWidget(music_tab)
+        self._media_personal_music_row = QWidget(self._media_now_playing_card)
         personal_music_layout = QHBoxLayout(self._media_personal_music_row)
-        personal_music_layout.setContentsMargins(0, 0, 0, 0)
-        personal_music_layout.setSpacing(6)
-        personal_music_layout.addWidget(QLabel("Your Music", self._media_personal_music_row))
+        _configure_media_row(self._media_personal_music_row, personal_music_layout)
+        personal_music_layout.addWidget(_make_media_row_label("Your Music", self._media_personal_music_row))
         self._media_personal_music_slider = QSlider(Qt.Orientation.Horizontal, self._media_personal_music_row)
         self._media_personal_music_slider.setRange(0, 100)
         self._media_personal_music_slider.valueChanged.connect(self._on_media_personal_music_changed)
         personal_music_layout.addWidget(self._media_personal_music_slider, 1)
-        self._media_personal_music_mute = QCheckBox("Mute", self._media_personal_music_row)
+        self._media_personal_music_value = _make_media_value_label("100%", self._media_personal_music_row)
+        personal_music_layout.addWidget(self._media_personal_music_value)
+        self._media_personal_music_mute = _make_media_action_button(
+            "Mute Music",
+            self._media_personal_music_row,
+            width=toggle_button_width,
+            checkable=True,
+        )
         self._media_personal_music_mute.toggled.connect(self._on_media_personal_mute_music_changed)
         personal_music_layout.addWidget(self._media_personal_music_mute)
-        music_layout.addWidget(self._media_personal_music_row)
+        now_layout.addWidget(self._media_personal_music_row)
+        music_column.addWidget(self._media_now_playing_card)
 
-        effects_tab = QWidget(self._media_tabs)
-        effects_layout = QVBoxLayout(effects_tab)
-        effects_layout.setContentsMargins(0, 0, 0, 0)
-        effects_layout.setSpacing(8)
+        self._media_music_library_card = QFrame(panel)
+        self._media_music_library_card.setObjectName("SubPanel")
+        music_library_layout = QVBoxLayout(self._media_music_library_card)
+        music_library_layout.setContentsMargins(12, 12, 12, 12)
+        music_library_layout.setSpacing(8)
+        music_library_header = QHBoxLayout()
+        music_library_header.setContentsMargins(0, 0, 0, 0)
+        music_library_header.setSpacing(8)
+        music_library_title = QLabel("Music Library", self._media_music_library_card)
+        music_library_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        music_library_header.addWidget(music_library_title)
+        music_library_header.addStretch(1)
+        self._media_music_dm_controls = QWidget(self._media_music_library_card)
+        dm_music_layout = QHBoxLayout(self._media_music_dm_controls)
+        _configure_media_button_row(self._media_music_dm_controls, dm_music_layout)
+        self._media_music_add_btn = _make_media_action_button(
+            "Add Track",
+            self._media_music_dm_controls,
+            width=library_button_width,
+        )
+        self._media_music_add_btn.clicked.connect(lambda: self._on_media_add_requested("music"))
+        dm_music_layout.addWidget(self._media_music_add_btn)
+        self._media_music_remove_btn = _make_media_action_button(
+            "Remove",
+            self._media_music_dm_controls,
+            width=library_button_width,
+        )
+        self._media_music_remove_btn.clicked.connect(lambda: self._on_media_remove_requested("music"))
+        dm_music_layout.addWidget(self._media_music_remove_btn)
+        self._media_music_rename_btn = _make_media_action_button(
+            "Rename",
+            self._media_music_dm_controls,
+            width=library_button_width,
+        )
+        self._media_music_rename_btn.clicked.connect(lambda: self._on_media_rename_requested("music"))
+        dm_music_layout.addWidget(self._media_music_rename_btn)
+        music_library_header.addWidget(self._media_music_dm_controls)
+        music_library_layout.addLayout(music_library_header)
 
-        self._media_effects_summary = QLabel("No active effects", effects_tab)
-        self._media_effects_summary.setWordWrap(True)
-        self._media_effects_summary.setStyleSheet("color: #cbd5e1;")
-        effects_layout.addWidget(self._media_effects_summary)
+        self._media_music_library_hint = QLabel(
+            "Click a track to cue it. Transport stays one layer above so the active track is always obvious.",
+            self._media_music_library_card,
+        )
+        self._media_music_library_hint.setWordWrap(True)
+        self._media_music_library_hint.setStyleSheet("color: #94a3b8;")
+        music_library_layout.addWidget(self._media_music_library_hint)
 
-        self._media_effects_list = QListWidget(effects_tab)
-        self._media_effects_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._media_effects_list.itemSelectionChanged.connect(self._on_media_effect_selection_changed)
-        effects_layout.addWidget(self._media_effects_list, 1)
+        self._media_music_library_scroll = QScrollArea(self._media_music_library_card)
+        self._media_music_library_scroll.setWidgetResizable(True)
+        self._media_music_library_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._media_music_library_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._media_music_library_root = QWidget(self._media_music_library_scroll)
+        self._media_music_library_root.setObjectName("TransparentContainer")
+        self._media_music_library_layout = QVBoxLayout(self._media_music_library_root)
+        self._media_music_library_layout.setContentsMargins(0, 0, 0, 0)
+        self._media_music_library_layout.setSpacing(8)
+        self._media_music_library_scroll.setWidget(self._media_music_library_root)
+        music_library_layout.addWidget(self._media_music_library_scroll, 1)
+        music_column.addWidget(self._media_music_library_card, 1)
 
-        self._media_effects_dm_controls = QWidget(effects_tab)
+        self._media_soundboard_card = QFrame(panel)
+        self._media_soundboard_card.setObjectName("SubPanel")
+        soundboard_layout = QVBoxLayout(self._media_soundboard_card)
+        soundboard_layout.setContentsMargins(12, 12, 12, 12)
+        soundboard_layout.setSpacing(8)
+        soundboard_header = QHBoxLayout()
+        soundboard_header.setContentsMargins(0, 0, 0, 0)
+        soundboard_header.setSpacing(8)
+        soundboard_title = QLabel("Soundboard", self._media_soundboard_card)
+        soundboard_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        soundboard_header.addWidget(soundboard_title)
+        soundboard_header.addStretch(1)
+        self._media_effects_dm_controls = QWidget(self._media_soundboard_card)
         dm_effects_layout = QHBoxLayout(self._media_effects_dm_controls)
-        dm_effects_layout.setContentsMargins(0, 0, 0, 0)
-        dm_effects_layout.setSpacing(6)
-        self._media_effects_add_btn = QPushButton("Add", self._media_effects_dm_controls)
-        self._media_effects_add_btn.setObjectName("SecondaryButton")
+        _configure_media_button_row(self._media_effects_dm_controls, dm_effects_layout)
+        self._media_effects_add_btn = _make_media_action_button(
+            "Add Sound",
+            self._media_effects_dm_controls,
+            width=soundboard_button_width,
+        )
         self._media_effects_add_btn.clicked.connect(lambda: self._on_media_add_requested("effects"))
         dm_effects_layout.addWidget(self._media_effects_add_btn)
-        self._media_effects_remove_btn = QPushButton("Remove", self._media_effects_dm_controls)
-        self._media_effects_remove_btn.setObjectName("SecondaryButton")
-        self._media_effects_remove_btn.clicked.connect(lambda: self._on_media_remove_requested("effects"))
-        dm_effects_layout.addWidget(self._media_effects_remove_btn)
-        self._media_effects_rename_btn = QPushButton("Rename", self._media_effects_dm_controls)
-        self._media_effects_rename_btn.setObjectName("SecondaryButton")
+        self._media_effects_icon_btn = _make_media_action_button(
+            "Set Icon",
+            self._media_effects_dm_controls,
+            width=soundboard_button_width,
+        )
+        self._media_effects_icon_btn.clicked.connect(self._on_media_effect_icon_requested)
+        dm_effects_layout.addWidget(self._media_effects_icon_btn)
+        self._media_effects_rename_btn = _make_media_action_button(
+            "Rename",
+            self._media_effects_dm_controls,
+            width=soundboard_button_width,
+        )
         self._media_effects_rename_btn.clicked.connect(lambda: self._on_media_rename_requested("effects"))
         dm_effects_layout.addWidget(self._media_effects_rename_btn)
-        self._media_effects_play_btn = QPushButton("Trigger", self._media_effects_dm_controls)
-        self._media_effects_play_btn.setObjectName("SecondaryButton")
-        self._media_effects_play_btn.clicked.connect(self._on_media_effect_play_requested)
-        dm_effects_layout.addWidget(self._media_effects_play_btn)
-        self._media_effects_stop_btn = QPushButton("Stop All", self._media_effects_dm_controls)
-        self._media_effects_stop_btn.setObjectName("SecondaryButton")
+        self._media_effects_remove_btn = _make_media_action_button(
+            "Remove",
+            self._media_effects_dm_controls,
+            width=soundboard_button_width,
+        )
+        self._media_effects_remove_btn.clicked.connect(lambda: self._on_media_remove_requested("effects"))
+        dm_effects_layout.addWidget(self._media_effects_remove_btn)
+        self._media_effects_stop_btn = _make_media_action_button(
+            "Stop All",
+            self._media_effects_dm_controls,
+            width=soundboard_button_width,
+        )
         self._media_effects_stop_btn.clicked.connect(self._on_media_effect_stop_all_requested)
         dm_effects_layout.addWidget(self._media_effects_stop_btn)
-        dm_effects_layout.addStretch(1)
-        effects_layout.addWidget(self._media_effects_dm_controls)
+        soundboard_header.addWidget(self._media_effects_dm_controls)
+        soundboard_layout.addLayout(soundboard_header)
 
-        self._media_effects_mix_row = QWidget(effects_tab)
+        self._media_effects_summary = QLabel("No active effects", self._media_soundboard_card)
+        self._media_effects_summary.setWordWrap(True)
+        self._media_effects_summary.setStyleSheet("color: #cbd5e1;")
+        soundboard_layout.addWidget(self._media_effects_summary)
+
+        self._media_effects_selected_label = QLabel("Click a pad to trigger it.", self._media_soundboard_card)
+        self._media_effects_selected_label.setStyleSheet("color: #94a3b8;")
+        self._media_effects_selected_label.setWordWrap(True)
+        soundboard_layout.addWidget(self._media_effects_selected_label)
+
+        self._media_effects_grid_scroll = QScrollArea(self._media_soundboard_card)
+        self._media_effects_grid_scroll.setWidgetResizable(True)
+        self._media_effects_grid_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._media_effects_grid_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._media_effects_grid_root = QWidget(self._media_effects_grid_scroll)
+        self._media_effects_grid_root.setObjectName("TransparentContainer")
+        self._media_effects_grid_layout = QGridLayout(self._media_effects_grid_root)
+        self._media_effects_grid_layout.setContentsMargins(0, 0, 0, 0)
+        self._media_effects_grid_layout.setSpacing(8)
+        self._media_effects_grid_scroll.setWidget(self._media_effects_grid_root)
+        soundboard_layout.addWidget(self._media_effects_grid_scroll, 1)
+
+        self._media_effects_mix_row = QWidget(self._media_soundboard_card)
         effect_mix_layout = QHBoxLayout(self._media_effects_mix_row)
-        effect_mix_layout.setContentsMargins(0, 0, 0, 0)
-        effect_mix_layout.setSpacing(6)
-        effect_mix_layout.addWidget(QLabel("DM Effects Mix", self._media_effects_mix_row))
+        _configure_media_row(self._media_effects_mix_row, effect_mix_layout)
+        effect_mix_layout.addWidget(_make_media_row_label("DM Effects", self._media_effects_mix_row))
         self._media_effects_mix_slider = QSlider(Qt.Orientation.Horizontal, self._media_effects_mix_row)
         self._media_effects_mix_slider.setRange(0, 100)
         self._media_effects_mix_slider.valueChanged.connect(self._on_media_effects_mix_changed)
         effect_mix_layout.addWidget(self._media_effects_mix_slider, 1)
-        self._media_effects_mix_value = QLabel("100%", self._media_effects_mix_row)
+        self._media_effects_mix_value = _make_media_value_label("100%", self._media_effects_mix_row)
         effect_mix_layout.addWidget(self._media_effects_mix_value)
-        effects_layout.addWidget(self._media_effects_mix_row)
+        soundboard_layout.addWidget(self._media_effects_mix_row)
 
-        self._media_personal_effects_row = QWidget(effects_tab)
+        self._media_personal_effects_row = QWidget(self._media_soundboard_card)
         personal_effects_layout = QHBoxLayout(self._media_personal_effects_row)
-        personal_effects_layout.setContentsMargins(0, 0, 0, 0)
-        personal_effects_layout.setSpacing(6)
-        personal_effects_layout.addWidget(QLabel("Your Effects", self._media_personal_effects_row))
+        _configure_media_row(self._media_personal_effects_row, personal_effects_layout)
+        personal_effects_layout.addWidget(_make_media_row_label("Your Effects", self._media_personal_effects_row))
         self._media_personal_effects_slider = QSlider(Qt.Orientation.Horizontal, self._media_personal_effects_row)
         self._media_personal_effects_slider.setRange(0, 100)
         self._media_personal_effects_slider.valueChanged.connect(self._on_media_personal_effects_changed)
         personal_effects_layout.addWidget(self._media_personal_effects_slider, 1)
-        self._media_personal_effects_mute = QCheckBox("Mute", self._media_personal_effects_row)
+        self._media_personal_effects_value = _make_media_value_label("100%", self._media_personal_effects_row)
+        personal_effects_layout.addWidget(self._media_personal_effects_value)
+        self._media_personal_effects_mute = _make_media_action_button(
+            "Mute Effects",
+            self._media_personal_effects_row,
+            width=toggle_button_width,
+            checkable=True,
+        )
         self._media_personal_effects_mute.toggled.connect(self._on_media_personal_mute_effects_changed)
         personal_effects_layout.addWidget(self._media_personal_effects_mute)
-        effects_layout.addWidget(self._media_personal_effects_row)
-
-        self._media_tabs.addTab(music_tab, "Music")
-        self._media_tabs.addTab(effects_tab, "Soundboard")
+        soundboard_layout.addWidget(self._media_personal_effects_row)
+        soundboard_column.addWidget(self._media_soundboard_card, 1)
 
         self._media_status_label = QLabel("", panel)
         self._media_status_label.setWordWrap(True)
@@ -6588,14 +6821,8 @@ class DungeonAppletWidget(QWidget):
         self._position_floating_overlays()
 
     def _selected_media_library_entry(self, kind: str) -> dict | None:
-        list_widget = self._media_music_list if kind == "music" else self._media_effects_list
-        item = list_widget.currentItem()
-        if item is None:
-            return None
-        payload = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(payload, dict):
-            return None
-        return dict(payload)
+        asset_id = self._media_selected_music_asset_id if kind == "music" else self._media_selected_effect_asset_id
+        return self._lookup_media_entry(kind, asset_id)
 
     def _lookup_media_entry(self, kind: str, asset_id: str) -> dict | None:
         for entry in self._media_library.get(kind, []):
@@ -6603,25 +6830,236 @@ class DungeonAppletWidget(QWidget):
                 return dict(entry)
         return None
 
-    def _refresh_media_library_list(self, kind: str) -> None:
-        list_widget = self._media_music_list if kind == "music" else self._media_effects_list
-        selected_asset_id = ""
-        current_item = list_widget.currentItem()
-        if current_item is not None:
-            payload = current_item.data(Qt.ItemDataRole.UserRole)
-            if isinstance(payload, dict):
-                selected_asset_id = str(payload.get("asset_id") or "")
-        with QSignalBlocker(list_widget):
-            list_widget.clear()
-            for entry in self._media_library.get(kind, []):
-                title = str(entry.get("title") or entry.get("asset_id") or "Media").strip() or "Media"
-                item = QListWidgetItem(title)
-                item.setData(Qt.ItemDataRole.UserRole, dict(entry))
-                list_widget.addItem(item)
-                if str(entry.get("asset_id") or "") == selected_asset_id:
-                    list_widget.setCurrentItem(item)
-            if not selected_asset_id and list_widget.count() > 0 and kind == "music":
-                list_widget.setCurrentRow(0)
+    def _media_library_signature(self, kind: str) -> tuple:
+        signature: list[tuple[str, str, str, str]] = []
+        if kind == "effects" and hasattr(self, "_media_effects_grid_scroll"):
+            grid_width = max(320, int(self._media_effects_grid_scroll.viewport().width() or 0))
+            if grid_width >= 470:
+                width_bucket = "4"
+            elif grid_width >= 360:
+                width_bucket = "3"
+            else:
+                width_bucket = "2"
+            signature.append((f"layout:{width_bucket}", "", "", ""))
+        for entry in self._media_library.get(kind, []):
+            signature.append(
+                (
+                    str(entry.get("asset_id") or ""),
+                    str(entry.get("title") or ""),
+                    str(entry.get("path") or ""),
+                    str(entry.get("icon_path") or ""),
+                )
+            )
+        return tuple(signature)
+
+    def _rebuild_music_library_buttons(self) -> None:
+        signature = self._media_library_signature("music")
+        if signature == self._media_music_library_signature:
+            return
+        self._media_music_library_signature = signature
+        self._media_music_buttons = {}
+        _clear_layout(self._media_music_library_layout)
+
+        entries = list(self._media_library.get("music", []))
+        valid_ids = {str(entry.get("asset_id") or "") for entry in entries}
+        if self._media_selected_music_asset_id not in valid_ids:
+            current_asset = str(self._media_state["music"].get("asset_id") or "").strip()
+            if current_asset in valid_ids:
+                self._media_selected_music_asset_id = current_asset
+            elif entries:
+                self._media_selected_music_asset_id = str(entries[0].get("asset_id") or "")
+            else:
+                self._media_selected_music_asset_id = ""
+
+        if not entries:
+            placeholder = QLabel(
+                "No saved tracks yet. Add local files here and they stay available for this DM install.",
+                self._media_music_library_root,
+            )
+            placeholder.setWordWrap(True)
+            placeholder.setStyleSheet("color: #94a3b8;")
+            self._media_music_library_layout.addWidget(placeholder)
+            self._media_music_library_layout.addStretch(1)
+            return
+
+        default_icon = QIcon(_default_media_icon_path("music"))
+        for entry in entries:
+            asset_id = str(entry.get("asset_id") or "").strip()
+            title = str(entry.get("title") or asset_id or "Track").strip() or "Track"
+            button = QToolButton(self._media_music_library_root)
+            button.setText(title)
+            button.setToolTip(str(entry.get("path") or ""))
+            button.setIcon(default_icon)
+            button.setIconSize(QSize(18, 18))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setCheckable(True)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setFixedHeight(44)
+            button.setStyleSheet(
+                "QToolButton {"
+                "text-align: left;"
+                "border: 1px solid #334155;"
+                "border-radius: 8px;"
+                "background-color: rgba(15, 23, 42, 150);"
+                "padding: 0 12px;"
+                "min-height: 44px;"
+                "}"
+                "QToolButton:hover {"
+                "border-color: #58a6ff;"
+                "background-color: rgba(30, 41, 59, 190);"
+                "}"
+                "QToolButton:checked {"
+                "border-color: #60a5fa;"
+                "background-color: rgba(37, 99, 235, 60);"
+                "}"
+            )
+            button.clicked.connect(
+                lambda _checked=False, media_asset_id=asset_id: self._on_media_music_card_clicked(media_asset_id)
+            )
+            self._media_music_library_layout.addWidget(button)
+            self._media_music_buttons[asset_id] = button
+        self._media_music_library_layout.addStretch(1)
+
+    def _rebuild_soundboard_grid(self) -> None:
+        signature = self._media_library_signature("effects")
+        if signature == self._media_effect_library_signature:
+            return
+        self._media_effect_library_signature = signature
+        self._media_effect_buttons = {}
+        _clear_layout(self._media_effects_grid_layout)
+
+        entries = list(self._media_library.get("effects", []))
+        valid_ids = {str(entry.get("asset_id") or "") for entry in entries}
+        if self._media_selected_effect_asset_id not in valid_ids:
+            self._media_selected_effect_asset_id = ""
+
+        if not entries:
+            placeholder = QLabel(
+                "No sound pads yet. Add short local files and assign icons to turn this into a real soundboard.",
+                self._media_effects_grid_root,
+            )
+            placeholder.setWordWrap(True)
+            placeholder.setStyleSheet("color: #94a3b8;")
+            self._media_effects_grid_layout.addWidget(placeholder, 0, 0, 1, 1)
+            self._media_effects_grid_layout.setRowStretch(1, 1)
+            return
+
+        grid_width = max(320, int(self._media_effects_grid_scroll.viewport().width() or 0))
+        if grid_width >= 470:
+            column_count = 4
+        elif grid_width >= 360:
+            column_count = 3
+        else:
+            column_count = 2
+
+        for index, entry in enumerate(entries):
+            asset_id = str(entry.get("asset_id") or "").strip()
+            title = str(entry.get("title") or asset_id or "Pad").strip() or "Pad"
+            icon_path = str(entry.get("icon_path") or "").strip()
+            icon = QIcon(icon_path) if icon_path else QIcon(_default_media_icon_path("effects"))
+            label = title if len(title) <= 16 else f"{title[:13]}..."
+            button = QToolButton(self._media_effects_grid_root)
+            button.setText(label)
+            button.setToolTip(title)
+            button.setIcon(icon)
+            button.setIconSize(QSize(28, 28))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setCheckable(True)
+            button.setFixedSize(92, 92)
+            button.setStyleSheet(
+                "QToolButton {"
+                "border: 1px solid #334155;"
+                "border-radius: 10px;"
+                "background-color: rgba(15, 23, 42, 150);"
+                "padding: 8px 6px;"
+                "min-width: 92px;"
+                "max-width: 92px;"
+                "min-height: 92px;"
+                "max-height: 92px;"
+                "}"
+                "QToolButton:hover {"
+                "border-color: #58a6ff;"
+                "background-color: rgba(30, 41, 59, 195);"
+                "}"
+                "QToolButton:checked {"
+                "border-color: #f59e0b;"
+                "background-color: rgba(245, 158, 11, 40);"
+                "}"
+            )
+            button.clicked.connect(
+                lambda _checked=False, media_asset_id=asset_id: self._on_media_effect_pad_clicked(media_asset_id)
+            )
+            row = index // column_count
+            column = index % column_count
+            self._media_effects_grid_layout.addWidget(button, row, column)
+            self._media_effect_buttons[asset_id] = button
+        self._media_effects_grid_layout.setColumnStretch(column_count, 1)
+        self._media_effects_grid_layout.setRowStretch((len(entries) // column_count) + 1, 1)
+
+    def _on_media_music_card_clicked(self, asset_id: str) -> None:
+        clean_asset_id = str(asset_id or "").strip()
+        if not clean_asset_id:
+            return
+        self._media_selected_music_asset_id = clean_asset_id
+        selected = self._lookup_media_entry("music", clean_asset_id)
+        if selected is None:
+            self._refresh_media_panel()
+            return
+        self._cue_music_entry(selected, broadcast=self._online_mode == ONLINE_MODE_DM_HOST)
+
+    def _on_media_effect_pad_clicked(self, asset_id: str) -> None:
+        clean_asset_id = str(asset_id or "").strip()
+        if not clean_asset_id:
+            return
+        self._media_selected_effect_asset_id = clean_asset_id
+        selected = self._lookup_media_entry("effects", clean_asset_id)
+        if selected is None:
+            self._refresh_media_panel()
+            return
+        if self._online_mode in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            self._warm_effect_entry(selected, broadcast=self._online_mode == ONLINE_MODE_DM_HOST)
+            self._apply_media_event(
+                "effect_play",
+                {
+                    "asset_id": str(selected.get("asset_id") or ""),
+                    "title": str(selected.get("title") or ""),
+                    "filename": Path(str(selected.get("path") or "")).name,
+                },
+                broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+            )
+            return
+        self._refresh_media_panel()
+
+    def _on_media_effect_icon_requested(self) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        selected = self._selected_media_library_entry("effects")
+        if selected is None:
+            return
+        icon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+        filename, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose Soundboard Icon",
+            icon_dir,
+            "Image Files (*.png *.svg *.jpg *.jpeg *.bmp *.ico);;All Files (*)",
+        )
+        if not filename:
+            return
+        icon_path = str(filename).strip()
+        if not Path(icon_path).exists():
+            self._on_media_runtime_error(f"Soundboard icon not found: {icon_path}")
+            return
+        asset_id = str(selected.get("asset_id") or "")
+        for entry in self._media_library.get("effects", []):
+            if str(entry.get("asset_id") or "") != asset_id:
+                continue
+            entry["icon_path"] = icon_path
+            break
+        self._save_media_profile()
+        self._media_effect_library_signature = ()
+        self._refresh_media_panel()
 
     def _refresh_media_panel(self) -> None:
         if not hasattr(self, "_media_panel"):
@@ -6629,8 +7067,8 @@ class DungeonAppletWidget(QWidget):
         is_dm_controls = self._online_mode in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST)
         music = self._snapshot_media_state().get("music", {})
         effects = self._snapshot_media_state().get("effects", {})
-        self._refresh_media_library_list("music")
-        self._refresh_media_library_list("effects")
+        self._rebuild_music_library_buttons()
+        self._rebuild_soundboard_grid()
         self._media_music_title.setText(str(music.get("title") or "No track selected") or "No track selected")
         state_text = str(music.get("state") or "stopped").strip().title() or "Stopped"
         duration_ms = int(music.get("duration_ms") or 0)
@@ -6645,8 +7083,16 @@ class DungeonAppletWidget(QWidget):
         self._media_effects_summary.setText(
             ", ".join(str(value) for value in effects.get("active_titles", []) if str(value).strip()) or "No active effects"
         )
-        self._media_music_list.setVisible(is_dm_controls)
-        self._media_effects_list.setVisible(is_dm_controls)
+        selected_effect = self._selected_media_library_entry("effects")
+        if is_dm_controls:
+            if selected_effect is not None:
+                selected_title = str(selected_effect.get("title") or "Pad").strip() or "Pad"
+                self._media_effects_selected_label.setText(f"Selected pad: {selected_title}")
+            else:
+                self._media_effects_selected_label.setText("Click a pad to trigger it, then rename, re-icon, or remove it.")
+        else:
+            self._media_effects_selected_label.setText("Pads are DM-controlled. Use the sliders below to tune what you hear.")
+        self._media_music_library_card.setVisible(is_dm_controls)
         self._media_music_dm_controls.setVisible(is_dm_controls)
         self._media_music_transport.setVisible(is_dm_controls)
         self._media_music_mix_row.setVisible(is_dm_controls)
@@ -6654,6 +7100,7 @@ class DungeonAppletWidget(QWidget):
         self._media_effects_mix_row.setVisible(is_dm_controls)
         with QSignalBlocker(self._media_music_loop):
             self._media_music_loop.setChecked(bool(music.get("loop", False)))
+        self._media_music_loop.setText("Looping" if bool(music.get("loop", False)) else "Loop")
         with QSignalBlocker(self._media_music_mix_slider):
             self._media_music_mix_slider.setValue(int(music.get("mix_volume", 100) or 100))
         self._media_music_mix_value.setText(f"{int(music.get('mix_volume', 100) or 100)}%")
@@ -6662,20 +7109,35 @@ class DungeonAppletWidget(QWidget):
         self._media_effects_mix_value.setText(f"{int(effects.get('mix_volume', 100) or 100)}%")
         with QSignalBlocker(self._media_personal_music_slider):
             self._media_personal_music_slider.setValue(int(self._audio_preferences.get("music_volume", 100) or 100))
+        self._media_personal_music_value.setText(f"{int(self._audio_preferences.get('music_volume', 100) or 100)}%")
         with QSignalBlocker(self._media_personal_effects_slider):
             self._media_personal_effects_slider.setValue(int(self._audio_preferences.get("effects_volume", 100) or 100))
+        self._media_personal_effects_value.setText(f"{int(self._audio_preferences.get('effects_volume', 100) or 100)}%")
+        mute_music = bool(self._audio_preferences.get("mute_music", False))
         with QSignalBlocker(self._media_personal_music_mute):
-            self._media_personal_music_mute.setChecked(bool(self._audio_preferences.get("mute_music", False)))
+            self._media_personal_music_mute.setChecked(mute_music)
+        self._media_personal_music_mute.setText("Music Muted" if mute_music else "Mute Music")
+        mute_effects = bool(self._audio_preferences.get("mute_effects", False))
         with QSignalBlocker(self._media_personal_effects_mute):
-            self._media_personal_effects_mute.setChecked(bool(self._audio_preferences.get("mute_effects", False)))
+            self._media_personal_effects_mute.setChecked(mute_effects)
+        self._media_personal_effects_mute.setText("Effects Muted" if mute_effects else "Mute Effects")
         selected_music = self._selected_media_library_entry("music")
-        selected_effect = self._selected_media_library_entry("effects")
         self._media_music_remove_btn.setEnabled(bool(selected_music))
         self._media_music_rename_btn.setEnabled(bool(selected_music))
         self._media_music_play_btn.setEnabled(bool(selected_music))
+        self._media_music_pause_btn.setEnabled(bool(music.get("asset_id")))
+        self._media_music_stop_btn.setEnabled(bool(music.get("asset_id")))
         self._media_effects_remove_btn.setEnabled(bool(selected_effect))
+        self._media_effects_icon_btn.setEnabled(bool(selected_effect))
         self._media_effects_rename_btn.setEnabled(bool(selected_effect))
-        self._media_effects_play_btn.setEnabled(bool(selected_effect))
+        self._media_effects_stop_btn.setEnabled(bool(effects.get("active_titles")))
+        for asset_id, button in self._media_music_buttons.items():
+            with QSignalBlocker(button):
+                button.setChecked(asset_id == str(self._media_selected_music_asset_id or ""))
+        for asset_id, button in self._media_effect_buttons.items():
+            button.setEnabled(is_dm_controls)
+            with QSignalBlocker(button):
+                button.setChecked(asset_id == str(self._media_selected_effect_asset_id or ""))
         status_parts: list[str] = []
         if not self._media_engine.available:
             status_parts.append(self._media_engine.availability_error)
@@ -6721,13 +7183,21 @@ class DungeonAppletWidget(QWidget):
                     "asset_id": uuid.uuid4().hex,
                     "title": Path(filename).stem,
                     "path": str(filename),
+                    "icon_path": "",
                 }
             )
             added += 1
         if added <= 0:
             self._refresh_media_panel()
             return
-        self._save_local_profile()
+        newest_entry = self._media_library.get(kind, [])[-1]
+        if kind == "music":
+            self._media_selected_music_asset_id = str(newest_entry.get("asset_id") or "")
+            self._media_music_library_signature = ()
+        else:
+            self._media_selected_effect_asset_id = str(newest_entry.get("asset_id") or "")
+            self._media_effect_library_signature = ()
+        self._save_media_profile()
         self._refresh_host_media_server_assets()
         self._refresh_media_panel()
 
@@ -6743,11 +7213,17 @@ class DungeonAppletWidget(QWidget):
             for entry in self._media_library.get(kind, [])
             if str(entry.get("asset_id") or "") != asset_id
         ]
+        if kind == "music":
+            self._media_selected_music_asset_id = ""
+            self._media_music_library_signature = ()
+        else:
+            self._media_selected_effect_asset_id = ""
+            self._media_effect_library_signature = ()
         if kind == "music" and str(self._media_state["music"].get("asset_id") or "") == asset_id:
             self._apply_media_event("music_stop", {"asset_id": asset_id}, broadcast=True)
             self._media_state["music"]["asset_id"] = ""
             self._media_state["music"]["title"] = ""
-        self._save_local_profile()
+        self._save_media_profile()
         self._refresh_host_media_server_assets()
         self._refresh_media_panel()
 
@@ -6768,25 +7244,21 @@ class DungeonAppletWidget(QWidget):
                 continue
             entry["title"] = clean_title
             break
+        if kind == "music":
+            self._media_music_library_signature = ()
+        else:
+            self._media_effect_library_signature = ()
         if kind == "music" and str(self._media_state["music"].get("asset_id") or "") == asset_id:
             self._media_state["music"]["title"] = clean_title
-        self._save_local_profile()
+        self._save_media_profile()
         self._refresh_host_media_server_assets()
         self._refresh_media_panel()
 
     def _on_media_music_selection_changed(self) -> None:
-        selected = self._selected_media_library_entry("music")
-        if selected is None:
-            self._refresh_media_panel()
-            return
-        self._cue_music_entry(selected, broadcast=self._online_mode == ONLINE_MODE_DM_HOST)
+        self._refresh_media_panel()
 
     def _on_media_effect_selection_changed(self) -> None:
-        selected = self._selected_media_library_entry("effects")
-        if selected is None:
-            self._refresh_media_panel()
-            return
-        self._warm_effect_entry(selected, broadcast=self._online_mode == ONLINE_MODE_DM_HOST)
+        self._refresh_media_panel()
 
     def _refresh_host_media_server_assets(self) -> None:
         server = self._media_host_server
@@ -6838,6 +7310,8 @@ class DungeonAppletWidget(QWidget):
 
     def _reset_media_runtime_state(self) -> None:
         self._media_engine.stop_all()
+        self._media_selected_music_asset_id = ""
+        self._media_selected_effect_asset_id = ""
         self._media_state = {
             "server": {"active": False, "port": 0, "token": ""},
             "music": {
@@ -6855,6 +7329,8 @@ class DungeonAppletWidget(QWidget):
                 "active_titles": [],
             },
         }
+        self._media_music_library_signature = ()
+        self._media_effect_library_signature = ()
         self._media_status_line = ""
         self._apply_audio_preferences_to_engine()
         self._refresh_media_panel()
@@ -7196,7 +7672,7 @@ class DungeonAppletWidget(QWidget):
         )
 
     def _save_audio_preferences(self) -> None:
-        self._save_local_profile()
+        self._save_media_profile()
         self._apply_audio_preferences_to_engine()
         self._refresh_media_panel()
 
@@ -7255,9 +7731,26 @@ class DungeonAppletWidget(QWidget):
     def _on_media_effect_cache_failed(self, _cache_key: str, message: str) -> None:
         self._on_media_runtime_error(message)
 
+    def _resolved_music_snapshot_position_ms(self, music: dict) -> int:
+        target_position = max(0, int(music.get("position_ms") or 0))
+        if str(music.get("state") or "") != "playing":
+            return target_position
+        anchor_raw = str(music.get("anchor_utc") or "").strip()
+        if not anchor_raw:
+            return target_position
+        try:
+            anchor_dt = datetime.fromisoformat(anchor_raw)
+            if anchor_dt.tzinfo is None:
+                anchor_dt = anchor_dt.replace(tzinfo=timezone.utc)
+            elapsed_ms = max(0, int((datetime.now(timezone.utc) - anchor_dt).total_seconds() * 1000))
+            return max(0, target_position + elapsed_ms)
+        except Exception:
+            return target_position
+
     def _apply_snapshot_media_state(self, media_state: dict) -> None:
         if not isinstance(media_state, dict):
             return
+        previous_music = dict(self._media_state.get("music", {}))
         server = self._media_server_payload_from_input(media_state)
         self._media_state["server"] = server
         music = media_state.get("music")
@@ -7290,43 +7783,59 @@ class DungeonAppletWidget(QWidget):
         asset_id = str(self._media_state["music"].get("asset_id") or "").strip()
         if asset_id:
             title = str(self._media_state["music"].get("title") or asset_id).strip() or asset_id
-            self._apply_media_event(
-                "music_warm",
-                {
-                    "asset_id": asset_id,
-                    "title": title,
-                    "server": server,
-                },
-                broadcast=False,
-            )
             state = str(self._media_state["music"].get("state") or "stopped")
-            position_ms = int(self._media_state["music"].get("position_ms") or 0)
+            loop = bool(self._media_state["music"].get("loop", False))
+            position_ms = self._resolved_music_snapshot_position_ms(self._media_state["music"])
+            previous_asset_id = str(previous_music.get("asset_id") or "").strip()
+            current_state = str(self._media_engine.current_music_state or "stopped")
+            current_position = int(self._media_engine.current_music_position_ms)
+            asset_changed = asset_id != previous_asset_id
+            position_drift = abs(current_position - position_ms)
+            if asset_changed:
+                self._apply_media_event(
+                    "music_warm",
+                    {
+                        "asset_id": asset_id,
+                        "title": title,
+                        "server": server,
+                    },
+                    broadcast=False,
+                )
             if state == "playing":
-                self._apply_media_event(
-                    "music_play",
-                    {
-                        "asset_id": asset_id,
-                        "title": title,
-                        "position_ms": position_ms,
-                        "loop": bool(self._media_state["music"].get("loop", False)),
-                        "server": server,
-                    },
-                    broadcast=False,
-                )
+                if asset_changed or current_state != "playing" or position_drift > 2500:
+                    self._apply_media_event(
+                        "music_play",
+                        {
+                            "asset_id": asset_id,
+                            "title": title,
+                            "position_ms": position_ms,
+                            "loop": loop,
+                            "server": server,
+                        },
+                        broadcast=False,
+                    )
             elif state == "paused":
-                self._apply_media_event(
-                    "music_play",
-                    {
-                        "asset_id": asset_id,
-                        "title": title,
-                        "position_ms": position_ms,
-                        "loop": bool(self._media_state["music"].get("loop", False)),
-                        "server": server,
-                    },
-                    broadcast=False,
-                )
-                self._media_engine.pause_music()
-                self._media_state["music"]["state"] = "paused"
+                if asset_changed or current_state != "paused" or position_drift > 500:
+                    source = self._media_source_for_asset(asset_id=asset_id, kind="music", server=server)
+                    if source:
+                        self._media_engine.play_music(source, position_ms=position_ms, paused=True, loop=loop)
+                    self._media_state["music"].update(
+                        {
+                            "asset_id": asset_id,
+                            "title": title,
+                            "state": "paused",
+                            "position_ms": position_ms,
+                            "loop": loop,
+                            "anchor_utc": str(self._media_state["music"].get("anchor_utc") or ""),
+                        }
+                    )
+            else:
+                if current_state != "stopped":
+                    self._media_engine.stop_music()
+        elif self._media_engine.current_music_state != "stopped":
+            self._media_engine.stop_music()
+            self._media_state["music"]["state"] = "stopped"
+            self._media_state["music"]["position_ms"] = 0
         self._refresh_media_panel()
 
     def _on_client_media_event_received(self, message: dict) -> None:
@@ -16217,6 +16726,9 @@ class DungeonAppletWidget(QWidget):
     def _local_profile_path(self) -> Path:
         return dnd_saves_dir() / "settings" / LOCAL_DUNGEON_PROFILE_FILENAME
 
+    def _media_profile_path(self) -> Path:
+        return media_settings_path()
+
     def _load_or_create_local_profile(self) -> dict:
         default_profile = {
             "version": 1,
@@ -16229,8 +16741,6 @@ class DungeonAppletWidget(QWidget):
             "known_players": {},
             "last_player_name": "",
             "autosave_enabled": False,
-            "media_library": _default_media_library(),
-            "audio_preferences": _default_audio_preferences(),
         }
         path = self._local_profile_path()
         try:
@@ -16245,9 +16755,34 @@ class DungeonAppletWidget(QWidget):
                         merged["character_ids"] = {}
                     if not isinstance(merged.get("known_players"), dict):
                         merged["known_players"] = {}
-                    merged["media_library"] = _sanitize_media_library(merged.get("media_library"))
-                    merged["audio_preferences"] = _sanitize_audio_preferences(merged.get("audio_preferences"))
                     return merged
+        except Exception:
+            pass
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(default_profile, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        return default_profile
+
+    def _load_or_create_media_profile(self) -> dict:
+        default_profile = {
+            "version": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "media_library": _default_media_library(),
+            "audio_preferences": _default_audio_preferences(),
+        }
+        path = self._media_profile_path()
+        try:
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    return {
+                        "version": int(payload.get("version") or 1),
+                        "created_at": str(payload.get("created_at") or default_profile["created_at"]),
+                        "media_library": _sanitize_media_library(payload.get("media_library")),
+                        "audio_preferences": _sanitize_audio_preferences(payload.get("audio_preferences")),
+                    }
         except Exception:
             pass
         try:
@@ -16268,8 +16803,19 @@ class DungeonAppletWidget(QWidget):
                 getattr(self, "_local_player_name", "") or payload.get("last_player_name") or ""
             )
             payload["autosave_enabled"] = bool(getattr(self, "_autosave_enabled", False))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            return
+
+    def _save_media_profile(self) -> None:
+        path = self._media_profile_path()
+        try:
+            payload = dict(getattr(self, "_media_profile", {}) or {})
+            payload["version"] = int(payload.get("version") or 1)
             payload["media_library"] = _sanitize_media_library(getattr(self, "_media_library", {}))
             payload["audio_preferences"] = _sanitize_audio_preferences(getattr(self, "_audio_preferences", {}))
+            self._media_profile = dict(payload)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:

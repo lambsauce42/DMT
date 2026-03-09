@@ -173,6 +173,10 @@ def online_media_cache_dir(session_id: str) -> Path:
     return online_session_dir(session_id) / "cache" / "media"
 
 
+def media_settings_path() -> Path:
+    return dnd_saves_dir() / "settings" / "media_profile.json"
+
+
 def online_loot_item_cache_root() -> Path:
     return dnd_saves_dir() / "cache" / "online_loot_items"
 
