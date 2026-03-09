@@ -73,6 +73,7 @@ from player_sheets import (
 from session_creator import SessionCreatorWidget, SessionManager, _navigation_world_data
 from save_paths import (
     dungeon_collections_dir,
+    clear_all_disposable_caches,
     clear_all_online_runtime_caches,
     dnd_saves_dir,
     default_dnd_save_dir,
@@ -2067,6 +2068,7 @@ class MainLauncherWindow(_WorkspaceTabWindow):
             return
         self._workspace_controller.unregister_window(self)
         clear_all_online_runtime_caches()
+        clear_all_disposable_caches()
         super().closeEvent(event)
 
 
@@ -2704,6 +2706,7 @@ def main() -> int:
     _append_app_crash_log("app_main_enter")
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     clear_all_online_runtime_caches()
+    clear_all_disposable_caches()
     try:
         refresh_character_sheet_index_cache()
     except Exception:

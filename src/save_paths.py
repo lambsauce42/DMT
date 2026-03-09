@@ -177,6 +177,26 @@ def runtime_cache_root() -> Path:
     return dnd_saves_dir() / "cache"
 
 
+def character_cache_dir() -> Path:
+    return runtime_cache_root() / "characters"
+
+
+def character_sheet_index_cache_path() -> Path:
+    return character_cache_dir() / "character_sheets.json"
+
+
+def character_linked_item_cache_root() -> Path:
+    return character_cache_dir() / "linked_items"
+
+
+def item_icon_cache_dir() -> Path:
+    return runtime_cache_root() / "item_icons"
+
+
+def session_attachment_cache_root() -> Path:
+    return runtime_cache_root() / "session_attachments"
+
+
 def online_loot_item_cache_dir(session_id: str) -> Path:
     session_key = _safe_component(str(session_id or ""), "local")
     return online_loot_item_cache_root() / session_key
@@ -268,3 +288,44 @@ def clear_runtime_cache_root() -> None:
 def clear_all_online_runtime_caches() -> None:
     clear_all_online_icon_caches()
     clear_all_online_loot_item_caches()
+
+
+def clear_character_metadata_caches() -> None:
+    index_path = character_sheet_index_cache_path()
+    linked_items_root = character_linked_item_cache_root()
+    cache_root = character_cache_dir()
+    try:
+        if index_path.exists():
+            index_path.unlink()
+        if linked_items_root.exists():
+            shutil.rmtree(linked_items_root, ignore_errors=True)
+        if cache_root.exists() and not any(cache_root.iterdir()):
+            cache_root.rmdir()
+    except Exception:
+        return
+
+
+def clear_item_icon_cache() -> None:
+    cache_dir = item_icon_cache_dir()
+    if not cache_dir.exists():
+        return
+    try:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    except Exception:
+        return
+
+
+def clear_session_attachment_caches() -> None:
+    cache_root = session_attachment_cache_root()
+    if not cache_root.exists():
+        return
+    try:
+        shutil.rmtree(cache_root, ignore_errors=True)
+    except Exception:
+        return
+
+
+def clear_all_disposable_caches() -> None:
+    clear_character_metadata_caches()
+    clear_item_icon_cache()
+    clear_session_attachment_caches()

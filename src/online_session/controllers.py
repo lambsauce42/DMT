@@ -53,6 +53,17 @@ class HostSessionController(QObject):
     def send_snapshot_to(self, player_id: str, snapshot: dict) -> None:
         self.server.send_to_player(player_id, {"type": "snapshot", "state": snapshot, "ts": _utc_timestamp()})
 
+    def broadcast_player_state_patch(self, *, player_id: str, dungeon_id: str, state: dict) -> None:
+        self.server.broadcast(
+            {
+                "type": "player_state_patch",
+                "player_id": str(player_id or ""),
+                "dungeon_id": str(dungeon_id or ""),
+                "state": dict(state) if isinstance(state, dict) else {},
+                "ts": _utc_timestamp(),
+            }
+        )
+
     def send_command_result(
         self,
         player_id: str,
@@ -187,6 +198,7 @@ class ClientSessionController(QObject):
     chat_received = Signal(str, str, bool)
     snapshot_received = Signal(dict)
     command_result = Signal(dict)
+    player_state_patch_received = Signal(dict)
     icon_asset_received = Signal(str, str, str)
     ping_received = Signal(float, float, str)
     reconnect_state_changed = Signal(dict)
@@ -402,6 +414,9 @@ class ClientSessionController(QObject):
             return
         if msg_type == "command_result":
             self.command_result.emit(message)
+            return
+        if msg_type == "player_state_patch":
+            self.player_state_patch_received.emit(dict(message))
             return
         if msg_type == "icon_asset":
             entity_id = str(message.get("entity_id", ""))

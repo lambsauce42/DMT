@@ -154,6 +154,59 @@ class TestSavePaths(unittest.TestCase):
             self.assertTrue(logs_cache.exists())
             self.assertTrue(unrelated_cache.exists())
 
+    @patch("save_paths.default_dnd_save_dir")
+    def test_clear_character_metadata_caches_preserves_cached_sheet_pdfs(self, mock_base):
+        with tempfile.TemporaryDirectory() as td:
+            mock_base.return_value = td
+            character_cache = Path(td) / "cache" / "characters"
+            index_path = character_cache / "character_sheets.json"
+            linked_items = character_cache / "linked_items" / "hero"
+            cached_pdf = character_cache / "hero.pdf"
+            linked_items.mkdir(parents=True, exist_ok=True)
+            index_path.write_text("[]", encoding="utf-8")
+            (linked_items / "item.dmtitem").write_text("{}", encoding="utf-8")
+            cached_pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+            save_paths.clear_character_metadata_caches()
+
+            self.assertFalse(index_path.exists())
+            self.assertFalse((character_cache / "linked_items").exists())
+            self.assertTrue(cached_pdf.exists())
+
+    @patch("save_paths.default_dnd_save_dir")
+    def test_clear_all_disposable_caches_removes_safe_caches_but_keeps_logs_and_character_pdfs(self, mock_base):
+        with tempfile.TemporaryDirectory() as td:
+            mock_base.return_value = td
+            root_cache = Path(td) / "cache"
+            character_cache = root_cache / "characters"
+            item_icons = root_cache / "item_icons"
+            attachments = root_cache / "session_attachments" / "session-a"
+            logs = root_cache / "logs"
+            cached_pdf = character_cache / "hero.pdf"
+            index_path = character_cache / "character_sheets.json"
+            linked_items = character_cache / "linked_items" / "hero"
+
+            linked_items.mkdir(parents=True, exist_ok=True)
+            item_icons.mkdir(parents=True, exist_ok=True)
+            attachments.mkdir(parents=True, exist_ok=True)
+            logs.mkdir(parents=True, exist_ok=True)
+
+            cached_pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            index_path.write_text("[]", encoding="utf-8")
+            (linked_items / "item.dmtitem").write_text("{}", encoding="utf-8")
+            (item_icons / "cached.png").write_bytes(_PNG_1X1_BYTES)
+            (attachments / "file.bin").write_bytes(b"payload")
+            (logs / "dmt_app_crash.log").write_text("log", encoding="utf-8")
+
+            save_paths.clear_all_disposable_caches()
+
+            self.assertTrue(cached_pdf.exists())
+            self.assertFalse(index_path.exists())
+            self.assertFalse((character_cache / "linked_items").exists())
+            self.assertFalse(item_icons.exists())
+            self.assertFalse((root_cache / "session_attachments").exists())
+            self.assertTrue((logs / "dmt_app_crash.log").exists())
+
     def test_collection_icon_assets_dir_is_related_to_collection_file(self):
         path = Path("My Collection.json")
         assets_dir = save_paths.collection_icon_assets_dir(path)

@@ -133,12 +133,40 @@ function Wait-ForMainWindow {
 }
 
 $launcherLogDir = Join-Path $RepoPath "debug\launcher_logs"
+$onlineSyncLogDir = Join-Path $RepoPath "debug\online_sync_logs"
+$runId = (Get-Date).ToString("yyyyMMdd_HHmmss")
 
-$defaultProcess = Start-DmtInstance -Label "Default" -LogDir $launcherLogDir
+$defaultProcess = Start-DmtInstance `
+    -Label "Default" `
+    -LogDir $launcherLogDir `
+    -ExtraEnv @{
+        DMT_ONLINE_DEBUG_LOG = "1"
+        DMT_ONLINE_DEBUG_LABEL = "Default"
+        DMT_ONLINE_DEBUG_RUN = $runId
+        DMT_ONLINE_DEBUG_LOG_DIR = $onlineSyncLogDir
+    }
 Start-Sleep -Milliseconds 450
-$debugTopProcess = Start-DmtInstance -Label "DebugTopLeft" -Profile "DEBUG1" -LogDir $launcherLogDir
+$debugTopProcess = Start-DmtInstance `
+    -Label "DebugTopLeft" `
+    -Profile "DEBUG1" `
+    -LogDir $launcherLogDir `
+    -ExtraEnv @{
+        DMT_ONLINE_DEBUG_LOG = "1"
+        DMT_ONLINE_DEBUG_LABEL = "DebugTopLeft"
+        DMT_ONLINE_DEBUG_RUN = $runId
+        DMT_ONLINE_DEBUG_LOG_DIR = $onlineSyncLogDir
+    }
 Start-Sleep -Milliseconds 450
-$debugBottomProcess = Start-DmtInstance -Label "DebugBottomLeft" -Profile "DEBUG2" -LogDir $launcherLogDir
+$debugBottomProcess = Start-DmtInstance `
+    -Label "DebugBottomLeft" `
+    -Profile "DEBUG2" `
+    -LogDir $launcherLogDir `
+    -ExtraEnv @{
+        DMT_ONLINE_DEBUG_LOG = "1"
+        DMT_ONLINE_DEBUG_LABEL = "DebugBottomLeft"
+        DMT_ONLINE_DEBUG_RUN = $runId
+        DMT_ONLINE_DEBUG_LOG_DIR = $onlineSyncLogDir
+    }
 
 $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $halfWidth = [int][Math]::Floor($workArea.Width / 2)
@@ -181,3 +209,5 @@ foreach ($layout in $layouts) {
 }
 
 Write-Host "Done. Windows arranged: right=Default, left-top=DEBUG1, left-bottom=DEBUG2."
+Write-Host "Online sync logs: $onlineSyncLogDir"
+Write-Host "Run id: $runId"

@@ -104,6 +104,7 @@ from dungeon_constants import (
     ROLE_LAYER,
     ROLE_KIND,
     ROLE_LABEL,
+    ROLE_LOCKED,
     ROLE_ICON,
     ROLE_OWNER_PLAYER_ID,
     ROLE_ENTITY_ID,
@@ -241,6 +242,12 @@ def _inventory_payload_item_documents(payload: dict | None) -> dict[str, dict]:
         document_copy = json.loads(json.dumps(raw_document))
         documents[item_id] = document_copy
     return documents
+
+
+def _safe_debug_filename_component(value: object, fallback: str = "instance") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or fallback
 
 
 def _looks_generated_item_label(raw: object) -> bool:
@@ -4276,6 +4283,8 @@ class DungeonAppletWidget(QWidget):
         self._reconnect_status_anim_timer.timeout.connect(self._on_reconnect_status_animation_tick)
         self._debug_instance_id: str = uuid.uuid4().hex[:8]
         self._debug_profile: str = selected_debug_save_profile() or "DEFAULT"
+        self._debug_label: str = str(os.environ.get("DMT_ONLINE_DEBUG_LABEL") or "").strip()
+        self._debug_run_id: str = str(os.environ.get("DMT_ONLINE_DEBUG_RUN") or "").strip()
         self._debug_log_enabled: bool = str(
             os.environ.get("DMT_ONLINE_DEBUG_LOG", "0")
         ).strip().lower() not in {"0", "false", "no", "off"}
@@ -4325,6 +4334,7 @@ class DungeonAppletWidget(QWidget):
         self._loot_pool_panel_anim: QPropertyAnimation | None = None
         self._forwarding_initiative_key = False
         self._initiative_inactive_preview_visible = False
+        self._player_initiative_overlay_collapsed = False
         self._initiative_last_target: tuple[str, str] | None = None
         self._initiative_draft_values: dict[str, str] = {}
         self._initiative_value_warning: str = ""
@@ -4686,6 +4696,7 @@ class DungeonAppletWidget(QWidget):
             "player_entries": {},
             "entity_entries": {},
         }
+        self._player_initiative_overlay_collapsed = False
         self._initiative_draft_values.clear()
         self._refresh_loot_pool_list()
         if self._client_controller is not None:
@@ -4777,6 +4788,7 @@ class DungeonAppletWidget(QWidget):
             "player_entries": {},
             "entity_entries": {},
         }
+        self._player_initiative_overlay_collapsed = False
         self._initiative_draft_values.clear()
         self._refresh_loot_pool_list()
         if self._host_controller is not None:
@@ -4818,6 +4830,9 @@ class DungeonAppletWidget(QWidget):
             self._client_controller.chat_received.connect(self._append_chat_message)
             self._client_controller.snapshot_received.connect(self._on_client_snapshot_received)
             self._client_controller.command_result.connect(self._on_client_command_result)
+            self._client_controller.player_state_patch_received.connect(
+                self._on_client_player_state_patch_received
+            )
             self._client_controller.icon_asset_received.connect(self._on_client_icon_asset)
             self._client_controller.ping_received.connect(self._on_network_ping_received)
             self._client_controller.reconnect_state_changed.connect(self._on_client_reconnect_state_changed)
@@ -4892,7 +4907,9 @@ class DungeonAppletWidget(QWidget):
             self._initiative_overlay.hide()
             self._initiative_reopen_btn.hide()
         else:
-            self._initiative_reopen_btn.setVisible(mode == ONLINE_MODE_DM_HOST)
+            self._update_initiative_reopen_button_visibility()
+        if mode != ONLINE_MODE_PLAYER:
+            self._player_initiative_overlay_collapsed = False
         if not is_online:
             self._set_session_panels_collapsed(True, animate=False)
             self._position_session_overlay()
@@ -7187,6 +7204,21 @@ class DungeonAppletWidget(QWidget):
             return True
         return False
 
+    def _initiative_overlay_collapsed_for_ui(self) -> bool:
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            return bool(self._player_initiative_overlay_collapsed)
+        return bool(self._initiative_state.get("collapsed", False))
+
+    def _update_initiative_reopen_button_visibility(self) -> None:
+        if self._online_mode == ONLINE_MODE_DM_HOST:
+            self._initiative_reopen_btn.setVisible(True)
+            return
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            visible = bool(self._initiative_state.get("active", False)) and self._player_has_visible_initiative_rows()
+            self._initiative_reopen_btn.setVisible(visible)
+            return
+        self._initiative_reopen_btn.hide()
+
     def _on_initiative_value_changed(self, kind: str, key: str, raw_value: str) -> None:
         cache_key = self._initiative_cache_key(kind, key)
         self._initiative_draft_values.pop(cache_key, None)
@@ -7254,6 +7286,8 @@ class DungeonAppletWidget(QWidget):
             return
         active = bool(self._initiative_state.get("active", False))
         inactive_preview = bool(self._initiative_inactive_preview_visible) and not active
+        effective_collapsed = self._initiative_overlay_collapsed_for_ui()
+        self._update_initiative_reopen_button_visibility()
         focus_kind = ""
         focus_key = ""
         focus_cursor: int | None = None
@@ -7460,7 +7494,7 @@ class DungeonAppletWidget(QWidget):
         self._debug_log(
             "initiative_render",
             active=bool(self._initiative_state.get("active", False)),
-            collapsed=bool(self._initiative_state.get("collapsed", False)),
+            collapsed=bool(effective_collapsed),
             player_rows=int(displayed_player_rows),
             entity_rows=int(entity_count),
             all_submitted=bool(all_submitted),
@@ -7535,9 +7569,13 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode == ONLINE_MODE_PLAYER and not self._player_has_visible_initiative_rows():
             self._debug_log("initiative_overlay_show_skipped_no_player_rows")
             self._initiative_overlay.hide()
+            self._update_initiative_reopen_button_visibility()
             return
-        if bool(self._initiative_state.get("active", False)):
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            self._player_initiative_overlay_collapsed = False
+        elif bool(self._initiative_state.get("active", False)):
             self._initiative_state["collapsed"] = False
+        self._update_initiative_reopen_button_visibility()
         if self._initiative_overlay.isVisible():
             # Snapshot refreshes can call this repeatedly; keep it centered without re-running
             # open animation to avoid side-jumps/flicker.
@@ -7572,13 +7610,13 @@ class DungeonAppletWidget(QWidget):
 
     def _collapse_initiative_overlay(self, *, force: bool = False) -> None:
         if self._online_mode == ONLINE_MODE_PLAYER:
-            self._initiative_state["collapsed"] = True
+            self._player_initiative_overlay_collapsed = True
             self._initiative_inactive_preview_visible = False
             existing = getattr(self, "_initiative_panel_anim", None)
             if isinstance(existing, QPropertyAnimation):
                 existing.stop()
             self._initiative_overlay.hide()
-            self._initiative_reopen_btn.hide()
+            self._update_initiative_reopen_button_visibility()
             self._position_initiative_overlay()
             return
         if self._online_mode != ONLINE_MODE_DM_HOST:
@@ -7920,6 +7958,12 @@ class DungeonAppletWidget(QWidget):
         )
         self._pending_player_state_update = pending
         self._pending_player_state_update_request_id = str(request_id or "")
+        self._debug_log(
+            "player_state_update_send",
+            request_id=str(request_id or ""),
+            dungeon_id=str(pending.get("dungeon_id") or ""),
+            **self._debug_state_summary(pending.get("state")),
+        )
         return request_id is not None
 
     def _flush_pending_player_state_update(self) -> bool:
@@ -7936,6 +7980,12 @@ class DungeonAppletWidget(QWidget):
         if request_id is None:
             return False
         self._pending_player_state_update_request_id = request_id
+        self._debug_log(
+            "player_state_update_flush",
+            request_id=str(request_id or ""),
+            dungeon_id=str(pending.get("dungeon_id") or ""),
+            **self._debug_state_summary(pending.get("state")),
+        )
         return True
 
     def _queue_loot_claim_finalize(self, claim_id: str, *, applied: bool, error: str = "") -> None:
@@ -8797,7 +8847,12 @@ class DungeonAppletWidget(QWidget):
             "entity_entries": {},
         }
 
-    def _build_online_snapshot(self, for_player_id: str | None = None) -> dict:
+    def _build_online_snapshot(
+        self,
+        for_player_id: str | None = None,
+        *,
+        include_linked_character_payload: bool = True,
+    ) -> dict:
         self._save_active_dungeon_state()
         self._initiative_state.setdefault("active", False)
         players_dungeon = self._find_dungeon(self._players_dungeon_id or "")
@@ -8818,6 +8873,7 @@ class DungeonAppletWidget(QWidget):
             players_scene = self._redact_linked_character_payload_for_player(
                 players_scene,
                 str(for_player_id),
+                keep_owned_payload=include_linked_character_payload,
             )
             initiative_state = self._player_visible_initiative_state(str(for_player_id))
             dungeons_payload = [
@@ -8850,9 +8906,16 @@ class DungeonAppletWidget(QWidget):
             "players": self._connected_players,
             "loot_pool": list(self._session_loot_pool),
             "initiative_state": initiative_state,
+            "linked_character_payload_included": bool(include_linked_character_payload),
         }
 
-    def _redact_linked_character_payload_for_player(self, state: dict, player_id: str) -> dict:
+    def _redact_linked_character_payload_for_player(
+        self,
+        state: dict,
+        player_id: str,
+        *,
+        keep_owned_payload: bool = True,
+    ) -> dict:
         if not isinstance(state, dict):
             return self._blank_dungeon_state()
         items = state.get("items")
@@ -8866,13 +8929,17 @@ class DungeonAppletWidget(QWidget):
                 continue
             entity_owner = str(item_data.get("owner_player_id") or "").strip()
             if owner_player_id and entity_owner == owner_player_id:
-                filtered_inventory, filtered_archive_b64, filtered_content_hash = self._takeover_filtered_inventory_for_player(
-                    item_data,
-                    player_id=owner_player_id,
-                )
-                item_data["linked_inventory"] = filtered_inventory
-                item_data["linked_sheet_archive_b64"] = filtered_archive_b64
-                item_data["linked_content_hash"] = filtered_content_hash
+                if keep_owned_payload:
+                    filtered_inventory, filtered_archive_b64, filtered_content_hash = self._takeover_filtered_inventory_for_player(
+                        item_data,
+                        player_id=owner_player_id,
+                    )
+                    item_data["linked_inventory"] = filtered_inventory
+                    item_data["linked_sheet_archive_b64"] = filtered_archive_b64
+                    item_data["linked_content_hash"] = filtered_content_hash
+                else:
+                    item_data["linked_sheet_archive_b64"] = ""
+                    item_data["linked_inventory"] = normalize_inventory_payload({})
                 continue
             # Never expose other players' linked character package payloads.
             item_data["linked_sheet_id"] = ""
@@ -8993,7 +9060,17 @@ class DungeonAppletWidget(QWidget):
         players = getattr(self._host_controller, "players", {})
         if callable(send_snapshot_to) and isinstance(players, dict) and players:
             for player_id in list(players.keys()):
-                snapshot = self._build_online_snapshot(for_player_id=str(player_id))
+                snapshot = self._build_online_snapshot(
+                    for_player_id=str(player_id),
+                    include_linked_character_payload=False,
+                )
+                self._debug_log(
+                    "host_snapshot_send",
+                    target_player_id=str(player_id),
+                    transport="direct",
+                    linked_character_payload=False,
+                    **self._debug_snapshot_summary(snapshot),
+                )
                 try:
                     send_snapshot_to(str(player_id), snapshot)
                     self._send_snapshot_icon_assets_to_player(str(player_id), snapshot)
@@ -9009,6 +9086,13 @@ class DungeonAppletWidget(QWidget):
         broadcast_snapshot = getattr(self._host_controller, "broadcast_snapshot", None)
         if not callable(broadcast_snapshot):
             return
+        self._debug_log(
+            "host_snapshot_send",
+            target_player_id="*",
+            transport="broadcast",
+            linked_character_payload=True,
+            **self._debug_snapshot_summary(snapshot),
+        )
         try:
             broadcast_snapshot(snapshot)
         except Exception as exc:
@@ -9019,6 +9103,12 @@ class DungeonAppletWidget(QWidget):
             return
         self._normalize_all_dungeon_icons_for_online()
         snapshot = self._build_online_snapshot(for_player_id=player_id)
+        self._debug_log(
+            "host_snapshot_requested",
+            target_player_id=str(player_id),
+            linked_character_payload=True,
+            **self._debug_snapshot_summary(snapshot),
+        )
         try:
             self._host_controller.send_snapshot_to(player_id, snapshot)
             self._send_snapshot_icon_assets_to_player(player_id, snapshot)
@@ -9188,8 +9278,23 @@ class DungeonAppletWidget(QWidget):
                 request_id=request_id,
                 data={"action": "state_update"},
             )
+            self._debug_log(
+                "host_state_update_received",
+                source_player_id=str(player_id),
+                request_id=str(request_id or ""),
+                changed=bool(changed),
+                dungeon_id=str(target_dungeon.get("id") or ""),
+                **self._debug_state_summary(state),
+            )
             if changed:
-                self._broadcast_snapshot_if_host()
+                self._broadcast_player_state_patch_if_host(
+                    player_id=player_id,
+                    dungeon_id=str(target_dungeon.get("id") or ""),
+                    state=self._extract_player_owned_state(
+                        target_dungeon.get("state"),
+                        player_id=player_id,
+                    ),
+                )
             return
 
         if action == "sync_character_inventory":
@@ -9554,12 +9659,59 @@ class DungeonAppletWidget(QWidget):
         self._apply_online_permissions()
         return True
 
+    def _extract_player_owned_state(self, state: dict, *, player_id: str) -> dict:
+        if not isinstance(state, dict):
+            return {"items": [], "fog": {"path": []}}
+        clean_player = str(player_id or "").strip()
+        if not clean_player:
+            return {"items": [], "fog": {"path": []}}
+        items = state.get("items")
+        if not isinstance(items, list):
+            return {"items": [], "fog": {"path": []}}
+        extracted_items: list[dict] = []
+        for item_data in items:
+            if not isinstance(item_data, dict):
+                continue
+            item_type = str(item_data.get("type") or "").strip()
+            if item_type not in {"entity", "stroke"}:
+                continue
+            if str(item_data.get("owner_player_id") or "").strip() != clean_player:
+                continue
+            extracted_items.append(dict(item_data))
+        return {"items": extracted_items, "fog": {"path": []}}
+
+    def _broadcast_player_state_patch_if_host(
+        self,
+        *,
+        player_id: str,
+        dungeon_id: str,
+        state: dict,
+    ) -> None:
+        if self._online_mode != ONLINE_MODE_DM_HOST:
+            return
+        if self._host_controller is None:
+            return
+        self._last_host_scene_signature = ""
+        self._debug_log(
+            "host_player_state_patch_send",
+            target_player_id=str(player_id or ""),
+            dungeon_id=str(dungeon_id or ""),
+            **self._debug_state_summary(state),
+        )
+        self._host_controller.broadcast_player_state_patch(
+            player_id=str(player_id or ""),
+            dungeon_id=str(dungeon_id or ""),
+            state=dict(state) if isinstance(state, dict) else {"items": [], "fog": {"path": []}},
+        )
+
     def _apply_player_state_update(
         self,
         *,
         player_id: str,
         target_dungeon: dict,
         incoming_state: dict,
+        mark_dirty: bool = True,
+        refresh_navigation: bool = True,
     ) -> bool:
         target_state = target_dungeon.get("state")
         if not isinstance(target_state, dict):
@@ -9644,7 +9796,8 @@ class DungeonAppletWidget(QWidget):
             **target_state,
             "items": updated_items,
         }
-        target_dungeon["dirty"] = True
+        if mark_dirty:
+            target_dungeon["dirty"] = True
         target_dungeon["preview"] = None
         target_dungeon["preview_signature"] = None
         self._suppress_network_sync = True
@@ -9658,8 +9811,9 @@ class DungeonAppletWidget(QWidget):
                     self._load_dungeon_state(target_dungeon["state"])
         finally:
             self._suppress_network_sync = False
-        self._refresh_collection_dirty()
-        self._refresh_dungeon_list(preserve_selection=True)
+        if refresh_navigation:
+            self._refresh_collection_dirty()
+            self._refresh_dungeon_list(preserve_selection=True)
         return True
 
     def _remove_player_from_host_session(self, player_id: str, *, reason: str) -> None:
@@ -9709,6 +9863,18 @@ class DungeonAppletWidget(QWidget):
         archive_supplied = "archive_b64" in payload
         inventory_payload = payload.get("inventory")
         stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+        self._debug_log(
+            "host_character_sync_received",
+            source_player_id=str(player_id),
+            request_id=str(request_id or ""),
+            character_id=character_id,
+            sheet_id=sheet_id,
+            claim_id=claim_id,
+            inventory_bytes=self._debug_json_size_bytes(inventory_payload),
+            archive_supplied=bool(archive_supplied),
+            archive_bytes=len(str(payload.get("archive_b64") or "")),
+            stats_keys=",".join(sorted(str(key) for key in stats_payload.keys())),
+        )
         if not sheet_id or not isinstance(inventory_payload, dict):
             self._host_controller.send_command_result(
                 player_id,
@@ -9903,6 +10069,16 @@ class DungeonAppletWidget(QWidget):
             message=f"Synced inventory to {updated} linked entit(y/ies)",
             request_id=request_id,
             data=dict(claim_result_data) if isinstance(claim_result_data, dict) else None,
+        )
+        self._debug_log(
+            "host_character_sync_applied",
+            source_player_id=str(player_id),
+            request_id=str(request_id or ""),
+            character_id=character_id,
+            sheet_id=sheet_id,
+            updated_entities=int(updated),
+            inventory_bytes=self._debug_json_size_bytes(authoritative_payload),
+            archive_bytes=len(str(archive_b64 or "")),
         )
         if updated > 0:
             self._review_active_unknown_linked_items_for_dm(
@@ -14180,6 +14356,37 @@ class DungeonAppletWidget(QWidget):
                 }
         return self._resolve_local_sheet_sync_payload(clean_character)
 
+    def _on_client_player_state_patch_received(self, payload: dict) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return
+        if not self._player_connection_ready or self._awaiting_player_snapshot:
+            return
+        if not isinstance(payload, dict):
+            return
+        player_id = str(payload.get("player_id") or "").strip()
+        dungeon_id = str(payload.get("dungeon_id") or "").strip()
+        state = payload.get("state")
+        if not player_id or not isinstance(state, dict):
+            return
+        target_dungeon = self._find_dungeon(dungeon_id)
+        if target_dungeon is None and dungeon_id == str(self._players_dungeon_id or ""):
+            target_dungeon = self._current_dungeon()
+        if target_dungeon is None:
+            return
+        self._debug_log(
+            "client_player_state_patch_received",
+            source_player_id=player_id,
+            dungeon_id=dungeon_id,
+            **self._debug_state_summary(state),
+        )
+        self._apply_player_state_update(
+            player_id=player_id,
+            target_dungeon=target_dungeon,
+            incoming_state=state,
+            mark_dirty=False,
+            refresh_navigation=False,
+        )
+
     def _on_client_snapshot_received(self, snapshot: dict) -> None:
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
@@ -14364,7 +14571,8 @@ class DungeonAppletWidget(QWidget):
                     self._append_server_log(f"[WARN] {message}")
 
         def _run_post_snapshot_character_sync() -> None:
-            _sync_owned_sheet_inventories_from_snapshot()
+            if bool(snapshot.get("linked_character_payload_included", True)):
+                _sync_owned_sheet_inventories_from_snapshot()
             self._cleanup_unlinked_managed_character_artifacts()
 
         initiative_state_raw = snapshot.get("initiative_state")
@@ -14394,6 +14602,7 @@ class DungeonAppletWidget(QWidget):
             initiative_collapsed=initiative_collapsed,
             initiative_player_rows=int(player_entry_count),
             initiative_entity_rows=int(entity_entry_count),
+            **self._debug_snapshot_summary(snapshot),
         )
         if was_waiting_for_snapshot:
             self._append_server_log("[INFO] Host snapshot received. Player actions restored.")
@@ -14406,6 +14615,7 @@ class DungeonAppletWidget(QWidget):
             self._set_loot_pool_entries([entry for entry in loot_pool if isinstance(entry, dict)], broadcast=False)
         initiative_state = snapshot.get("initiative_state")
         if isinstance(initiative_state, dict):
+            previous_player_collapsed = bool(self._player_initiative_overlay_collapsed)
             self._initiative_state = {
                 "active": bool(initiative_state.get("active", False)),
                 "collapsed": bool(initiative_state.get("collapsed", False)),
@@ -14416,15 +14626,24 @@ class DungeonAppletWidget(QWidget):
                 if isinstance(initiative_state.get("entity_entries"), dict)
                 else {},
             }
+            if self._online_mode == ONLINE_MODE_PLAYER:
+                self._player_initiative_overlay_collapsed = (
+                    previous_player_collapsed
+                    and bool(self._initiative_state.get("active"))
+                    and self._player_has_visible_initiative_rows()
+                )
             if not self._initiative_state.get("active"):
+                if self._online_mode == ONLINE_MODE_PLAYER:
+                    self._player_initiative_overlay_collapsed = False
                 self._initiative_overlay.hide()
-            elif self._initiative_state.get("collapsed"):
+            elif self._online_mode != ONLINE_MODE_PLAYER and self._initiative_state.get("collapsed"):
                 self._initiative_overlay.hide()
             elif self._online_mode == ONLINE_MODE_PLAYER:
-                if self._player_has_visible_initiative_rows():
+                if self._player_has_visible_initiative_rows() and not self._player_initiative_overlay_collapsed:
                     self._show_initiative_overlay()
                 else:
                     self._initiative_overlay.hide()
+            self._update_initiative_reopen_button_visibility()
             self._render_initiative_overlay()
         collection_name = snapshot.get("collection_name")
         if isinstance(collection_name, str) and collection_name.strip():
@@ -14493,13 +14712,14 @@ class DungeonAppletWidget(QWidget):
                 self._update_loot_pool_badge()
                 if (
                     self._initiative_state.get("active")
-                    and not self._initiative_state.get("collapsed")
+                    and not self._initiative_overlay_collapsed_for_ui()
                     and self._online_mode == ONLINE_MODE_PLAYER
                 ):
                     if self._player_has_visible_initiative_rows():
                         self._show_initiative_overlay()
                     else:
                         self._initiative_overlay.hide()
+                self._update_initiative_reopen_button_visibility()
                 self._render_initiative_overlay()
                 _run_post_snapshot_character_sync()
                 self._flush_pending_player_state_update()
@@ -14517,13 +14737,14 @@ class DungeonAppletWidget(QWidget):
         self._update_loot_pool_badge()
         if (
             self._initiative_state.get("active")
-            and not self._initiative_state.get("collapsed")
+            and not self._initiative_overlay_collapsed_for_ui()
             and self._online_mode == ONLINE_MODE_PLAYER
         ):
             if self._player_has_visible_initiative_rows():
                 self._show_initiative_overlay()
             else:
                 self._initiative_overlay.hide()
+        self._update_initiative_reopen_button_visibility()
         self._render_initiative_overlay()
         _run_post_snapshot_character_sync()
         self._flush_pending_player_state_update()
@@ -14534,6 +14755,13 @@ class DungeonAppletWidget(QWidget):
         action = str(data.get("action") or "").strip() if isinstance(data, dict) else ""
         if not action and request_id:
             action = self._pending_online_command_action_for_request(request_id)
+        self._debug_log(
+            "client_command_result",
+            request_id=request_id,
+            action=action,
+            ok=bool(result.get("ok")),
+            message=str(result.get("message") or ""),
+        )
         conflict = data.get("conflict") if isinstance(data, dict) else None
         conflict_key = str(conflict.get("conflict_key") or "").strip() if isinstance(conflict, dict) else ""
         correlated_claim_id = ""
@@ -14993,10 +15221,84 @@ class DungeonAppletWidget(QWidget):
         QTimer.singleShot(0, _apply)
 
     def _resolve_debug_log_path(self) -> Path:
+        configured_dir = str(os.environ.get("DMT_ONLINE_DEBUG_LOG_DIR") or "").strip()
+        log_label = _safe_debug_filename_component(
+            getattr(self, "_debug_label", "") or getattr(self, "_debug_profile", "") or "DEFAULT",
+            "DEFAULT",
+        )
+        run_id = _safe_debug_filename_component(
+            getattr(self, "_debug_run_id", ""),
+            "",
+        ).strip()
+        stem = Path(ONLINE_DEBUG_LOG_FILENAME).stem
+        suffix = Path(ONLINE_DEBUG_LOG_FILENAME).suffix or ".log"
+        filename_parts = [stem]
+        if run_id:
+            filename_parts.append(run_id)
+        if log_label:
+            filename_parts.append(log_label)
+        filename = "_".join(part for part in filename_parts if part) + suffix
+        if configured_dir:
+            return Path(configured_dir) / filename
         try:
-            return dnd_saves_dir() / "cache" / "logs" / ONLINE_DEBUG_LOG_FILENAME
+            return dnd_saves_dir() / "cache" / "logs" / filename
         except Exception:
-            return Path(default_dnd_save_dir()) / "cache" / "logs" / ONLINE_DEBUG_LOG_FILENAME
+            return Path(default_dnd_save_dir()) / "cache" / "logs" / filename
+
+    def _debug_json_size_bytes(self, payload: object) -> int:
+        try:
+            return len(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+        except Exception:
+            return -1
+
+    def _debug_state_summary(self, state: object) -> dict[str, object]:
+        if not isinstance(state, dict):
+            return {
+                "state_items": 0,
+                "state_entities": 0,
+                "state_strokes": 0,
+                "state_linked_entities": 0,
+                "state_bytes": self._debug_json_size_bytes(state),
+            }
+        items = state.get("items")
+        item_count = 0
+        entity_count = 0
+        stroke_count = 0
+        linked_entity_count = 0
+        if isinstance(items, list):
+            item_count = len(items)
+            for item_data in items:
+                if not isinstance(item_data, dict):
+                    continue
+                item_type = str(item_data.get("type") or "").strip()
+                if item_type == "entity":
+                    entity_count += 1
+                    if str(item_data.get("linked_character_id") or item_data.get("linked_sheet_id") or "").strip():
+                        linked_entity_count += 1
+                elif item_type == "stroke":
+                    stroke_count += 1
+        return {
+            "state_items": item_count,
+            "state_entities": entity_count,
+            "state_strokes": stroke_count,
+            "state_linked_entities": linked_entity_count,
+            "state_bytes": self._debug_json_size_bytes(state),
+        }
+
+    def _debug_snapshot_summary(self, snapshot: object) -> dict[str, object]:
+        if not isinstance(snapshot, dict):
+            return {"snapshot_bytes": self._debug_json_size_bytes(snapshot)}
+        dungeons = snapshot.get("dungeons")
+        dungeon_count = len(dungeons) if isinstance(dungeons, list) else 0
+        scene = snapshot.get("scene")
+        summary = {
+            "snapshot_dungeons": dungeon_count,
+            "snapshot_players_dungeon_id": str(snapshot.get("players_dungeon_id") or ""),
+            "snapshot_active_dungeon_id": str(snapshot.get("active_dungeon_id") or ""),
+            "snapshot_bytes": self._debug_json_size_bytes(snapshot),
+        }
+        summary.update(self._debug_state_summary(scene))
+        return summary
 
     def _debug_widget_ref(self, widget: object) -> str:
         if widget is None:
@@ -15020,6 +15322,8 @@ class DungeonAppletWidget(QWidget):
             "pid": os.getpid(),
             "instance": str(getattr(self, "_debug_instance_id", "")),
             "profile": str(getattr(self, "_debug_profile", "DEFAULT") or "DEFAULT"),
+            "label": str(getattr(self, "_debug_label", "") or ""),
+            "run_id": str(getattr(self, "_debug_run_id", "") or ""),
             "mode": str(getattr(self, "_online_mode", "")),
             "session": str(getattr(self, "_online_session_id", "")),
             "local_player_id": str(getattr(self, "_local_player_id", "") or ""),
@@ -16391,6 +16695,15 @@ class DungeonAppletWidget(QWidget):
                 sync_request,
                 silent=True,
             )
+            self._debug_log(
+                "character_sync_send",
+                request_id=str(request_id or ""),
+                character_id=character_id,
+                sheet_id=str(sync_request.get("sheet_id") or ""),
+                dungeon_id=str(sync_request.get("dungeon_id") or ""),
+                inventory_bytes=self._debug_json_size_bytes(payload),
+                archive_bytes=len(str(sync_request.get("archive_b64") or "")),
+            )
             return request_id, character_id
         try:
             from player_sheets import character_id_for_sheet_id, inventory_payload_for_sheet_id
@@ -16428,6 +16741,15 @@ class DungeonAppletWidget(QWidget):
             "sync_character_inventory",
             sync_request,
             silent=True,
+        )
+        self._debug_log(
+            "character_sync_send",
+            request_id=str(request_id or ""),
+            character_id=character_id,
+            sheet_id=str(sync_request.get("sheet_id") or ""),
+            dungeon_id=str(sync_request.get("dungeon_id") or ""),
+            inventory_bytes=self._debug_json_size_bytes(payload),
+            archive_bytes=len(str(sync_request.get("archive_b64") or "")),
         )
         return request_id, character_id
 

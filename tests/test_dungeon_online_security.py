@@ -33,9 +33,13 @@ def dungeon_widget(qtbot):
 class _HostStub:
     def __init__(self):
         self.results = []
+        self.patches = []
 
     def send_command_result(self, player_id, **kwargs):
         self.results.append((player_id, kwargs))
+
+    def broadcast_player_state_patch(self, **kwargs):
+        self.patches.append(dict(kwargs))
 
     def stop(self):
         return None
@@ -88,12 +92,10 @@ def _stroke_item(stroke_id, owner_player_id, *, pos, path, pen_color, pen_width=
 def _configure_player_state_update_host(dungeon_widget, monkeypatch, *items, dungeon_id="players-dungeon"):
     dungeon_widget._host_controller = _HostStub()
     dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
-    broadcasts = []
-    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: broadcasts.append(True))
     dungeon_widget._dungeons = _players_dungeon_state(*items, dungeon_id=dungeon_id)
     dungeon_widget._players_dungeon_id = dungeon_id
     dungeon_widget._active_dungeon_id = dungeon_id
-    return broadcasts
+    return dungeon_widget._host_controller.patches
 
 
 def test_player_state_update_only_merges_owned_entities(dungeon_widget, monkeypatch):
@@ -133,7 +135,9 @@ def test_player_state_update_only_merges_owned_entities(dungeon_widget, monkeypa
     assert other["pos"] == [2.0, 2.0]
     assert other["hp"] == 10
     assert room["type"] == "room"
-    assert broadcasts == [True]
+    assert len(broadcasts) == 1
+    assert broadcasts[0]["player_id"] == "player-1"
+    assert broadcasts[0]["dungeon_id"] == "players-dungeon"
     assert dungeon_widget._host_controller.results[-1][1]["ok"] is True
 
 
@@ -218,7 +222,8 @@ def test_player_state_update_syncs_only_player_owned_strokes(dungeon_widget, mon
     assert by_id["stroke-new"]["owner_player_id"] == "player-1"
     assert by_id["stroke-other"]["owner_player_id"] == "player-2"
     assert by_id["stroke-other"]["pos"] == [10.0, 10.0]
-    assert broadcasts == [True]
+    assert len(broadcasts) == 1
+    assert broadcasts[0]["player_id"] == "player-1"
     assert dungeon_widget._host_controller.results[-1][1]["ok"] is True
 
 

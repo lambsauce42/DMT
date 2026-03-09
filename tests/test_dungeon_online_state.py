@@ -4812,6 +4812,64 @@ def test_takeover_snapshot_filters_unknown_items_without_mutating_collection(
     ] == ["item_known", "item_unknown"]
 
 
+def test_routine_player_snapshot_strips_owned_linked_character_package(dungeon_widget):
+    dungeon_widget._players_dungeon_id = "players"
+    dungeon_widget._active_dungeon_id = "players"
+    dungeon_widget._save_active_dungeon_state = lambda: None
+    dungeon_widget._dungeons = [
+        {
+            "id": "players",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-a",
+                        "linked_sheet_id": "sheet-a",
+                        "linked_sheet_name": "Sheet A",
+                        "linked_character_id": "char-a",
+                        "linked_authority_player_id": "player-a",
+                        "linked_save_revision": 3,
+                        "linked_last_saved_at": "2026-03-09T18:00:00+00:00",
+                        "linked_content_hash": "hash-a",
+                        "linked_sheet_archive_b64": _valid_archive_b64(),
+                        "linked_inventory": {
+                            "inventory": [
+                                {"item_id": "item-known", "quantity": 1},
+                            ]
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+
+    snapshot = dungeon_widget._build_online_snapshot(
+        for_player_id="player-a",
+        include_linked_character_payload=False,
+    )
+
+    assert snapshot["linked_character_payload_included"] is False
+    snapshot_item = snapshot["dungeons"][0]["state"]["items"][0]
+    assert snapshot_item["linked_sheet_id"] == "sheet-a"
+    assert snapshot_item["linked_character_id"] == "char-a"
+    assert snapshot_item["linked_content_hash"] == "hash-a"
+    assert snapshot_item["linked_sheet_archive_b64"] == ""
+    assert snapshot_item["linked_inventory"]["inventory"] == []
+
+    requested_snapshot = dungeon_widget._build_online_snapshot(for_player_id="player-a")
+    assert requested_snapshot["linked_character_payload_included"] is True
+    requested_item = requested_snapshot["dungeons"][0]["state"]["items"][0]
+    assert requested_item["linked_sheet_archive_b64"] == _valid_archive_b64()
+    assert requested_item["linked_inventory"]["inventory"][0]["item_id"] == "item-known"
+
+
 def test_dm_host_link_character_prefers_collection_backed_state(monkeypatch, dungeon_widget, tmp_path):
     pdf_path = tmp_path / "sheet.pdf"
     pdf_path.write_bytes(b"%PDF-1.4")
@@ -5626,8 +5684,8 @@ def test_player_snapshot_initiative_rows_show_only_local_player(dungeon_widget):
     collapsed_snapshot["initiative_state"] = dict(snapshot["initiative_state"])
     collapsed_snapshot["initiative_state"]["collapsed"] = True
     dungeon_widget._on_client_snapshot_received(collapsed_snapshot)
-    assert dungeon_widget._initiative_overlay.isHidden()
-    assert dungeon_widget._initiative_reopen_btn.isHidden()
+    assert not dungeon_widget._initiative_overlay.isHidden()
+    assert not dungeon_widget._initiative_reopen_btn.isHidden()
 
 
 def test_player_snapshot_without_active_initiative_stays_hidden(dungeon_widget):
@@ -5707,8 +5765,9 @@ def test_player_can_collapse_initiative_overlay_locally(dungeon_widget, qtbot):
     qtbot.wait(220)
 
     assert dungeon_widget._initiative_overlay.isHidden()
-    assert dungeon_widget._initiative_state["collapsed"] is True
-    assert dungeon_widget._initiative_reopen_btn.isHidden()
+    assert dungeon_widget._initiative_state["collapsed"] is False
+    assert dungeon_widget._player_initiative_overlay_collapsed is True
+    assert not dungeon_widget._initiative_reopen_btn.isHidden()
 
 
 def test_initiative_can_collapse_when_no_player_entity_rows_exist(dungeon_widget):
@@ -6044,6 +6103,12 @@ def test_dm_initiative_ok_button_confirms_player_row_value(dungeon_widget, qtbot
     dungeon_widget.show()
     qtbot.wait(20)
     dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice"}
+    entity = EntityItem(QPointF(0, 0))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_LABEL, "Wolf")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    dungeon_widget.canvas.scene().addItem(entity)
     dungeon_widget._initiative_state = {
         "active": True,
         "collapsed": False,
@@ -6084,9 +6149,27 @@ def test_dm_initiative_ok_button_confirms_player_row_value(dungeon_widget, qtbot
     assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 19
 
 
-def test_player_mode_hides_initiative_reopen_button(dungeon_widget):
+def test_player_mode_shows_initiative_reopen_button_only_with_visible_rows(dungeon_widget):
     dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
     assert dungeon_widget._initiative_reopen_btn.isHidden()
+
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._initiative_state = {
+        "active": True,
+        "collapsed": False,
+        "player_entries": {
+            "player-1:e1": {
+                "player_id": "player-1",
+                "entity_id": "e1",
+                "name": "Alice - Wolf",
+                "initiative": 12,
+            }
+        },
+        "entity_entries": {},
+    }
+    dungeon_widget._render_initiative_overlay()
+
+    assert not dungeon_widget._initiative_reopen_btn.isHidden()
 
 
 def test_dm_initiative_reopen_button_mirrors_origin_position(dungeon_widget, qtbot):
@@ -6100,6 +6183,51 @@ def test_dm_initiative_reopen_button_mirrors_origin_position(dungeon_widget, qtb
     assert not btn.isHidden()
     assert btn.y() == 20
     assert btn.x() == max(8, dungeon_widget.width() - btn.width() - 20)
+
+
+def test_player_local_initiative_collapse_persists_across_snapshot_updates(dungeon_widget, qtbot):
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    base_snapshot = {
+        "players": {"player-1": "Alice"},
+        "scene": {"items": [], "fog": {"path": []}},
+        "initiative_state": {
+            "active": True,
+            "collapsed": False,
+            "player_entries": {
+                "player-1:e1": {
+                    "player_id": "player-1",
+                    "entity_id": "e1",
+                    "name": "Alice - Wolf",
+                    "initiative": 12,
+                }
+            },
+            "entity_entries": {},
+        },
+    }
+
+    dungeon_widget._on_client_snapshot_received(base_snapshot)
+    assert not dungeon_widget._initiative_overlay.isHidden()
+
+    dungeon_widget._initiative_collapse_btn.click()
+    qtbot.wait(220)
+    assert dungeon_widget._initiative_overlay.isHidden()
+    assert dungeon_widget._player_initiative_overlay_collapsed is True
+
+    updated_snapshot = dict(base_snapshot)
+    updated_snapshot["initiative_state"] = dict(base_snapshot["initiative_state"])
+    updated_snapshot["initiative_state"]["player_entries"] = dict(base_snapshot["initiative_state"]["player_entries"])
+    updated_snapshot["initiative_state"]["player_entries"]["player-1:e1"] = {
+        "player_id": "player-1",
+        "entity_id": "e1",
+        "name": "Alice - Wolf",
+        "initiative": 17,
+    }
+    dungeon_widget._on_client_snapshot_received(updated_snapshot)
+
+    assert dungeon_widget._initiative_overlay.isHidden()
+    assert dungeon_widget._player_initiative_overlay_collapsed is True
+    assert not dungeon_widget._initiative_reopen_btn.isHidden()
 
 
 def test_initiative_non_numeric_commit_is_rejected_without_state_change(dungeon_widget):

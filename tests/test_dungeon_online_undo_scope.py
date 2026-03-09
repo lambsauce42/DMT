@@ -31,6 +31,9 @@ class _HostControllerStub:
     def send_icon_asset(self, player_id, **kwargs):
         return None
 
+    def broadcast_player_state_patch(self, **kwargs):
+        self._player_widget._on_client_player_state_patch_received(dict(kwargs))
+
     def stop(self):
         return None
 
@@ -92,6 +95,7 @@ def online_host_and_player(qtbot):
     player_entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
     scene.addItem(player_entity)
 
+    host._refresh_scene_item_references()
     host._save_active_dungeon_state()
     host._host_controller = _HostControllerStub(player)
     player._client_controller = _ClientControllerStub(host)
