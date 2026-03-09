@@ -4348,9 +4348,11 @@ class DungeonAppletWidget(QWidget):
                 "anchor_utc": "",
                 "loop": False,
                 "mix_volume": 100,
+                "mix_muted": False,
             },
             "effects": {
                 "mix_volume": 100,
+                "mix_muted": False,
                 "active_titles": [],
             },
         }
@@ -5309,7 +5311,7 @@ class DungeonAppletWidget(QWidget):
         available_w = max(260, self.width() - (margin * 2))
         available_h = max(260, self.height() - (margin * 2))
         panel_w = max(680, int(available_w * 0.62))
-        panel_h = max(430, int(available_h * 0.58))
+        panel_h = max(450, int(available_h * 0.58))
         panel_w = min(panel_w, available_w)
         panel_h = min(panel_h, available_h)
         panel_x = max(8, int((self.width() - panel_w) / 2))
@@ -6430,7 +6432,7 @@ class DungeonAppletWidget(QWidget):
     def _build_media_panel(self, icon_dir: str) -> QFrame:
         panel = QFrame(self)
         panel.setObjectName("SubPanel")
-        panel.setMinimumSize(660, 430)
+        panel.setMinimumSize(660, 450)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -6485,9 +6487,12 @@ class DungeonAppletWidget(QWidget):
         transport_button_width = 86
         library_button_width = 94
         soundboard_button_width = 94
-        toggle_button_width = 120
-        media_button_height = 36
-        media_row_height = 42
+        media_button_height = 40
+        media_row_height = 46
+        volume_icon_path = os.path.join(icon_dir, "volume.svg")
+        mute_icon_path = os.path.join(icon_dir, "mute.svg")
+        self._media_volume_icon_path = volume_icon_path
+        self._media_mute_icon_path = mute_icon_path
 
         def _make_media_row_label(text: str, parent: QWidget) -> QLabel:
             label = QLabel(text, parent)
@@ -6525,10 +6530,33 @@ class DungeonAppletWidget(QWidget):
             button = QPushButton(text, parent)
             button.setObjectName("SecondaryButton")
             button.setCheckable(checkable)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.setFixedHeight(media_button_height)
             button.setFixedWidth(width)
             button.setStyleSheet(
-                f"min-height: {media_button_height}px; max-height: {media_button_height}px; padding: 4px 10px;"
+                f"min-height: {media_button_height}px; max-height: {media_button_height}px; padding: 0px 10px;"
+            )
+            return button
+
+        def _make_media_icon_toggle_button(
+            tooltip: str,
+            parent: QWidget,
+            *,
+            icon_path: str,
+        ) -> QPushButton:
+            button = QPushButton(parent)
+            button.setObjectName("SecondaryButton")
+            button.setCheckable(True)
+            button.setToolTip(tooltip)
+            button.setStatusTip(tooltip)
+            button.setAccessibleName(tooltip)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            button.setFixedSize(media_button_height, media_button_height)
+            button.setIcon(QIcon(icon_path))
+            button.setIconSize(QSize(18, 18))
+            button.setStyleSheet(
+                f"min-width: {media_button_height}px; max-width: {media_button_height}px; "
+                f"min-height: {media_button_height}px; max-height: {media_button_height}px; padding: 0px;"
             )
             return button
 
@@ -6610,6 +6638,13 @@ class DungeonAppletWidget(QWidget):
         mix_layout.addWidget(self._media_music_mix_slider, 1)
         self._media_music_mix_value = _make_media_value_label("100%", self._media_music_mix_row)
         mix_layout.addWidget(self._media_music_mix_value)
+        self._media_music_mix_mute = _make_media_icon_toggle_button(
+            "Mute DM Music",
+            self._media_music_mix_row,
+            icon_path=mute_icon_path,
+        )
+        self._media_music_mix_mute.toggled.connect(self._on_media_music_mix_mute_changed)
+        mix_layout.addWidget(self._media_music_mix_mute)
         now_layout.addWidget(self._media_music_mix_row)
 
         self._media_personal_music_row = QWidget(self._media_now_playing_card)
@@ -6622,11 +6657,10 @@ class DungeonAppletWidget(QWidget):
         personal_music_layout.addWidget(self._media_personal_music_slider, 1)
         self._media_personal_music_value = _make_media_value_label("100%", self._media_personal_music_row)
         personal_music_layout.addWidget(self._media_personal_music_value)
-        self._media_personal_music_mute = _make_media_action_button(
+        self._media_personal_music_mute = _make_media_icon_toggle_button(
             "Mute Music",
             self._media_personal_music_row,
-            width=toggle_button_width,
-            checkable=True,
+            icon_path=mute_icon_path,
         )
         self._media_personal_music_mute.toggled.connect(self._on_media_personal_mute_music_changed)
         personal_music_layout.addWidget(self._media_personal_music_mute)
@@ -6778,6 +6812,13 @@ class DungeonAppletWidget(QWidget):
         effect_mix_layout.addWidget(self._media_effects_mix_slider, 1)
         self._media_effects_mix_value = _make_media_value_label("100%", self._media_effects_mix_row)
         effect_mix_layout.addWidget(self._media_effects_mix_value)
+        self._media_effects_mix_mute = _make_media_icon_toggle_button(
+            "Mute DM Effects",
+            self._media_effects_mix_row,
+            icon_path=mute_icon_path,
+        )
+        self._media_effects_mix_mute.toggled.connect(self._on_media_effects_mix_mute_changed)
+        effect_mix_layout.addWidget(self._media_effects_mix_mute)
         soundboard_layout.addWidget(self._media_effects_mix_row)
 
         self._media_personal_effects_row = QWidget(self._media_soundboard_card)
@@ -6790,11 +6831,10 @@ class DungeonAppletWidget(QWidget):
         personal_effects_layout.addWidget(self._media_personal_effects_slider, 1)
         self._media_personal_effects_value = _make_media_value_label("100%", self._media_personal_effects_row)
         personal_effects_layout.addWidget(self._media_personal_effects_value)
-        self._media_personal_effects_mute = _make_media_action_button(
+        self._media_personal_effects_mute = _make_media_icon_toggle_button(
             "Mute Effects",
             self._media_personal_effects_row,
-            width=toggle_button_width,
-            checkable=True,
+            icon_path=mute_icon_path,
         )
         self._media_personal_effects_mute.toggled.connect(self._on_media_personal_mute_effects_changed)
         personal_effects_layout.addWidget(self._media_personal_effects_mute)
@@ -7104,9 +7144,25 @@ class DungeonAppletWidget(QWidget):
         with QSignalBlocker(self._media_music_mix_slider):
             self._media_music_mix_slider.setValue(int(music.get("mix_volume", 100) or 100))
         self._media_music_mix_value.setText(f"{int(music.get('mix_volume', 100) or 100)}%")
+        mute_dm_music = bool(music.get("mix_muted", False))
+        with QSignalBlocker(self._media_music_mix_mute):
+            self._media_music_mix_mute.setChecked(mute_dm_music)
+        self._apply_media_mute_button_visual(
+            self._media_music_mix_mute,
+            muted=mute_dm_music,
+            active_label="DM Music",
+        )
         with QSignalBlocker(self._media_effects_mix_slider):
             self._media_effects_mix_slider.setValue(int(effects.get("mix_volume", 100) or 100))
         self._media_effects_mix_value.setText(f"{int(effects.get('mix_volume', 100) or 100)}%")
+        mute_dm_effects = bool(effects.get("mix_muted", False))
+        with QSignalBlocker(self._media_effects_mix_mute):
+            self._media_effects_mix_mute.setChecked(mute_dm_effects)
+        self._apply_media_mute_button_visual(
+            self._media_effects_mix_mute,
+            muted=mute_dm_effects,
+            active_label="DM Effects",
+        )
         with QSignalBlocker(self._media_personal_music_slider):
             self._media_personal_music_slider.setValue(int(self._audio_preferences.get("music_volume", 100) or 100))
         self._media_personal_music_value.setText(f"{int(self._audio_preferences.get('music_volume', 100) or 100)}%")
@@ -7116,11 +7172,19 @@ class DungeonAppletWidget(QWidget):
         mute_music = bool(self._audio_preferences.get("mute_music", False))
         with QSignalBlocker(self._media_personal_music_mute):
             self._media_personal_music_mute.setChecked(mute_music)
-        self._media_personal_music_mute.setText("Music Muted" if mute_music else "Mute Music")
+        self._apply_media_mute_button_visual(
+            self._media_personal_music_mute,
+            muted=mute_music,
+            active_label="Music",
+        )
         mute_effects = bool(self._audio_preferences.get("mute_effects", False))
         with QSignalBlocker(self._media_personal_effects_mute):
             self._media_personal_effects_mute.setChecked(mute_effects)
-        self._media_personal_effects_mute.setText("Effects Muted" if mute_effects else "Mute Effects")
+        self._apply_media_mute_button_visual(
+            self._media_personal_effects_mute,
+            muted=mute_effects,
+            active_label="Effects",
+        )
         selected_music = self._selected_media_library_entry("music")
         self._media_music_remove_btn.setEnabled(bool(selected_music))
         self._media_music_rename_btn.setEnabled(bool(selected_music))
@@ -7323,9 +7387,11 @@ class DungeonAppletWidget(QWidget):
                 "anchor_utc": "",
                 "loop": False,
                 "mix_volume": 100,
+                "mix_muted": False,
             },
             "effects": {
                 "mix_volume": 100,
+                "mix_muted": False,
                 "active_titles": [],
             },
         }
@@ -7501,11 +7567,17 @@ class DungeonAppletWidget(QWidget):
         elif clean_action == "music_mix":
             mix_volume = max(0, min(100, int(payload.get("mix_volume") or 0)))
             self._media_state["music"]["mix_volume"] = mix_volume
-            self._media_engine.set_mix_levels(music_mix=mix_volume)
+            self._apply_media_mix_levels_to_engine()
+        elif clean_action == "music_mix_mute":
+            self._media_state["music"]["mix_muted"] = bool(payload.get("muted", False))
+            self._apply_media_mix_levels_to_engine()
         elif clean_action == "effects_mix":
             mix_volume = max(0, min(100, int(payload.get("mix_volume") or 0)))
             self._media_state["effects"]["mix_volume"] = mix_volume
-            self._media_engine.set_mix_levels(effects_mix=mix_volume)
+            self._apply_media_mix_levels_to_engine()
+        elif clean_action == "effects_mix_mute":
+            self._media_state["effects"]["mix_muted"] = bool(payload.get("muted", False))
+            self._apply_media_mix_levels_to_engine()
         elif clean_action == "effect_warm":
             asset_id = str(payload.get("asset_id") or "").strip()
             filename = str(payload.get("filename") or f"{asset_id}.bin")
@@ -7636,6 +7708,15 @@ class DungeonAppletWidget(QWidget):
             broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
         )
 
+    def _on_media_music_mix_mute_changed(self, checked: bool) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event(
+            "music_mix_mute",
+            {"muted": bool(checked)},
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
     def _on_media_effect_play_requested(self) -> None:
         if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
             return
@@ -7671,10 +7752,75 @@ class DungeonAppletWidget(QWidget):
             broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
         )
 
+    def _on_media_effects_mix_mute_changed(self, checked: bool) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event(
+            "effects_mix_mute",
+            {"muted": bool(checked)},
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
     def _save_audio_preferences(self) -> None:
         self._save_media_profile()
         self._apply_audio_preferences_to_engine()
         self._refresh_media_panel()
+
+    def _effective_media_mix_volume(self, kind: str) -> int:
+        state = self._media_state.get(kind, {})
+        mix_volume = max(0, min(100, int(state.get("mix_volume", 100) or 100)))
+        if bool(state.get("mix_muted", False)):
+            return 0
+        return mix_volume
+
+    def _apply_media_mute_button_visual(self, button: QPushButton, *, muted: bool, active_label: str) -> None:
+        state_text = "muted" if muted else "live"
+        action_text = "Click to unmute." if muted else "Click to mute."
+        tooltip = f"{active_label} {state_text}. {action_text}"
+        button.setToolTip(tooltip)
+        button.setStatusTip(tooltip)
+        button.setAccessibleName(f"{active_label} {'muted' if muted else 'unmuted'}")
+        button.setIcon(QIcon(self._media_mute_icon_path if muted else self._media_volume_icon_path))
+        if muted:
+            button.setStyleSheet(
+                "QPushButton {"
+                "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7f1d1d, stop:1 #991b1b);"
+                "border: 1px solid #f87171;"
+                "border-radius: 6px;"
+                "padding: 0px;"
+                "min-width: 40px;"
+                "max-width: 40px;"
+                "min-height: 40px;"
+                "max-height: 40px;"
+                "}"
+                "QPushButton:hover {"
+                "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #991b1b, stop:1 #b91c1c);"
+                "border-color: #fca5a5;"
+                "}"
+            )
+        else:
+            button.setStyleSheet(
+                "QPushButton {"
+                "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+                "border: 1px solid #3b424b;"
+                "border-radius: 6px;"
+                "padding: 0px;"
+                "min-width: 40px;"
+                "max-width: 40px;"
+                "min-height: 40px;"
+                "max-height: 40px;"
+                "}"
+                "QPushButton:hover {"
+                "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+                "border-color: #58a6ff;"
+                "}"
+            )
+
+    def _apply_media_mix_levels_to_engine(self) -> None:
+        self._media_engine.set_mix_levels(
+            music_mix=self._effective_media_mix_volume("music"),
+            effects_mix=self._effective_media_mix_volume("effects"),
+        )
 
     def _on_media_personal_music_changed(self, value: int) -> None:
         self._audio_preferences["music_volume"] = int(value)
@@ -7699,10 +7845,7 @@ class DungeonAppletWidget(QWidget):
             mute_music=bool(self._audio_preferences.get("mute_music", False)),
             mute_effects=bool(self._audio_preferences.get("mute_effects", False)),
         )
-        self._media_engine.set_mix_levels(
-            music_mix=int(self._media_state["music"].get("mix_volume", 100) or 100),
-            effects_mix=int(self._media_state["effects"].get("mix_volume", 100) or 100),
-        )
+        self._apply_media_mix_levels_to_engine()
 
     def _on_media_music_position_changed(self, position_ms: int, duration_ms: int) -> None:
         self._media_state["music"]["position_ms"] = int(position_ms)
@@ -7765,6 +7908,7 @@ class DungeonAppletWidget(QWidget):
                     "anchor_utc": str(music.get("anchor_utc") or ""),
                     "loop": bool(music.get("loop", False)),
                     "mix_volume": max(0, min(100, int(music.get("mix_volume") or 100))),
+                    "mix_muted": bool(music.get("mix_muted", False)),
                 }
             )
         effects = media_state.get("effects")
@@ -7772,6 +7916,7 @@ class DungeonAppletWidget(QWidget):
             self._media_state["effects"].update(
                 {
                     "mix_volume": max(0, min(100, int(effects.get("mix_volume") or 100))),
+                    "mix_muted": bool(effects.get("mix_muted", False)),
                     "active_titles": [
                         str(value).strip()
                         for value in effects.get("active_titles", [])

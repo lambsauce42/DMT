@@ -139,6 +139,8 @@ def test_media_peer_buttons_share_widths(dungeon_widget):
         dungeon_widget._media_effects_stop_btn.width(),
     }
     mute_widths = {
+        dungeon_widget._media_music_mix_mute.width(),
+        dungeon_widget._media_effects_mix_mute.width(),
         dungeon_widget._media_personal_music_mute.width(),
         dungeon_widget._media_personal_effects_mute.width(),
     }
@@ -147,6 +149,100 @@ def test_media_peer_buttons_share_widths(dungeon_widget):
     assert len(music_manage_widths) == 1
     assert len(soundboard_manage_widths) == 1
     assert len(mute_widths) == 1
+
+
+def test_media_personal_mute_buttons_are_square_icon_buttons(dungeon_widget):
+    dungeon_widget._audio_preferences["mute_music"] = True
+    dungeon_widget._audio_preferences["mute_effects"] = False
+
+    dungeon_widget._refresh_media_panel()
+
+    assert dungeon_widget._media_personal_music_mute.width() == dungeon_widget._media_personal_music_mute.height()
+    assert dungeon_widget._media_personal_effects_mute.width() == dungeon_widget._media_personal_effects_mute.height()
+    assert not dungeon_widget._media_personal_music_mute.icon().isNull()
+    assert not dungeon_widget._media_personal_effects_mute.icon().isNull()
+    assert dungeon_widget._media_personal_music_mute.toolTip() == "Music muted. Click to unmute."
+    assert dungeon_widget._media_personal_effects_mute.toolTip() == "Effects live. Click to mute."
+
+
+def test_media_dm_mute_buttons_are_square_icon_buttons(dungeon_widget):
+    dungeon_widget._media_state["music"]["mix_muted"] = True
+    dungeon_widget._media_state["effects"]["mix_muted"] = False
+
+    dungeon_widget._refresh_media_panel()
+
+    assert dungeon_widget._media_music_mix_mute.width() == dungeon_widget._media_music_mix_mute.height()
+    assert dungeon_widget._media_effects_mix_mute.width() == dungeon_widget._media_effects_mix_mute.height()
+    assert not dungeon_widget._media_music_mix_mute.icon().isNull()
+    assert not dungeon_widget._media_effects_mix_mute.icon().isNull()
+    assert dungeon_widget._media_music_mix_mute.toolTip() == "DM Music muted. Click to unmute."
+    assert dungeon_widget._media_effects_mix_mute.toolTip() == "DM Effects live. Click to mute."
+
+
+def test_media_mute_buttons_swap_icon_between_live_and_muted_states(dungeon_widget):
+    dungeon_widget._audio_preferences["mute_music"] = False
+    dungeon_widget._refresh_media_panel()
+    live_icon_key = dungeon_widget._media_personal_music_mute.icon().cacheKey()
+
+    dungeon_widget._audio_preferences["mute_music"] = True
+    dungeon_widget._refresh_media_panel()
+    muted_icon_key = dungeon_widget._media_personal_music_mute.icon().cacheKey()
+
+    assert live_icon_key != muted_icon_key
+
+
+def test_media_action_buttons_share_taller_runtime_height(dungeon_widget):
+    dungeon_widget._refresh_media_panel()
+
+    buttons = [
+        dungeon_widget._media_music_play_btn,
+        dungeon_widget._media_music_pause_btn,
+        dungeon_widget._media_music_stop_btn,
+        dungeon_widget._media_music_loop,
+        dungeon_widget._media_music_add_btn,
+        dungeon_widget._media_music_remove_btn,
+        dungeon_widget._media_music_rename_btn,
+        dungeon_widget._media_effects_add_btn,
+        dungeon_widget._media_effects_icon_btn,
+        dungeon_widget._media_effects_rename_btn,
+        dungeon_widget._media_effects_remove_btn,
+        dungeon_widget._media_effects_stop_btn,
+        dungeon_widget._media_music_mix_mute,
+        dungeon_widget._media_effects_mix_mute,
+        dungeon_widget._media_personal_music_mute,
+        dungeon_widget._media_personal_effects_mute,
+    ]
+
+    heights = {button.height() for button in buttons}
+    assert len(heights) == 1
+    assert next(iter(heights)) >= 40
+    assert dungeon_widget._media_music_transport.height() > dungeon_widget._media_music_play_btn.height()
+    assert dungeon_widget._media_music_mix_row.height() > dungeon_widget._media_music_mix_mute.height()
+    assert dungeon_widget._media_effects_mix_row.height() > dungeon_widget._media_effects_mix_mute.height()
+
+
+def test_media_dm_mute_preserves_mix_volume_setting_when_toggled(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_LOCAL_DM)
+    dungeon_widget._media_state["music"]["mix_volume"] = 65
+    dungeon_widget._media_state["effects"]["mix_volume"] = 45
+
+    dungeon_widget._on_media_music_mix_mute_changed(True)
+    dungeon_widget._on_media_effects_mix_mute_changed(True)
+
+    assert dungeon_widget._media_state["music"]["mix_volume"] == 65
+    assert dungeon_widget._media_state["effects"]["mix_volume"] == 45
+    assert dungeon_widget._media_state["music"]["mix_muted"] is True
+    assert dungeon_widget._media_state["effects"]["mix_muted"] is True
+    assert dungeon_widget._media_engine._music_mix_volume == 0
+    assert dungeon_widget._media_engine._effects_mix_volume == 0
+
+    dungeon_widget._on_media_music_mix_mute_changed(False)
+    dungeon_widget._on_media_effects_mix_mute_changed(False)
+
+    assert dungeon_widget._media_state["music"]["mix_muted"] is False
+    assert dungeon_widget._media_state["effects"]["mix_muted"] is False
+    assert dungeon_widget._media_engine._music_mix_volume == 65
+    assert dungeon_widget._media_engine._effects_mix_volume == 45
 
 
 def test_snapshot_media_state_does_not_overwrite_local_audio_preferences(dungeon_widget):
@@ -167,9 +263,11 @@ def test_snapshot_media_state_does_not_overwrite_local_audio_preferences(dungeon
             "anchor_utc": "",
             "loop": False,
             "mix_volume": 90,
+            "mix_muted": True,
         },
         "effects": {
             "mix_volume": 80,
+            "mix_muted": False,
             "active_titles": [],
         },
     }
