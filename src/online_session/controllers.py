@@ -130,6 +130,16 @@ class HostSessionController(QObject):
             }
         )
 
+    def broadcast_media_event(self, *, action: str, payload: dict) -> None:
+        self.server.broadcast(
+            {
+                "type": "media_event",
+                "action": str(action or "").strip(),
+                "payload": dict(payload or {}),
+                "ts": _utc_timestamp(),
+            }
+        )
+
     def send_icon_asset(self, player_id: str, *, entity_id: str, filename: str, content_b64: str) -> None:
         self.server.send_to_player(
             player_id,
@@ -201,6 +211,7 @@ class ClientSessionController(QObject):
     player_state_patch_received = Signal(dict)
     icon_asset_received = Signal(str, str, str)
     ping_received = Signal(float, float, str)
+    media_event_received = Signal(dict)
     reconnect_state_changed = Signal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -437,6 +448,9 @@ class ClientSessionController(QObject):
                 return
             dungeon_id = str(message.get("dungeon_id", ""))
             self.ping_received.emit(x, y, dungeon_id)
+            return
+        if msg_type == "media_event":
+            self.media_event_received.emit(dict(message))
             return
         if msg_type == "error":
             reason = str(message.get("message", "")).strip() or "unknown error"

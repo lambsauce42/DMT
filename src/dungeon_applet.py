@@ -9,6 +9,7 @@ import shutil
 import sys
 import time
 import re
+import urllib.parse
 import uuid
 from typing import Callable
 from datetime import datetime, timezone
@@ -51,6 +52,8 @@ from PySide6.QtWidgets import (
     QGraphicsPathItem,
     QAbstractItemView,
     QApplication,
+    QSlider,
+    QTabWidget,
 )
 from PySide6.QtCore import (
     Qt,
@@ -130,6 +133,7 @@ from save_paths import (
     dnd_saves_dir,
     items_dir,
     online_icon_cache_dir,
+    online_media_cache_dir,
     online_loot_item_cache_dir,
     clear_online_runtime_cache as clear_online_runtime_storage,
     collection_icon_assets_dir,
@@ -164,6 +168,7 @@ from item_file_format import (
 )
 from user_settings import get_or_create_local_player_id
 from unique_ids import generate_named_object_id, generate_probabilistic_unique_id, machine_entropy_string
+from session_media import SessionMediaHttpServer, SessionMediaPlaybackEngine, validate_media_source_path
 
 class ToolType(Enum):
     SELECT = auto()
@@ -248,6 +253,64 @@ def _safe_debug_filename_component(value: object, fallback: str = "instance") ->
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
     cleaned = cleaned.strip("._-")
     return cleaned or fallback
+
+
+def _default_media_library() -> dict[str, list[dict]]:
+    return {"music": [], "effects": []}
+
+
+def _default_audio_preferences() -> dict[str, object]:
+    return {
+        "music_volume": 100,
+        "effects_volume": 100,
+        "mute_music": False,
+        "mute_effects": False,
+    }
+
+
+def _sanitize_media_library(payload: object) -> dict[str, list[dict]]:
+    library = _default_media_library()
+    if not isinstance(payload, dict):
+        return library
+    for key in ("music", "effects"):
+        entries = payload.get(key)
+        if not isinstance(entries, list):
+            continue
+        normalized_entries: list[dict] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            asset_id = str(entry.get("asset_id") or "").strip()
+            path = str(entry.get("path") or "").strip()
+            if not asset_id or not path:
+                continue
+            normalized_entries.append(
+                {
+                    "asset_id": asset_id,
+                    "title": str(entry.get("title") or Path(path).stem or asset_id).strip() or asset_id,
+                    "path": path,
+                }
+            )
+        library[key] = normalized_entries
+    return library
+
+
+def _sanitize_audio_preferences(payload: object) -> dict[str, object]:
+    defaults = _default_audio_preferences()
+    if not isinstance(payload, dict):
+        return defaults
+    normalized = dict(defaults)
+    try:
+        normalized["music_volume"] = max(0, min(100, int(payload.get("music_volume", defaults["music_volume"]))))
+    except (TypeError, ValueError):
+        pass
+    try:
+        normalized["effects_volume"] = max(0, min(100, int(payload.get("effects_volume", defaults["effects_volume"]))))
+    except (TypeError, ValueError):
+        pass
+    normalized["mute_music"] = bool(payload.get("mute_music", defaults["mute_music"]))
+    normalized["mute_effects"] = bool(payload.get("mute_effects", defaults["mute_effects"]))
+    return normalized
 
 
 def _looks_generated_item_label(raw: object) -> bool:
@@ -4248,6 +4311,36 @@ class DungeonAppletWidget(QWidget):
             if isinstance(self._local_profile.get("known_players"), dict)
             else {}
         )
+        self._media_library: dict[str, list[dict]] = _sanitize_media_library(self._local_profile.get("media_library"))
+        self._audio_preferences: dict[str, object] = _sanitize_audio_preferences(
+            self._local_profile.get("audio_preferences")
+        )
+        self._media_state: dict = {
+            "server": {"active": False, "port": 0, "token": ""},
+            "music": {
+                "asset_id": "",
+                "title": "",
+                "state": "stopped",
+                "position_ms": 0,
+                "duration_ms": 0,
+                "anchor_utc": "",
+                "loop": False,
+                "mix_volume": 100,
+            },
+            "effects": {
+                "mix_volume": 100,
+                "active_titles": [],
+            },
+        }
+        self._media_status_line: str = ""
+        self._media_host_server: SessionMediaHttpServer | None = None
+        self._media_engine = SessionMediaPlaybackEngine(self)
+        self._media_engine.musicPositionChanged.connect(self._on_media_music_position_changed)
+        self._media_engine.musicPlaybackStateChanged.connect(self._on_media_music_playback_state_changed)
+        self._media_engine.musicError.connect(self._on_media_runtime_error)
+        self._media_engine.effectCacheReady.connect(self._on_media_effect_cache_ready)
+        self._media_engine.effectCacheFailed.connect(self._on_media_effect_cache_failed)
+        self._media_player_endpoint_host: str = ""
         self._local_profile["player_id"] = self._persistent_local_player_id
         self._pending_player_state_update: dict | None = None
         self._pending_player_state_update_request_id: str = ""
@@ -4300,6 +4393,7 @@ class DungeonAppletWidget(QWidget):
         self._collection_meta_dirty = False
         self._collection_dirty = False
         self._autosave_enabled = bool(self._local_profile.get("autosave_enabled", False))
+        self._apply_audio_preferences_to_engine()
         self._dungeons: list[dict] = []
         self._active_dungeon_id: str | None = None
         self._players_dungeon_id: str | None = None
@@ -4332,6 +4426,7 @@ class DungeonAppletWidget(QWidget):
         }
         self._initiative_panel_anim: QPropertyAnimation | None = None
         self._loot_pool_panel_anim: QPropertyAnimation | None = None
+        self._media_panel_anim: QPropertyAnimation | None = None
         self._forwarding_initiative_key = False
         self._initiative_inactive_preview_visible = False
         self._player_initiative_overlay_collapsed = False
@@ -4411,6 +4506,7 @@ class DungeonAppletWidget(QWidget):
         icon_plus = os.path.join(icon_dir, "plus_white.svg")
         icon_minus = os.path.join(icon_dir, "minus_white.svg")
         icon_loot_pool = os.path.join(icon_dir, "lootpool.png")
+        icon_media = os.path.join(icon_dir, "play.svg")
 
         # 2. HUD Overlays (Transparent Containers)
         hud_style = "background-color: transparent; border: none;"
@@ -4433,6 +4529,17 @@ class DungeonAppletWidget(QWidget):
         self._loot_pool_badge.hide()
         self._loot_pool_panel = self._build_loot_pool_panel(icon_dir)
         self._loot_pool_panel.hide()
+        self._media_btn = QToolButton(self)
+        self._media_btn.setObjectName("SecondaryButton")
+        self._media_btn.setToolTip("Show Media")
+        self._media_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._media_btn.setFixedSize(40, 40)
+        self._media_btn.setIcon(QIcon(icon_media))
+        self._media_btn.setIconSize(QSize(22, 22))
+        self._media_btn.clicked.connect(self._toggle_media_panel)
+        self._media_btn.setVisible(True)
+        self._media_panel = self._build_media_panel(icon_dir)
+        self._media_panel.hide()
         self._initiative_overlay = self._build_initiative_overlay()
         self._initiative_overlay.hide()
         
@@ -4690,6 +4797,7 @@ class DungeonAppletWidget(QWidget):
         self._pending_loot_claim_rollbacks.clear()
         self._clear_pending_online_command_requests(reason="starting a hosted session")
         self._server_log_panel.set_ignore_overwrite_checked(False)
+        self._reset_media_runtime_state()
         self._initiative_state = {
             "active": False,
             "collapsed": False,
@@ -4741,6 +4849,8 @@ class DungeonAppletWidget(QWidget):
             QMessageBox.critical(self, "Host Failed", error or "Failed to start host server.")
             return False
         self._set_online_mode(ONLINE_MODE_DM_HOST)
+        self._media_player_endpoint_host = str(self._host_ip or "127.0.0.1")
+        self._start_host_media_server()
         self._normalize_all_dungeon_icons_for_online()
         self._append_server_log(
             "Hosting started. Internet clients must connect to your public IP and forwarded port."
@@ -4782,6 +4892,7 @@ class DungeonAppletWidget(QWidget):
         self._pending_loot_claim_rollbacks.clear()
         self._clear_pending_online_command_requests(reason="starting a new join session")
         self._hide_reconnect_status_dialog()
+        self._reset_media_runtime_state()
         self._initiative_state = {
             "active": False,
             "collapsed": False,
@@ -4801,6 +4912,7 @@ class DungeonAppletWidget(QWidget):
         self._online_session_id = f"join_{host_ip}_{int(port)}".replace(":", "_")
         self._online_runtime_cache_id = self._runtime_cache_session_id_for(self._online_session_id)
         self._host_ip = host_ip
+        self._media_player_endpoint_host = str(host_ip or "").strip()
         self._host_port = int(port)
         self._local_player_name = requested_player_name
         self._local_profile["last_player_name"] = self._local_player_name
@@ -4833,6 +4945,7 @@ class DungeonAppletWidget(QWidget):
             self._client_controller.player_state_patch_received.connect(
                 self._on_client_player_state_patch_received
             )
+            self._client_controller.media_event_received.connect(self._on_client_media_event_received)
             self._client_controller.icon_asset_received.connect(self._on_client_icon_asset)
             self._client_controller.ping_received.connect(self._on_network_ping_received)
             self._client_controller.reconnect_state_changed.connect(self._on_client_reconnect_state_changed)
@@ -4902,12 +5015,15 @@ class DungeonAppletWidget(QWidget):
             self.canvas.set_view_mode("dm")
         self._session_toggle_btn.setVisible(is_online)
         self._loot_pool_btn.setVisible(False)
+        self._media_btn.setVisible(True)
         if not is_online:
             self._loot_pool_panel.hide()
             self._initiative_overlay.hide()
             self._initiative_reopen_btn.hide()
         else:
             self._update_initiative_reopen_button_visibility()
+        if mode != ONLINE_MODE_DM_HOST:
+            self._stop_host_media_server()
         if mode != ONLINE_MODE_PLAYER:
             self._player_initiative_overlay_collapsed = False
         if not is_online:
@@ -5076,7 +5192,7 @@ class DungeonAppletWidget(QWidget):
             self.inspector.raise_()
         if hasattr(self, "_loot_pool_btn") and self._loot_pool_btn is not None:
             btn_size = self._loot_pool_btn.size()
-            btn_x = max(8, self.width() - btn_size.width() - 64)
+            btn_x = max(8, self.width() - btn_size.width() - 108)
             btn_y = 12
             self._loot_pool_btn.move(btn_x, btn_y)
             self._loot_pool_btn.raise_()
@@ -5085,6 +5201,16 @@ class DungeonAppletWidget(QWidget):
                 badge_y = max(0, btn_size.height() - self._loot_pool_badge.height() - 3)
                 self._loot_pool_badge.move(badge_x, badge_y)
                 self._loot_pool_badge.raise_()
+        if hasattr(self, "_media_btn") and self._media_btn is not None:
+            btn_size = self._media_btn.size()
+            btn_x = max(8, self.width() - btn_size.width() - 64)
+            self._media_btn.move(btn_x, 12)
+            self._media_btn.raise_()
+        if hasattr(self, "_media_panel") and self._media_panel is not None and self._media_panel.isVisible():
+            media_anim = getattr(self, "_media_panel_anim", None)
+            if media_anim is None or media_anim.state() != QAbstractAnimation.State.Running:
+                self._media_panel.setGeometry(self._target_media_geometry())
+            self._media_panel.raise_()
         if hasattr(self, "_loot_pool_panel") and self._loot_pool_panel is not None and self._loot_pool_panel.isVisible():
             loot_anim = getattr(self, "_loot_pool_panel_anim", None)
             if loot_anim is None or loot_anim.state() != QAbstractAnimation.State.Running:
@@ -5125,6 +5251,18 @@ class DungeonAppletWidget(QWidget):
         available_h = max(220, self.height() - (margin * 2))
         panel_w = max(399, int(available_w * 0.336))
         panel_h = max(290, int(available_h * 0.42))
+        panel_w = min(panel_w, available_w)
+        panel_h = min(panel_h, available_h)
+        panel_x = max(8, int((self.width() - panel_w) / 2))
+        panel_y = max(8, int((self.height() - panel_h) / 2))
+        return QRect(panel_x, panel_y, panel_w, panel_h)
+
+    def _target_media_geometry(self) -> QRect:
+        margin = 12
+        available_w = max(260, self.width() - (margin * 2))
+        available_h = max(260, self.height() - (margin * 2))
+        panel_w = max(460, int(available_w * 0.42))
+        panel_h = max(360, int(available_h * 0.52))
         panel_w = min(panel_w, available_w)
         panel_h = min(panel_h, available_h)
         panel_x = max(8, int((self.width() - panel_w) / 2))
@@ -6241,6 +6379,964 @@ class DungeonAppletWidget(QWidget):
         else:
             self._hide_loot_pool_preview()
         self._position_floating_overlays()
+
+    def _build_media_panel(self, icon_dir: str) -> QFrame:
+        panel = QFrame(self)
+        panel.setObjectName("SubPanel")
+        panel.setMinimumSize(460, 360)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
+        title = QLabel("Media", panel)
+        title.setObjectName("PanelTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        self._media_collapse_btn = QPushButton("Collapse", panel)
+        self._media_collapse_btn.setObjectName("SecondaryButton")
+        self._media_collapse_btn.setProperty("compact", "true")
+        self._media_collapse_btn.clicked.connect(self._toggle_media_panel)
+        header.addWidget(self._media_collapse_btn)
+        layout.addLayout(header)
+
+        self._media_tabs = QTabWidget(panel)
+        layout.addWidget(self._media_tabs, 1)
+
+        music_tab = QWidget(self._media_tabs)
+        music_layout = QVBoxLayout(music_tab)
+        music_layout.setContentsMargins(0, 0, 0, 0)
+        music_layout.setSpacing(8)
+
+        self._media_music_title = QLabel("No track selected", music_tab)
+        self._media_music_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        music_layout.addWidget(self._media_music_title)
+
+        self._media_music_status = QLabel("Stopped", music_tab)
+        self._media_music_status.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        music_layout.addWidget(self._media_music_status)
+
+        self._media_music_list = QListWidget(music_tab)
+        self._media_music_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._media_music_list.itemSelectionChanged.connect(self._on_media_music_selection_changed)
+        music_layout.addWidget(self._media_music_list, 1)
+
+        self._media_music_dm_controls = QWidget(music_tab)
+        dm_music_layout = QHBoxLayout(self._media_music_dm_controls)
+        dm_music_layout.setContentsMargins(0, 0, 0, 0)
+        dm_music_layout.setSpacing(6)
+        self._media_music_add_btn = QPushButton("Add", self._media_music_dm_controls)
+        self._media_music_add_btn.setObjectName("SecondaryButton")
+        self._media_music_add_btn.clicked.connect(lambda: self._on_media_add_requested("music"))
+        dm_music_layout.addWidget(self._media_music_add_btn)
+        self._media_music_remove_btn = QPushButton("Remove", self._media_music_dm_controls)
+        self._media_music_remove_btn.setObjectName("SecondaryButton")
+        self._media_music_remove_btn.clicked.connect(lambda: self._on_media_remove_requested("music"))
+        dm_music_layout.addWidget(self._media_music_remove_btn)
+        self._media_music_rename_btn = QPushButton("Rename", self._media_music_dm_controls)
+        self._media_music_rename_btn.setObjectName("SecondaryButton")
+        self._media_music_rename_btn.clicked.connect(lambda: self._on_media_rename_requested("music"))
+        dm_music_layout.addWidget(self._media_music_rename_btn)
+        dm_music_layout.addStretch(1)
+        music_layout.addWidget(self._media_music_dm_controls)
+
+        self._media_music_transport = QWidget(music_tab)
+        transport_layout = QHBoxLayout(self._media_music_transport)
+        transport_layout.setContentsMargins(0, 0, 0, 0)
+        transport_layout.setSpacing(6)
+        self._media_music_play_btn = QPushButton("Play", self._media_music_transport)
+        self._media_music_play_btn.setObjectName("SecondaryButton")
+        self._media_music_play_btn.clicked.connect(self._on_media_music_play_requested)
+        transport_layout.addWidget(self._media_music_play_btn)
+        self._media_music_pause_btn = QPushButton("Pause", self._media_music_transport)
+        self._media_music_pause_btn.setObjectName("SecondaryButton")
+        self._media_music_pause_btn.clicked.connect(self._on_media_music_pause_requested)
+        transport_layout.addWidget(self._media_music_pause_btn)
+        self._media_music_stop_btn = QPushButton("Stop", self._media_music_transport)
+        self._media_music_stop_btn.setObjectName("SecondaryButton")
+        self._media_music_stop_btn.clicked.connect(self._on_media_music_stop_requested)
+        transport_layout.addWidget(self._media_music_stop_btn)
+        self._media_music_loop = QCheckBox("Loop", self._media_music_transport)
+        self._media_music_loop.toggled.connect(self._on_media_music_loop_toggled)
+        transport_layout.addWidget(self._media_music_loop)
+        transport_layout.addStretch(1)
+        music_layout.addWidget(self._media_music_transport)
+
+        self._media_music_seek = QSlider(Qt.Orientation.Horizontal, music_tab)
+        self._media_music_seek.setRange(0, 0)
+        self._media_music_seek.sliderReleased.connect(self._on_media_music_seek_released)
+        music_layout.addWidget(self._media_music_seek)
+
+        self._media_music_mix_row = QWidget(music_tab)
+        mix_layout = QHBoxLayout(self._media_music_mix_row)
+        mix_layout.setContentsMargins(0, 0, 0, 0)
+        mix_layout.setSpacing(6)
+        mix_layout.addWidget(QLabel("DM Music Mix", self._media_music_mix_row))
+        self._media_music_mix_slider = QSlider(Qt.Orientation.Horizontal, self._media_music_mix_row)
+        self._media_music_mix_slider.setRange(0, 100)
+        self._media_music_mix_slider.valueChanged.connect(self._on_media_music_mix_changed)
+        mix_layout.addWidget(self._media_music_mix_slider, 1)
+        self._media_music_mix_value = QLabel("100%", self._media_music_mix_row)
+        mix_layout.addWidget(self._media_music_mix_value)
+        music_layout.addWidget(self._media_music_mix_row)
+
+        self._media_personal_music_row = QWidget(music_tab)
+        personal_music_layout = QHBoxLayout(self._media_personal_music_row)
+        personal_music_layout.setContentsMargins(0, 0, 0, 0)
+        personal_music_layout.setSpacing(6)
+        personal_music_layout.addWidget(QLabel("Your Music", self._media_personal_music_row))
+        self._media_personal_music_slider = QSlider(Qt.Orientation.Horizontal, self._media_personal_music_row)
+        self._media_personal_music_slider.setRange(0, 100)
+        self._media_personal_music_slider.valueChanged.connect(self._on_media_personal_music_changed)
+        personal_music_layout.addWidget(self._media_personal_music_slider, 1)
+        self._media_personal_music_mute = QCheckBox("Mute", self._media_personal_music_row)
+        self._media_personal_music_mute.toggled.connect(self._on_media_personal_mute_music_changed)
+        personal_music_layout.addWidget(self._media_personal_music_mute)
+        music_layout.addWidget(self._media_personal_music_row)
+
+        effects_tab = QWidget(self._media_tabs)
+        effects_layout = QVBoxLayout(effects_tab)
+        effects_layout.setContentsMargins(0, 0, 0, 0)
+        effects_layout.setSpacing(8)
+
+        self._media_effects_summary = QLabel("No active effects", effects_tab)
+        self._media_effects_summary.setWordWrap(True)
+        self._media_effects_summary.setStyleSheet("color: #cbd5e1;")
+        effects_layout.addWidget(self._media_effects_summary)
+
+        self._media_effects_list = QListWidget(effects_tab)
+        self._media_effects_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._media_effects_list.itemSelectionChanged.connect(self._on_media_effect_selection_changed)
+        effects_layout.addWidget(self._media_effects_list, 1)
+
+        self._media_effects_dm_controls = QWidget(effects_tab)
+        dm_effects_layout = QHBoxLayout(self._media_effects_dm_controls)
+        dm_effects_layout.setContentsMargins(0, 0, 0, 0)
+        dm_effects_layout.setSpacing(6)
+        self._media_effects_add_btn = QPushButton("Add", self._media_effects_dm_controls)
+        self._media_effects_add_btn.setObjectName("SecondaryButton")
+        self._media_effects_add_btn.clicked.connect(lambda: self._on_media_add_requested("effects"))
+        dm_effects_layout.addWidget(self._media_effects_add_btn)
+        self._media_effects_remove_btn = QPushButton("Remove", self._media_effects_dm_controls)
+        self._media_effects_remove_btn.setObjectName("SecondaryButton")
+        self._media_effects_remove_btn.clicked.connect(lambda: self._on_media_remove_requested("effects"))
+        dm_effects_layout.addWidget(self._media_effects_remove_btn)
+        self._media_effects_rename_btn = QPushButton("Rename", self._media_effects_dm_controls)
+        self._media_effects_rename_btn.setObjectName("SecondaryButton")
+        self._media_effects_rename_btn.clicked.connect(lambda: self._on_media_rename_requested("effects"))
+        dm_effects_layout.addWidget(self._media_effects_rename_btn)
+        self._media_effects_play_btn = QPushButton("Trigger", self._media_effects_dm_controls)
+        self._media_effects_play_btn.setObjectName("SecondaryButton")
+        self._media_effects_play_btn.clicked.connect(self._on_media_effect_play_requested)
+        dm_effects_layout.addWidget(self._media_effects_play_btn)
+        self._media_effects_stop_btn = QPushButton("Stop All", self._media_effects_dm_controls)
+        self._media_effects_stop_btn.setObjectName("SecondaryButton")
+        self._media_effects_stop_btn.clicked.connect(self._on_media_effect_stop_all_requested)
+        dm_effects_layout.addWidget(self._media_effects_stop_btn)
+        dm_effects_layout.addStretch(1)
+        effects_layout.addWidget(self._media_effects_dm_controls)
+
+        self._media_effects_mix_row = QWidget(effects_tab)
+        effect_mix_layout = QHBoxLayout(self._media_effects_mix_row)
+        effect_mix_layout.setContentsMargins(0, 0, 0, 0)
+        effect_mix_layout.setSpacing(6)
+        effect_mix_layout.addWidget(QLabel("DM Effects Mix", self._media_effects_mix_row))
+        self._media_effects_mix_slider = QSlider(Qt.Orientation.Horizontal, self._media_effects_mix_row)
+        self._media_effects_mix_slider.setRange(0, 100)
+        self._media_effects_mix_slider.valueChanged.connect(self._on_media_effects_mix_changed)
+        effect_mix_layout.addWidget(self._media_effects_mix_slider, 1)
+        self._media_effects_mix_value = QLabel("100%", self._media_effects_mix_row)
+        effect_mix_layout.addWidget(self._media_effects_mix_value)
+        effects_layout.addWidget(self._media_effects_mix_row)
+
+        self._media_personal_effects_row = QWidget(effects_tab)
+        personal_effects_layout = QHBoxLayout(self._media_personal_effects_row)
+        personal_effects_layout.setContentsMargins(0, 0, 0, 0)
+        personal_effects_layout.setSpacing(6)
+        personal_effects_layout.addWidget(QLabel("Your Effects", self._media_personal_effects_row))
+        self._media_personal_effects_slider = QSlider(Qt.Orientation.Horizontal, self._media_personal_effects_row)
+        self._media_personal_effects_slider.setRange(0, 100)
+        self._media_personal_effects_slider.valueChanged.connect(self._on_media_personal_effects_changed)
+        personal_effects_layout.addWidget(self._media_personal_effects_slider, 1)
+        self._media_personal_effects_mute = QCheckBox("Mute", self._media_personal_effects_row)
+        self._media_personal_effects_mute.toggled.connect(self._on_media_personal_mute_effects_changed)
+        personal_effects_layout.addWidget(self._media_personal_effects_mute)
+        effects_layout.addWidget(self._media_personal_effects_row)
+
+        self._media_tabs.addTab(music_tab, "Music")
+        self._media_tabs.addTab(effects_tab, "Soundboard")
+
+        self._media_status_label = QLabel("", panel)
+        self._media_status_label.setWordWrap(True)
+        self._media_status_label.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        layout.addWidget(self._media_status_label)
+        self._refresh_media_panel()
+        return panel
+
+    def _toggle_media_panel(self) -> None:
+        showing = self._media_panel.isHidden()
+        self._refresh_media_panel()
+        self._animate_center_panel(
+            self._media_panel,
+            show=showing,
+            target_rect=self._target_media_geometry(),
+            attr_name="_media_panel_anim",
+            duration_ms=170,
+        )
+        self._position_floating_overlays()
+
+    def _selected_media_library_entry(self, kind: str) -> dict | None:
+        list_widget = self._media_music_list if kind == "music" else self._media_effects_list
+        item = list_widget.currentItem()
+        if item is None:
+            return None
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(payload, dict):
+            return None
+        return dict(payload)
+
+    def _lookup_media_entry(self, kind: str, asset_id: str) -> dict | None:
+        for entry in self._media_library.get(kind, []):
+            if str(entry.get("asset_id") or "") == str(asset_id or ""):
+                return dict(entry)
+        return None
+
+    def _refresh_media_library_list(self, kind: str) -> None:
+        list_widget = self._media_music_list if kind == "music" else self._media_effects_list
+        selected_asset_id = ""
+        current_item = list_widget.currentItem()
+        if current_item is not None:
+            payload = current_item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(payload, dict):
+                selected_asset_id = str(payload.get("asset_id") or "")
+        with QSignalBlocker(list_widget):
+            list_widget.clear()
+            for entry in self._media_library.get(kind, []):
+                title = str(entry.get("title") or entry.get("asset_id") or "Media").strip() or "Media"
+                item = QListWidgetItem(title)
+                item.setData(Qt.ItemDataRole.UserRole, dict(entry))
+                list_widget.addItem(item)
+                if str(entry.get("asset_id") or "") == selected_asset_id:
+                    list_widget.setCurrentItem(item)
+            if not selected_asset_id and list_widget.count() > 0 and kind == "music":
+                list_widget.setCurrentRow(0)
+
+    def _refresh_media_panel(self) -> None:
+        if not hasattr(self, "_media_panel"):
+            return
+        is_dm_controls = self._online_mode in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST)
+        music = self._snapshot_media_state().get("music", {})
+        effects = self._snapshot_media_state().get("effects", {})
+        self._refresh_media_library_list("music")
+        self._refresh_media_library_list("effects")
+        self._media_music_title.setText(str(music.get("title") or "No track selected") or "No track selected")
+        state_text = str(music.get("state") or "stopped").strip().title() or "Stopped"
+        duration_ms = int(music.get("duration_ms") or 0)
+        position_ms = int(music.get("position_ms") or 0)
+        self._media_music_status.setText(
+            f"{state_text} | {self._format_media_time(position_ms)} / {self._format_media_time(duration_ms)}"
+        )
+        with QSignalBlocker(self._media_music_seek):
+            self._media_music_seek.setRange(0, max(0, duration_ms))
+            self._media_music_seek.setValue(max(0, min(duration_ms, position_ms)))
+        self._media_music_seek.setEnabled(is_dm_controls)
+        self._media_effects_summary.setText(
+            ", ".join(str(value) for value in effects.get("active_titles", []) if str(value).strip()) or "No active effects"
+        )
+        self._media_music_list.setVisible(is_dm_controls)
+        self._media_effects_list.setVisible(is_dm_controls)
+        self._media_music_dm_controls.setVisible(is_dm_controls)
+        self._media_music_transport.setVisible(is_dm_controls)
+        self._media_music_mix_row.setVisible(is_dm_controls)
+        self._media_effects_dm_controls.setVisible(is_dm_controls)
+        self._media_effects_mix_row.setVisible(is_dm_controls)
+        with QSignalBlocker(self._media_music_loop):
+            self._media_music_loop.setChecked(bool(music.get("loop", False)))
+        with QSignalBlocker(self._media_music_mix_slider):
+            self._media_music_mix_slider.setValue(int(music.get("mix_volume", 100) or 100))
+        self._media_music_mix_value.setText(f"{int(music.get('mix_volume', 100) or 100)}%")
+        with QSignalBlocker(self._media_effects_mix_slider):
+            self._media_effects_mix_slider.setValue(int(effects.get("mix_volume", 100) or 100))
+        self._media_effects_mix_value.setText(f"{int(effects.get('mix_volume', 100) or 100)}%")
+        with QSignalBlocker(self._media_personal_music_slider):
+            self._media_personal_music_slider.setValue(int(self._audio_preferences.get("music_volume", 100) or 100))
+        with QSignalBlocker(self._media_personal_effects_slider):
+            self._media_personal_effects_slider.setValue(int(self._audio_preferences.get("effects_volume", 100) or 100))
+        with QSignalBlocker(self._media_personal_music_mute):
+            self._media_personal_music_mute.setChecked(bool(self._audio_preferences.get("mute_music", False)))
+        with QSignalBlocker(self._media_personal_effects_mute):
+            self._media_personal_effects_mute.setChecked(bool(self._audio_preferences.get("mute_effects", False)))
+        selected_music = self._selected_media_library_entry("music")
+        selected_effect = self._selected_media_library_entry("effects")
+        self._media_music_remove_btn.setEnabled(bool(selected_music))
+        self._media_music_rename_btn.setEnabled(bool(selected_music))
+        self._media_music_play_btn.setEnabled(bool(selected_music))
+        self._media_effects_remove_btn.setEnabled(bool(selected_effect))
+        self._media_effects_rename_btn.setEnabled(bool(selected_effect))
+        self._media_effects_play_btn.setEnabled(bool(selected_effect))
+        status_parts: list[str] = []
+        if not self._media_engine.available:
+            status_parts.append(self._media_engine.availability_error)
+        if self._media_status_line:
+            status_parts.append(self._media_status_line)
+        if self._online_mode == ONLINE_MODE_DM_HOST:
+            server = self._snapshot_media_state().get("server", {})
+            if bool(server.get("active")):
+                status_parts.append(f"Streaming on port {int(server.get('port') or 0)}.")
+            else:
+                status_parts.append("Media stream is offline.")
+        self._media_status_label.setText(" ".join(part for part in status_parts if str(part).strip()))
+
+    def _format_media_time(self, value_ms: int) -> str:
+        total_seconds = max(0, int(value_ms or 0) // 1000)
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes}:{seconds:02d}"
+
+    def _on_media_add_requested(self, kind: str) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        filenames, _selected_filter = QFileDialog.getOpenFileNames(
+            self,
+            "Select Media Files",
+            default_dnd_save_dir(),
+            "Audio Files (*.mp3 *.ogg *.m4a *.aac *.flac *.wav);;All Files (*)",
+        )
+        if not filenames:
+            return
+        added = 0
+        for filename in filenames:
+            ok, message = validate_media_source_path(filename)
+            if not ok:
+                self._on_media_runtime_error(f"{Path(filename).name}: {message}")
+                continue
+            if any(str(entry.get("path") or "") == str(filename) for entry in self._media_library.get(kind, [])):
+                continue
+            self._media_library.setdefault(kind, []).append(
+                {
+                    "asset_id": uuid.uuid4().hex,
+                    "title": Path(filename).stem,
+                    "path": str(filename),
+                }
+            )
+            added += 1
+        if added <= 0:
+            self._refresh_media_panel()
+            return
+        self._save_local_profile()
+        self._refresh_host_media_server_assets()
+        self._refresh_media_panel()
+
+    def _on_media_remove_requested(self, kind: str) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        selected = self._selected_media_library_entry(kind)
+        if selected is None:
+            return
+        asset_id = str(selected.get("asset_id") or "")
+        self._media_library[kind] = [
+            entry
+            for entry in self._media_library.get(kind, [])
+            if str(entry.get("asset_id") or "") != asset_id
+        ]
+        if kind == "music" and str(self._media_state["music"].get("asset_id") or "") == asset_id:
+            self._apply_media_event("music_stop", {"asset_id": asset_id}, broadcast=True)
+            self._media_state["music"]["asset_id"] = ""
+            self._media_state["music"]["title"] = ""
+        self._save_local_profile()
+        self._refresh_host_media_server_assets()
+        self._refresh_media_panel()
+
+    def _on_media_rename_requested(self, kind: str) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        selected = self._selected_media_library_entry(kind)
+        if selected is None:
+            return
+        current_title = str(selected.get("title") or "")
+        next_title, ok = QInputDialog.getText(self, "Rename Media", "Title:", text=current_title)
+        clean_title = str(next_title or "").strip()
+        if not ok or not clean_title:
+            return
+        asset_id = str(selected.get("asset_id") or "")
+        for entry in self._media_library.get(kind, []):
+            if str(entry.get("asset_id") or "") != asset_id:
+                continue
+            entry["title"] = clean_title
+            break
+        if kind == "music" and str(self._media_state["music"].get("asset_id") or "") == asset_id:
+            self._media_state["music"]["title"] = clean_title
+        self._save_local_profile()
+        self._refresh_host_media_server_assets()
+        self._refresh_media_panel()
+
+    def _on_media_music_selection_changed(self) -> None:
+        selected = self._selected_media_library_entry("music")
+        if selected is None:
+            self._refresh_media_panel()
+            return
+        self._cue_music_entry(selected, broadcast=self._online_mode == ONLINE_MODE_DM_HOST)
+
+    def _on_media_effect_selection_changed(self) -> None:
+        selected = self._selected_media_library_entry("effects")
+        if selected is None:
+            self._refresh_media_panel()
+            return
+        self._warm_effect_entry(selected, broadcast=self._online_mode == ONLINE_MODE_DM_HOST)
+
+    def _refresh_host_media_server_assets(self) -> None:
+        server = self._media_host_server
+        if server is None:
+            return
+        valid_asset_ids: set[str] = set()
+        for kind in ("music", "effects"):
+            for entry in self._media_library.get(kind, []):
+                asset_id = str(entry.get("asset_id") or "").strip()
+                if not asset_id:
+                    continue
+                title = str(entry.get("title") or asset_id).strip() or asset_id
+                path = str(entry.get("path") or "").strip()
+                ok, message = server.register_asset(
+                    asset_id=asset_id,
+                    title=title,
+                    kind="effect" if kind == "effects" else "music",
+                    path=path,
+                )
+                if not ok:
+                    self._append_server_log(f"[WARN] {title}: {message}")
+                    continue
+                valid_asset_ids.add(asset_id)
+        server.unregister_missing_assets(valid_asset_ids)
+        self._media_state["server"] = self._server_payload_for_media()
+
+    def _start_host_media_server(self) -> None:
+        if self._online_mode != ONLINE_MODE_DM_HOST:
+            return
+        if self._media_host_server is None:
+            self._media_host_server = SessionMediaHttpServer(log=lambda line: print(line))
+        ok, message = self._media_host_server.start()
+        if not ok:
+            self._media_status_line = f"Media stream failed to start: {message}"
+            self._append_server_log(f"[WARN] {self._media_status_line}")
+            self._media_state["server"] = {"active": False, "port": 0, "token": ""}
+            self._refresh_media_panel()
+            return
+        self._media_status_line = ""
+        self._refresh_host_media_server_assets()
+        self._refresh_media_panel()
+
+    def _stop_host_media_server(self) -> None:
+        if self._media_host_server is not None:
+            self._media_host_server.stop()
+            self._media_host_server = None
+        self._media_state["server"] = {"active": False, "port": 0, "token": ""}
+        self._refresh_media_panel()
+
+    def _reset_media_runtime_state(self) -> None:
+        self._media_engine.stop_all()
+        self._media_state = {
+            "server": {"active": False, "port": 0, "token": ""},
+            "music": {
+                "asset_id": "",
+                "title": "",
+                "state": "stopped",
+                "position_ms": 0,
+                "duration_ms": 0,
+                "anchor_utc": "",
+                "loop": False,
+                "mix_volume": 100,
+            },
+            "effects": {
+                "mix_volume": 100,
+                "active_titles": [],
+            },
+        }
+        self._media_status_line = ""
+        self._apply_audio_preferences_to_engine()
+        self._refresh_media_panel()
+
+    def _server_payload_for_media(self) -> dict:
+        server = self._media_host_server
+        if server is None or server.port <= 0:
+            return {"active": False, "port": 0, "token": ""}
+        return {
+            "active": True,
+            "port": int(server.port),
+            "token": str(server.token or ""),
+        }
+
+    def _snapshot_media_state(self) -> dict:
+        snapshot = json.loads(json.dumps(self._media_state))
+        music = snapshot.get("music", {})
+        if isinstance(music, dict):
+            music["position_ms"] = int(self._media_engine.current_music_position_ms)
+            music["duration_ms"] = int(self._media_engine.current_music_duration_ms)
+            music["state"] = str(self._media_engine.current_music_state or music.get("state") or "stopped")
+            if str(music.get("state") or "") in {"playing", "paused"}:
+                music["anchor_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        snapshot["server"] = self._server_payload_for_media()
+        return snapshot
+
+    def _media_server_payload_from_input(self, payload: dict | None) -> dict:
+        if isinstance(payload, dict):
+            server = payload.get("server")
+            if isinstance(server, dict):
+                return {
+                    "active": bool(server.get("active", False)),
+                    "port": int(server.get("port") or 0),
+                    "token": str(server.get("token") or ""),
+                }
+        existing = self._media_state.get("server", {})
+        if isinstance(existing, dict):
+            return {
+                "active": bool(existing.get("active", False)),
+                "port": int(existing.get("port") or 0),
+                "token": str(existing.get("token") or ""),
+            }
+        return {"active": False, "port": 0, "token": ""}
+
+    def _media_source_for_asset(self, *, asset_id: str, kind: str, filename: str = "", server: dict | None = None) -> str:
+        clean_asset_id = str(asset_id or "").strip()
+        if not clean_asset_id:
+            return ""
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            endpoint = self._media_server_payload_from_input({"server": server or self._media_state.get("server")})
+            if not bool(endpoint.get("active")):
+                return ""
+            host = str(self._host_ip or self._media_player_endpoint_host or "127.0.0.1").strip() or "127.0.0.1"
+            port = int(endpoint.get("port") or 0)
+            token = urllib.parse.quote(str(endpoint.get("token") or ""))
+            if port <= 0 or not token:
+                return ""
+            safe_kind = "effect" if kind == "effects" else "music"
+            return f"http://{host}:{port}/{safe_kind}/{clean_asset_id}?token={token}"
+        entry = self._lookup_media_entry(kind, clean_asset_id)
+        if entry is None:
+            return ""
+        return str(entry.get("path") or "")
+
+    def _effect_cache_path(self, asset_id: str, filename: str) -> Path:
+        suffix = Path(str(filename or "")).suffix or ".bin"
+        safe_name = _sanitize_filename(f"{str(asset_id or '').strip()}{suffix}", f"{asset_id}.bin")
+        return online_media_cache_dir(self._active_online_runtime_cache_id()) / safe_name
+
+    def _cue_music_entry(self, entry: dict, *, broadcast: bool) -> None:
+        asset_id = str(entry.get("asset_id") or "").strip()
+        title = str(entry.get("title") or asset_id).strip() or asset_id
+        source = self._media_source_for_asset(asset_id=asset_id, kind="music")
+        if not source:
+            self._on_media_runtime_error(f"Unable to resolve music source for {title}.")
+            return
+        self._media_state["music"]["asset_id"] = asset_id
+        self._media_state["music"]["title"] = title
+        self._media_state["music"]["duration_ms"] = int(self._media_engine.current_music_duration_ms)
+        self._media_engine.warm_music(source)
+        if broadcast:
+            self._broadcast_media_event_if_host(
+                "music_warm",
+                {
+                    "asset_id": asset_id,
+                    "title": title,
+                    "server": self._server_payload_for_media(),
+                },
+            )
+            self._broadcast_snapshot_if_host()
+        self._refresh_media_panel()
+
+    def _warm_effect_entry(self, entry: dict, *, broadcast: bool) -> None:
+        asset_id = str(entry.get("asset_id") or "").strip()
+        if not asset_id:
+            return
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            return
+        if broadcast:
+            filename = Path(str(entry.get("path") or "")).name
+            self._broadcast_media_event_if_host(
+                "effect_warm",
+                {
+                    "asset_id": asset_id,
+                    "title": str(entry.get("title") or asset_id),
+                    "filename": filename,
+                    "server": self._server_payload_for_media(),
+                },
+            )
+
+    def _broadcast_media_event_if_host(self, action: str, payload: dict) -> None:
+        if self._online_mode != ONLINE_MODE_DM_HOST or self._host_controller is None:
+            return
+        self._host_controller.broadcast_media_event(action=action, payload=payload)
+
+    def _apply_media_event(self, action: str, payload: dict, *, broadcast: bool = False) -> None:
+        clean_action = str(action or "").strip()
+        server_payload = self._media_server_payload_from_input(payload)
+        if server_payload:
+            self._media_state["server"] = server_payload
+
+        if clean_action == "music_warm":
+            asset_id = str(payload.get("asset_id") or "").strip()
+            title = str(payload.get("title") or asset_id).strip() or asset_id
+            self._media_state["music"]["asset_id"] = asset_id
+            self._media_state["music"]["title"] = title
+            source = self._media_source_for_asset(asset_id=asset_id, kind="music", server=server_payload)
+            if source:
+                self._media_engine.warm_music(source)
+        elif clean_action == "music_play":
+            asset_id = str(payload.get("asset_id") or self._media_state["music"].get("asset_id") or "").strip()
+            title = str(payload.get("title") or self._media_state["music"].get("title") or asset_id).strip() or asset_id
+            position_ms = max(0, int(payload.get("position_ms") or 0))
+            loop = bool(payload.get("loop", self._media_state["music"].get("loop", False)))
+            source = self._media_source_for_asset(asset_id=asset_id, kind="music", server=server_payload)
+            if source:
+                self._media_engine.play_music(source, position_ms=position_ms, paused=False, loop=loop)
+            self._media_state["music"].update(
+                {
+                    "asset_id": asset_id,
+                    "title": title,
+                    "state": "playing",
+                    "position_ms": position_ms,
+                    "loop": loop,
+                    "anchor_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+            )
+        elif clean_action == "music_pause":
+            position_ms = max(0, int(payload.get("position_ms") or self._media_engine.current_music_position_ms))
+            self._media_engine.pause_music()
+            self._media_state["music"]["state"] = "paused"
+            self._media_state["music"]["position_ms"] = position_ms
+            self._media_state["music"]["anchor_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        elif clean_action == "music_stop":
+            self._media_engine.stop_music()
+            self._media_state["music"]["state"] = "stopped"
+            self._media_state["music"]["position_ms"] = 0
+            self._media_state["music"]["anchor_utc"] = ""
+        elif clean_action == "music_seek":
+            position_ms = max(0, int(payload.get("position_ms") or 0))
+            self._media_engine.seek_music(position_ms)
+            self._media_state["music"]["position_ms"] = position_ms
+            self._media_state["music"]["anchor_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        elif clean_action == "music_loop":
+            loop = bool(payload.get("loop", False))
+            self._media_state["music"]["loop"] = loop
+            self._media_engine.set_music_loop(loop)
+        elif clean_action == "music_mix":
+            mix_volume = max(0, min(100, int(payload.get("mix_volume") or 0)))
+            self._media_state["music"]["mix_volume"] = mix_volume
+            self._media_engine.set_mix_levels(music_mix=mix_volume)
+        elif clean_action == "effects_mix":
+            mix_volume = max(0, min(100, int(payload.get("mix_volume") or 0)))
+            self._media_state["effects"]["mix_volume"] = mix_volume
+            self._media_engine.set_mix_levels(effects_mix=mix_volume)
+        elif clean_action == "effect_warm":
+            asset_id = str(payload.get("asset_id") or "").strip()
+            filename = str(payload.get("filename") or f"{asset_id}.bin")
+            url = self._media_source_for_asset(asset_id=asset_id, kind="effects", filename=filename, server=server_payload)
+            if self._online_mode == ONLINE_MODE_PLAYER and url:
+                cache_path = self._effect_cache_path(asset_id, filename)
+                self._media_engine.ensure_effect_cached(
+                    cache_key=asset_id,
+                    source_url=url,
+                    target_path=str(cache_path),
+                    play_when_ready=False,
+                )
+        elif clean_action == "effect_play":
+            asset_id = str(payload.get("asset_id") or "").strip()
+            title = str(payload.get("title") or asset_id).strip() or asset_id
+            filename = str(payload.get("filename") or f"{asset_id}.bin")
+            self._mark_media_effect_active(title)
+            if self._online_mode == ONLINE_MODE_PLAYER:
+                url = self._media_source_for_asset(asset_id=asset_id, kind="effects", filename=filename, server=server_payload)
+                if url:
+                    cache_path = self._effect_cache_path(asset_id, filename)
+                    self._media_engine.ensure_effect_cached(
+                        cache_key=asset_id,
+                        source_url=url,
+                        target_path=str(cache_path),
+                        play_when_ready=True,
+                    )
+            else:
+                source = self._media_source_for_asset(asset_id=asset_id, kind="effects", filename=filename)
+                if source:
+                    self._media_engine.play_effect(cache_key=asset_id, source=source)
+        elif clean_action == "effect_stop_all":
+            self._media_engine.stop_all_effects()
+            self._media_state["effects"]["active_titles"] = []
+
+        if broadcast:
+            next_payload = dict(payload)
+            next_payload["server"] = self._server_payload_for_media()
+            self._broadcast_media_event_if_host(clean_action, next_payload)
+            if self._online_mode == ONLINE_MODE_DM_HOST:
+                self._broadcast_snapshot_if_host()
+        self._refresh_media_panel()
+
+    def _mark_media_effect_active(self, title: str) -> None:
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            return
+        active_titles = [
+            str(value).strip()
+            for value in self._media_state["effects"].get("active_titles", [])
+            if str(value).strip()
+        ]
+        active_titles.append(clean_title)
+        self._media_state["effects"]["active_titles"] = active_titles[-4:]
+        QTimer.singleShot(2500, lambda current=clean_title: self._expire_media_effect_title(current))
+
+    def _expire_media_effect_title(self, title: str) -> None:
+        active_titles = [
+            str(value).strip()
+            for value in self._media_state["effects"].get("active_titles", [])
+            if str(value).strip()
+        ]
+        clean_title = str(title or "").strip()
+        if clean_title in active_titles:
+            active_titles.remove(clean_title)
+            self._media_state["effects"]["active_titles"] = active_titles
+            self._refresh_media_panel()
+
+    def _on_media_music_play_requested(self) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        selected = self._selected_media_library_entry("music")
+        if selected is None:
+            selected = self._lookup_media_entry("music", str(self._media_state["music"].get("asset_id") or ""))
+        if selected is None:
+            return
+        position_ms = max(0, int(self._media_music_seek.value() or 0))
+        self._apply_media_event(
+            "music_play",
+            {
+                "asset_id": str(selected.get("asset_id") or ""),
+                "title": str(selected.get("title") or ""),
+                "position_ms": position_ms,
+                "loop": bool(self._media_music_loop.isChecked()),
+            },
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
+    def _on_media_music_pause_requested(self) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event(
+            "music_pause",
+            {"position_ms": self._media_engine.current_music_position_ms},
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
+    def _on_media_music_stop_requested(self) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event("music_stop", {}, broadcast=self._online_mode == ONLINE_MODE_DM_HOST)
+
+    def _on_media_music_loop_toggled(self, checked: bool) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event(
+            "music_loop",
+            {"loop": bool(checked)},
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
+    def _on_media_music_seek_released(self) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event(
+            "music_seek",
+            {"position_ms": int(self._media_music_seek.value() or 0)},
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
+    def _on_media_music_mix_changed(self, value: int) -> None:
+        self._media_music_mix_value.setText(f"{int(value)}%")
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event(
+            "music_mix",
+            {"mix_volume": int(value)},
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
+    def _on_media_effect_play_requested(self) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        selected = self._selected_media_library_entry("effects")
+        if selected is None:
+            return
+        self._apply_media_event(
+            "effect_play",
+            {
+                "asset_id": str(selected.get("asset_id") or ""),
+                "title": str(selected.get("title") or ""),
+                "filename": Path(str(selected.get("path") or "")).name,
+            },
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
+    def _on_media_effect_stop_all_requested(self) -> None:
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event(
+            "effect_stop_all",
+            {},
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
+    def _on_media_effects_mix_changed(self, value: int) -> None:
+        self._media_effects_mix_value.setText(f"{int(value)}%")
+        if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
+            return
+        self._apply_media_event(
+            "effects_mix",
+            {"mix_volume": int(value)},
+            broadcast=self._online_mode == ONLINE_MODE_DM_HOST,
+        )
+
+    def _save_audio_preferences(self) -> None:
+        self._save_local_profile()
+        self._apply_audio_preferences_to_engine()
+        self._refresh_media_panel()
+
+    def _on_media_personal_music_changed(self, value: int) -> None:
+        self._audio_preferences["music_volume"] = int(value)
+        self._save_audio_preferences()
+
+    def _on_media_personal_effects_changed(self, value: int) -> None:
+        self._audio_preferences["effects_volume"] = int(value)
+        self._save_audio_preferences()
+
+    def _on_media_personal_mute_music_changed(self, checked: bool) -> None:
+        self._audio_preferences["mute_music"] = bool(checked)
+        self._save_audio_preferences()
+
+    def _on_media_personal_mute_effects_changed(self, checked: bool) -> None:
+        self._audio_preferences["mute_effects"] = bool(checked)
+        self._save_audio_preferences()
+
+    def _apply_audio_preferences_to_engine(self) -> None:
+        self._media_engine.set_personal_preferences(
+            music_volume=int(self._audio_preferences.get("music_volume", 100) or 100),
+            effects_volume=int(self._audio_preferences.get("effects_volume", 100) or 100),
+            mute_music=bool(self._audio_preferences.get("mute_music", False)),
+            mute_effects=bool(self._audio_preferences.get("mute_effects", False)),
+        )
+        self._media_engine.set_mix_levels(
+            music_mix=int(self._media_state["music"].get("mix_volume", 100) or 100),
+            effects_mix=int(self._media_state["effects"].get("mix_volume", 100) or 100),
+        )
+
+    def _on_media_music_position_changed(self, position_ms: int, duration_ms: int) -> None:
+        self._media_state["music"]["position_ms"] = int(position_ms)
+        self._media_state["music"]["duration_ms"] = int(duration_ms)
+        self._refresh_media_panel()
+
+    def _on_media_music_playback_state_changed(self, state: str) -> None:
+        self._media_state["music"]["state"] = str(state or "stopped")
+        if str(state or "") in {"playing", "paused"}:
+            self._media_state["music"]["anchor_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self._refresh_media_panel()
+
+    def _on_media_runtime_error(self, message: str) -> None:
+        clean_message = str(message or "").strip()
+        if not clean_message:
+            return
+        self._media_status_line = clean_message
+        if self._online_mode in (ONLINE_MODE_DM_HOST, ONLINE_MODE_PLAYER):
+            self._append_server_log(f"[WARN] {clean_message}")
+        self._refresh_media_panel()
+
+    def _on_media_effect_cache_ready(self, _cache_key: str, _path: str) -> None:
+        self._media_status_line = ""
+        self._refresh_media_panel()
+
+    def _on_media_effect_cache_failed(self, _cache_key: str, message: str) -> None:
+        self._on_media_runtime_error(message)
+
+    def _apply_snapshot_media_state(self, media_state: dict) -> None:
+        if not isinstance(media_state, dict):
+            return
+        server = self._media_server_payload_from_input(media_state)
+        self._media_state["server"] = server
+        music = media_state.get("music")
+        if isinstance(music, dict):
+            self._media_state["music"].update(
+                {
+                    "asset_id": str(music.get("asset_id") or ""),
+                    "title": str(music.get("title") or ""),
+                    "state": str(music.get("state") or "stopped"),
+                    "position_ms": max(0, int(music.get("position_ms") or 0)),
+                    "duration_ms": max(0, int(music.get("duration_ms") or 0)),
+                    "anchor_utc": str(music.get("anchor_utc") or ""),
+                    "loop": bool(music.get("loop", False)),
+                    "mix_volume": max(0, min(100, int(music.get("mix_volume") or 100))),
+                }
+            )
+        effects = media_state.get("effects")
+        if isinstance(effects, dict):
+            self._media_state["effects"].update(
+                {
+                    "mix_volume": max(0, min(100, int(effects.get("mix_volume") or 100))),
+                    "active_titles": [
+                        str(value).strip()
+                        for value in effects.get("active_titles", [])
+                        if str(value).strip()
+                    ],
+                }
+            )
+        self._apply_audio_preferences_to_engine()
+        asset_id = str(self._media_state["music"].get("asset_id") or "").strip()
+        if asset_id:
+            title = str(self._media_state["music"].get("title") or asset_id).strip() or asset_id
+            self._apply_media_event(
+                "music_warm",
+                {
+                    "asset_id": asset_id,
+                    "title": title,
+                    "server": server,
+                },
+                broadcast=False,
+            )
+            state = str(self._media_state["music"].get("state") or "stopped")
+            position_ms = int(self._media_state["music"].get("position_ms") or 0)
+            if state == "playing":
+                self._apply_media_event(
+                    "music_play",
+                    {
+                        "asset_id": asset_id,
+                        "title": title,
+                        "position_ms": position_ms,
+                        "loop": bool(self._media_state["music"].get("loop", False)),
+                        "server": server,
+                    },
+                    broadcast=False,
+                )
+            elif state == "paused":
+                self._apply_media_event(
+                    "music_play",
+                    {
+                        "asset_id": asset_id,
+                        "title": title,
+                        "position_ms": position_ms,
+                        "loop": bool(self._media_state["music"].get("loop", False)),
+                        "server": server,
+                    },
+                    broadcast=False,
+                )
+                self._media_engine.pause_music()
+                self._media_state["music"]["state"] = "paused"
+        self._refresh_media_panel()
+
+    def _on_client_media_event_received(self, message: dict) -> None:
+        if not isinstance(message, dict):
+            return
+        action = str(message.get("action") or "").strip()
+        payload = message.get("payload")
+        if not isinstance(payload, dict) or not action:
+            return
+        self._apply_media_event(action, payload, broadcast=False)
 
     def _selected_loot_pool_ids(self) -> list[str]:
         if not hasattr(self, "_loot_pool_list"):
@@ -8906,6 +10002,7 @@ class DungeonAppletWidget(QWidget):
             "players": self._connected_players,
             "loot_pool": list(self._session_loot_pool),
             "initiative_state": initiative_state,
+            "media_state": self._snapshot_media_state(),
             "linked_character_payload_included": bool(include_linked_character_payload),
         }
 
@@ -14645,6 +15742,9 @@ class DungeonAppletWidget(QWidget):
                     self._initiative_overlay.hide()
             self._update_initiative_reopen_button_visibility()
             self._render_initiative_overlay()
+        media_state = snapshot.get("media_state")
+        if isinstance(media_state, dict):
+            self._apply_snapshot_media_state(media_state)
         collection_name = snapshot.get("collection_name")
         if isinstance(collection_name, str) and collection_name.strip():
             self._collection_name = collection_name.strip()
@@ -15100,6 +16200,8 @@ class DungeonAppletWidget(QWidget):
         self._host_scene_watchdog_timer.stop()
         self._loot_claim_reservation_timer.stop()
         self._save_local_profile()
+        self._stop_host_media_server()
+        self._media_engine.stop_all()
         if self._host_controller is not None:
             self._host_controller.stop()
         if self._client_controller is not None:
@@ -15127,6 +16229,8 @@ class DungeonAppletWidget(QWidget):
             "known_players": {},
             "last_player_name": "",
             "autosave_enabled": False,
+            "media_library": _default_media_library(),
+            "audio_preferences": _default_audio_preferences(),
         }
         path = self._local_profile_path()
         try:
@@ -15141,6 +16245,8 @@ class DungeonAppletWidget(QWidget):
                         merged["character_ids"] = {}
                     if not isinstance(merged.get("known_players"), dict):
                         merged["known_players"] = {}
+                    merged["media_library"] = _sanitize_media_library(merged.get("media_library"))
+                    merged["audio_preferences"] = _sanitize_audio_preferences(merged.get("audio_preferences"))
                     return merged
         except Exception:
             pass
@@ -15162,6 +16268,8 @@ class DungeonAppletWidget(QWidget):
                 getattr(self, "_local_player_name", "") or payload.get("last_player_name") or ""
             )
             payload["autosave_enabled"] = bool(getattr(self, "_autosave_enabled", False))
+            payload["media_library"] = _sanitize_media_library(getattr(self, "_media_library", {}))
+            payload["audio_preferences"] = _sanitize_audio_preferences(getattr(self, "_audio_preferences", {}))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:

@@ -62,6 +62,7 @@ _KNOWN_TEST_FILES = frozenset(
         "test_dungeon_items.py",
         "test_dungeon_join_connect_fallback.py",
         "test_dungeon_lifecycle_cleanup.py",
+        "test_dungeon_media.py",
         "test_dungeon_online_reconnect_behavior.py",
         "test_dungeon_online_reconnect_consistency.py",
         "test_dungeon_online_philosophy_guards.py",
