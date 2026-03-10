@@ -122,7 +122,7 @@ from dungeon_states import (
     DrawingPolygonState, PlacingState, EraserState, FogState, EncounterPlacingState,
     PingState, ImagePlacingState
 )
-from dungeon_items import EntityItem, FogItem
+from dungeon_items import EntityItem, FogItem, _qt_object_is_valid
 from ui.widgets import PlusMinusSpinBox
 from online_session.authz import authorize_command
 from online_session.controllers import ClientSessionController, HostSessionController
@@ -987,6 +987,7 @@ class DungeonCanvas(QGraphicsView):
         self._stroke_owner_player_id = ""
         self._interaction_blocked_checker: Callable[[], bool] | None = None
         self._delete_change_callback: Callable[[], None] | None = None
+        self._bypass_layer_filter_for_owned_items = False
         
         # Undo stack for commands
         self.undo_stack = QUndoStack(self)
@@ -1064,6 +1065,9 @@ class DungeonCanvas(QGraphicsView):
     ) -> None:
         self._interaction_blocked_checker = checker
 
+    def set_layer_filter_bypass_for_owned_items(self, enabled: bool) -> None:
+        self._bypass_layer_filter_for_owned_items = bool(enabled)
+
     def _interactions_blocked(self) -> bool:
         checker = self._interaction_blocked_checker
         if checker is None:
@@ -1087,9 +1091,9 @@ class DungeonCanvas(QGraphicsView):
         # Zooming: Ctrl + Scroll
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             if event.angleDelta().y() > 0:
-                self.zoom_in()
+                self.zoom_in(anchor_under_mouse=True)
             else:
-                self.zoom_out()
+                self.zoom_out(anchor_under_mouse=True)
             event.accept()
         else:
             super().wheelEvent(event)
@@ -1109,27 +1113,88 @@ class DungeonCanvas(QGraphicsView):
         super().resizeEvent(event)
         self.viewChanged.emit(self._get_center_scene_pos())
 
-    def zoom_in(self):
+    def _apply_zoom(self, factor: float, *, anchor_under_mouse: bool) -> None:
+        previous_anchor = self.transformationAnchor()
+        target_anchor = (
+            QGraphicsView.ViewportAnchor.AnchorUnderMouse
+            if anchor_under_mouse
+            else QGraphicsView.ViewportAnchor.AnchorViewCenter
+        )
+        if previous_anchor != target_anchor:
+            self.setTransformationAnchor(target_anchor)
+            self.setResizeAnchor(target_anchor)
+        try:
+            self.scale(factor, factor)
+        finally:
+            if previous_anchor != target_anchor:
+                self.setTransformationAnchor(previous_anchor)
+                self.setResizeAnchor(previous_anchor)
+
+    def zoom_in(self, *, anchor_under_mouse: bool = False):
         factor = 1.2
         new_zoom = self._current_zoom * factor
         if new_zoom <= 10.0: # Max 1000%
             self._current_zoom = new_zoom
-            self.scale(factor, factor)
+            self._apply_zoom(factor, anchor_under_mouse=anchor_under_mouse)
             self.zoomChanged.emit(self._current_zoom)
             self.viewChanged.emit(self._get_center_scene_pos())
 
-    def zoom_out(self):
+    def zoom_out(self, *, anchor_under_mouse: bool = False):
         factor = 1 / 1.2
         new_zoom = self._current_zoom * factor
         if new_zoom >= 0.01: # Min 1%
             self._current_zoom = new_zoom
-            self.scale(factor, factor)
+            self._apply_zoom(factor, anchor_under_mouse=anchor_under_mouse)
             self.zoomChanged.emit(self._current_zoom)
             self.viewChanged.emit(self._get_center_scene_pos())
 
     def reset_view(self):
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.resetTransform()
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self._current_zoom = 1.0
+        self.zoomChanged.emit(self._current_zoom)
         self.centerOn(0, 0)
         self.viewChanged.emit(QPointF(0, 0))
+
+    def has_active_local_interaction(self) -> bool:
+        if self._is_panning:
+            return True
+        state = self._current_state
+        if state is None:
+            return False
+        if bool(getattr(state, "is_dragging", False)):
+            return True
+        if bool(getattr(state, "is_drawing", False)):
+            return True
+        if bool(getattr(state, "is_erasing", False)):
+            return True
+        if getattr(state, "_resizing_room", None) is not None:
+            return True
+        if getattr(state, "origin", None) is not None and getattr(state, "preview_item", None) is not None:
+            return True
+        if getattr(state, "current_path", None) is not None and getattr(state, "preview_item", None) is not None:
+            return True
+        if getattr(state, "points", None) and getattr(state, "preview", None) is not None:
+            return True
+        return False
+
+    def prepare_for_scene_reload(self) -> None:
+        self._is_panning = False
+        state = self._current_state
+        if state is not None:
+            cancel_interaction = getattr(state, "cancel_active_interaction", None)
+            if callable(cancel_interaction):
+                cancel_interaction()
+            cleanup = getattr(state, "cleanup", None)
+            if callable(cleanup):
+                try:
+                    cleanup()
+                except RuntimeError:
+                    pass
+        self.scene().clearSelection()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         scene_pos = self.mapToScene(event.position().toPoint())
@@ -1147,6 +1212,15 @@ class DungeonCanvas(QGraphicsView):
                 
                 layer = item.data(ROLE_LAYER) or LAYER_FG
                 if layer == self._current_layer:
+                    top_matching = item
+                    break
+                if (
+                    self._bypass_layer_filter_for_owned_items
+                    and (
+                        item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+                        or item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+                    )
+                ):
                     top_matching = item
                     break
             
@@ -2828,16 +2902,35 @@ class EntityInspectorPanel(QWidget):
             
         self.name_edit.editingFinished.connect(self._update_name)
 
+    def _entity_is_valid(self, entity: object | None = None) -> bool:
+        target = self._entity if entity is None else entity
+        return bool(target is not None and _qt_object_is_valid(target))
+
+    def has_pending_local_edits(self) -> bool:
+        if self._change_timer.isActive() or bool(self._pending_changes):
+            return True
+        if not self._entity_is_valid():
+            return False
+        current_label = str(self._entity.data(ROLE_LABEL) or "Entity")
+        if (
+            getattr(self, "name_edit", None) is not None
+            and self.name_edit.hasFocus()
+            and self.name_edit.text() != current_label
+        ):
+            return True
+        return False
+
     def set_entity(self, entity):
         self._commit_changes() # Commit any pending from previous entity
-        self._entity = entity
+        self._entity = entity if self._entity_is_valid(entity) else None
         self._pending_changes.clear()
         
-        if not entity:
+        if not self._entity:
             self.linked_character_lbl.setText("Linked Character: None")
             self.link_character_btn.setEnabled(False)
             self.hide()
             return
+        entity = self._entity
             
         # Update UI from entity
         self.hp_stat.set_data(entity.hp, entity._max_hp)
@@ -2872,6 +2965,7 @@ class EntityInspectorPanel(QWidget):
         # Name
         name = entity.data(ROLE_LABEL) or "Entity"
         self.name_edit.setText(name)
+        self.name_edit.setModified(False)
         owner_id = entity.data(ROLE_OWNER_PLAYER_ID) or ""
         owner_index = self.connected_player_combo.findData(owner_id)
         if owner_index < 0:
@@ -2892,7 +2986,7 @@ class EntityInspectorPanel(QWidget):
 
     def set_player_options(self, players: dict[str, str]) -> None:
         previous_owner = ""
-        if self._entity is not None:
+        if self._entity_is_valid():
             previous_owner = self._entity.data(ROLE_OWNER_PLAYER_ID) or ""
         with QSignalBlocker(self.connected_player_combo):
             self.connected_player_combo.clear()
@@ -2906,11 +3000,11 @@ class EntityInspectorPanel(QWidget):
 
     def set_owner_assignment_enabled(self, enabled: bool) -> None:
         self._player_assignment_enabled = bool(enabled)
-        self.connected_player_combo.setEnabled(self._player_assignment_enabled and self._entity is not None)
+        self.connected_player_combo.setEnabled(self._player_assignment_enabled and self._entity_is_valid())
 
     def set_link_character_enabled(self, enabled: bool) -> None:
         self._link_character_enabled = bool(enabled)
-        self.link_character_btn.setEnabled(self._link_character_enabled and self._entity is not None)
+        self.link_character_btn.setEnabled(self._link_character_enabled and self._entity_is_valid())
 
     def set_linked_character_info(self, name: str) -> None:
         clean_name = str(name or "").strip()
@@ -2923,7 +3017,7 @@ class EntityInspectorPanel(QWidget):
     def _sync_linked_character_mode(self) -> None:
         actions_text = ""
         desc_text = ""
-        if self._entity is not None:
+        if self._entity_is_valid():
             actions_text = str(getattr(self._entity, "actions", "") or "").strip()
             desc_text = str(getattr(self._entity, "description", "") or "").strip()
         has_actions = bool(actions_text)
@@ -2954,7 +3048,7 @@ class EntityInspectorPanel(QWidget):
 
     def _update_entity_type_label(self) -> None:
         owner_id = ""
-        if self._entity is not None:
+        if self._entity_is_valid():
             owner_id = str(self._entity.data(ROLE_OWNER_PLAYER_ID) or "").strip()
         self.type_lbl.setText("Player" if owner_id else "NPC")
 
@@ -2962,7 +3056,7 @@ class EntityInspectorPanel(QWidget):
         self._defer_icon_apply = bool(enabled)
 
     def _on_owner_combo_changed(self, index: int) -> None:
-        if not self._entity or not self._player_assignment_enabled:
+        if not self._entity_is_valid() or not self._player_assignment_enabled:
             return
         new_owner = self.connected_player_combo.itemData(index) or ""
         old_owner = self._entity.data(ROLE_OWNER_PLAYER_ID) or ""
@@ -2987,21 +3081,23 @@ class EntityInspectorPanel(QWidget):
         self.entityEdited.emit()
 
     def _update_name(self):
-        if self._entity:
-            from dungeon_commands import PropertyChangeCommand
-            new_name = self.name_edit.text()
-            old_name = self._entity.data(ROLE_LABEL) or ""
-            if new_name == old_name:
-                return
-            if self.undo_stack:
-                cmd = PropertyChangeCommand(self._entity, ROLE_LABEL, old_name, new_name, "Rename Entity")
-                self.undo_stack.push(cmd)
-            else:
-                self._entity.setData(ROLE_LABEL, new_name)
-            self.entityEdited.emit()
+        if not self._entity_is_valid():
+            return
+        from dungeon_commands import PropertyChangeCommand
+        new_name = self.name_edit.text()
+        old_name = self._entity.data(ROLE_LABEL) or ""
+        if new_name == old_name:
+            return
+        if self.undo_stack:
+            cmd = PropertyChangeCommand(self._entity, ROLE_LABEL, old_name, new_name, "Rename Entity")
+            self.undo_stack.push(cmd)
+        else:
+            self._entity.setData(ROLE_LABEL, new_name)
+        self.name_edit.setModified(False)
+        self.entityEdited.emit()
 
     def _set_icon(self) -> None:
-        if not self._entity:
+        if not self._entity_is_valid():
             return
         start_dir = str(Path(self._entity.icon_path).parent) if getattr(self._entity, "icon_path", "") else str(Path.home())
         filename, _ = QFileDialog.getOpenFileName(
@@ -3070,12 +3166,12 @@ class EntityInspectorPanel(QWidget):
         return QIcon(pix)
 
     def _clear_icon(self) -> None:
-        if not self._entity:
+        if not self._entity_is_valid():
             return
         self._track_change("icon_path", "")
 
     def _on_size_w_changed(self, value: int) -> None:
-        if not self._entity:
+        if not self._entity_is_valid():
             return
         self._track_change("size_w_cells", int(value))
         if self.lock_square_check.isChecked():
@@ -3085,12 +3181,12 @@ class EntityInspectorPanel(QWidget):
             self._track_change("size_h_cells", int(value))
 
     def _on_size_h_changed(self, value: int) -> None:
-        if not self._entity or self.lock_square_check.isChecked():
+        if not self._entity_is_valid() or self.lock_square_check.isChecked():
             return
         self._track_change("size_h_cells", int(value))
 
     def _on_lock_square_toggled(self, checked: bool) -> None:
-        if not self._entity:
+        if not self._entity_is_valid():
             return
         is_checked = bool(checked)
         self.size_h_spin.setEnabled(not is_checked)
@@ -3103,7 +3199,8 @@ class EntityInspectorPanel(QWidget):
                 self._track_change("size_h_cells", int(width_value))
 
     def _update_icon_status_label(self) -> None:
-        if not self._entity:
+        if not self._entity_is_valid():
+            self._entity = None
             self.icon_status_lbl.setText("No entity selected.")
             self.icon_status_lbl.setStyleSheet("color: #a1a1aa; font-size: 11px;")
             self.btn_clear_icon.setEnabled(False)
@@ -3124,7 +3221,9 @@ class EntityInspectorPanel(QWidget):
         self.btn_clear_icon.setEnabled(bool(getattr(self._entity, "icon_path", "")))
 
     def _track_change(self, attr: str, new_value):
-        if not self._entity:
+        if not self._entity_is_valid():
+            self._entity = None
+            self._pending_changes.clear()
             return
         current_val = getattr(self._entity, attr)
         if attr not in self._pending_changes:
@@ -3139,7 +3238,12 @@ class EntityInspectorPanel(QWidget):
         self._change_timer.start()
 
     def _commit_changes(self):
-        if not self._entity or not self.undo_stack:
+        self._change_timer.stop()
+        if not self._entity_is_valid():
+            self._entity = None
+            self._pending_changes.clear()
+            return
+        if not self.undo_stack:
             self._pending_changes.clear()
             return
             
@@ -4571,6 +4675,8 @@ class DungeonAppletWidget(QWidget):
         self._pending_player_state_update_request_id: str = ""
         self._player_connection_ready: bool = False
         self._awaiting_player_snapshot: bool = False
+        self._deferred_client_sync_events: list[tuple[str, dict]] = []
+        self._last_local_player_scene_change_monotonic: float = 0.0
         self._suppress_external_inventory_forward = False
         self._online_inventory_sync_fingerprints: dict[str, str] = {}
         self._recent_local_character_sync_payloads_by_sheet_id: dict[str, dict] = {}
@@ -4599,6 +4705,10 @@ class DungeonAppletWidget(QWidget):
         self._reconnect_status_anim_timer.setSingleShot(False)
         self._reconnect_status_anim_timer.setInterval(420)
         self._reconnect_status_anim_timer.timeout.connect(self._on_reconnect_status_animation_tick)
+        self._deferred_client_sync_timer = QTimer(self)
+        self._deferred_client_sync_timer.setSingleShot(True)
+        self._deferred_client_sync_timer.setInterval(180)
+        self._deferred_client_sync_timer.timeout.connect(self._flush_deferred_client_sync_events)
         self._debug_instance_id: str = uuid.uuid4().hex[:8]
         self._debug_profile: str = selected_debug_save_profile() or "DEFAULT"
         self._debug_label: str = str(os.environ.get("DMT_ONLINE_DEBUG_LABEL") or "").strip()
@@ -5317,6 +5427,9 @@ class DungeonAppletWidget(QWidget):
             self._awaiting_player_snapshot = False
             self._pending_player_state_update = None
             self._pending_player_state_update_request_id = ""
+            self._deferred_client_sync_events.clear()
+            self._deferred_client_sync_timer.stop()
+            self._last_local_player_scene_change_monotonic = 0.0
             self._online_inventory_sync_fingerprints.clear()
             self._recent_local_character_sync_payloads_by_sheet_id.clear()
             self._approved_host_inventory_sync_characters.clear()
@@ -10220,6 +10333,7 @@ class DungeonAppletWidget(QWidget):
     def _apply_online_permissions(self) -> None:
         if self._online_mode == ONLINE_MODE_DM_HOST:
             self.canvas.set_stroke_owner_player_id("")
+            self.canvas.set_layer_filter_bypass_for_owned_items(False)
             self.tool_panel.set_player_tool_restrictions(False)
             self.tool_panel.set_online_loot_actions(
                 show_pool=True,
@@ -10251,6 +10365,7 @@ class DungeonAppletWidget(QWidget):
             interactions_blocked = self._player_interactions_temporarily_blocked()
             player_can_edit = bool((not interactions_blocked) and self._local_player_id)
             self.canvas.set_stroke_owner_player_id(str(self._local_player_id or "") if player_can_edit else "")
+            self.canvas.set_layer_filter_bypass_for_owned_items(True)
             allowed_tools = PLAYER_ALLOWED_TOOLS if not interactions_blocked else {ToolType.SELECT}
             self.tool_panel.set_player_tool_restrictions(True, allowed_tools)
             self.tool_panel.set_online_loot_actions(
@@ -10288,6 +10403,7 @@ class DungeonAppletWidget(QWidget):
 
         # Local DM mode
         self.canvas.set_stroke_owner_player_id("")
+        self.canvas.set_layer_filter_bypass_for_owned_items(False)
         self.tool_panel.set_player_tool_restrictions(False)
         self.tool_panel.set_online_loot_actions(
             show_pool=False,
@@ -10301,7 +10417,7 @@ class DungeonAppletWidget(QWidget):
         self._loot_add_note_btn.setVisible(True)
         self._loot_remove_btn.setVisible(True)
         self._loot_claim_btn.setVisible(False)
-        for item in self.canvas.scene().items():
+        for item in reversed(self.canvas.scene().items()):
             if isinstance(item, EntityItem):
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -11493,7 +11609,7 @@ class DungeonAppletWidget(QWidget):
         clean_owner = str(owner_player_id or "").strip()
         if not clean_stroke_id:
             return None
-        for item in self.canvas.scene().items():
+        for item in reversed(self.canvas.scene().items()):
             if not isinstance(item, QGraphicsPathItem):
                 continue
             if str(item.data(ROLE_KIND) or "").strip() != "stroke":
@@ -11575,7 +11691,7 @@ class DungeonAppletWidget(QWidget):
     def _build_live_player_strokes_by_key(self, player_id: str) -> dict[str, QGraphicsPathItem]:
         player_strokes: dict[str, QGraphicsPathItem] = {}
         clean_player = str(player_id or "").strip()
-        for item in self.canvas.scene().items():
+        for item in reversed(self.canvas.scene().items()):
             if not isinstance(item, QGraphicsPathItem):
                 continue
             if str(item.data(ROLE_KIND) or "").strip() != "stroke":
@@ -16393,7 +16509,60 @@ class DungeonAppletWidget(QWidget):
                 }
         return self._resolve_local_sheet_sync_payload(clean_character)
 
+    def _player_scene_interaction_active(self) -> bool:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return False
+        if self.canvas.has_active_local_interaction():
+            return True
+        return bool(self.inspector.has_pending_local_edits())
+
+    def _queue_deferred_client_sync_event(self, kind: str, payload: dict) -> None:
+        if kind == "snapshot":
+            self._deferred_client_sync_events = [(kind, dict(payload))]
+        else:
+            self._deferred_client_sync_events.append((kind, dict(payload)))
+        self._deferred_client_sync_timer.start()
+
+    def _flush_deferred_client_sync_events(self) -> None:
+        if not self._deferred_client_sync_events:
+            return
+        if self._player_scene_interaction_active():
+            self._deferred_client_sync_timer.start()
+            return
+        if (
+            self._last_local_player_scene_change_monotonic > 0.0
+            and (time.monotonic() - self._last_local_player_scene_change_monotonic) < 0.35
+        ):
+            self._deferred_client_sync_timer.start()
+            return
+        pending = list(self._deferred_client_sync_events)
+        self._deferred_client_sync_events.clear()
+        while pending:
+            kind, payload = pending.pop(0)
+            if kind == "snapshot":
+                self._process_client_snapshot_received(payload)
+            else:
+                self._process_client_player_state_patch_received(payload)
+            if self._player_scene_interaction_active():
+                self._deferred_client_sync_events = pending + self._deferred_client_sync_events
+                self._deferred_client_sync_timer.start()
+                return
+
     def _on_client_player_state_patch_received(self, payload: dict) -> None:
+        if self._player_scene_interaction_active():
+            self._debug_log("client_player_state_patch_deferred")
+            self._queue_deferred_client_sync_event("patch", payload if isinstance(payload, dict) else {})
+            return
+        self._process_client_player_state_patch_received(payload)
+
+    def _on_client_snapshot_received(self, snapshot: dict) -> None:
+        if self._player_scene_interaction_active():
+            self._debug_log("client_snapshot_deferred")
+            self._queue_deferred_client_sync_event("snapshot", snapshot if isinstance(snapshot, dict) else {})
+            return
+        self._process_client_snapshot_received(snapshot)
+
+    def _process_client_player_state_patch_received(self, payload: dict) -> None:
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
         if not self._player_connection_ready or self._awaiting_player_snapshot:
@@ -16424,7 +16593,7 @@ class DungeonAppletWidget(QWidget):
             refresh_navigation=False,
         )
 
-    def _on_client_snapshot_received(self, snapshot: dict) -> None:
+    def _process_client_snapshot_received(self, snapshot: dict) -> None:
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
         self._hide_reconnect_status_dialog()
@@ -19070,7 +19239,7 @@ class DungeonAppletWidget(QWidget):
 
         items_data: list[dict] = []
         fog_path_data: list[dict] = []
-        for item in self.canvas.scene().items():
+        for item in reversed(self.canvas.scene().items()):
             if item.parentItem() is not None:
                 continue
             if isinstance(item, FogItem):
@@ -19322,6 +19491,8 @@ class DungeonAppletWidget(QWidget):
         self._suppress_change_tracking = True
         try:
             scene = self.canvas.scene()
+            self.inspector.set_entity(None)
+            self.canvas.prepare_for_scene_reload()
             scene.clear()
             self.canvas.fog_item = None
             self.canvas.undo_stack.clear()
@@ -19451,7 +19622,7 @@ class DungeonAppletWidget(QWidget):
         if not clean_player:
             return {"items": [], "fog": {"path": []}}
         items_data: list[dict] = []
-        for item in self.canvas.scene().items():
+        for item in reversed(self.canvas.scene().items()):
             if isinstance(item, EntityItem):
                 if str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip() != clean_player:
                     continue
@@ -19529,12 +19700,15 @@ class DungeonAppletWidget(QWidget):
         elif (
             self._online_mode == ONLINE_MODE_PLAYER
         ):
+            self._last_local_player_scene_change_monotonic = time.monotonic()
             self._apply_online_permissions()
             state_update_payload = {
                 "state": self._serialize_scene_for_player_state_update(),
                 "dungeon_id": self._active_dungeon_id,
             }
             self._send_player_state_update(state_update_payload)
+            if self._deferred_client_sync_events:
+                self._deferred_client_sync_timer.start()
 
     def _on_canvas_delete_items_changed(self) -> None:
         self._save_active_dungeon_state()

@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QGraphicsPolygonItem,
     QGraphicsPathItem,
     QMenu,
-    QApplication
 )
 from PySide6.QtGui import QPen, QColor, QPainter, QPainterPath, QPolygonF, QBrush, QPainterPathStroker, QPixmap
 from PySide6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
@@ -512,27 +511,7 @@ class EntityItem(QGraphicsItem):
         return badge_text
     
     def mouseReleaseEvent(self, event):
-        """Snap position to cell center on release."""
         super().mouseReleaseEvent(event)
-        
-        # If Alt is held, we don't snap
-        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier:
-            return
-
-        # Snap to cell center relative to MOUSE position (more intuitive)
-        # We snap the entity's center to the center of the cell the MOUSE is hovering over
-        import math
-        mouse_pos = event.scenePos()  # Use mouse position
-        half_grid = self._grid_size / 2
-        
-        cell_x = math.floor(mouse_pos.x() / self._grid_size)
-        cell_y = math.floor(mouse_pos.y() / self._grid_size)
-        
-        snapped_x = cell_x * self._grid_size + half_grid
-        snapped_y = cell_y * self._grid_size + half_grid
-        self.setPos(snapped_x, snapped_y)
-        
-        # Notify scene of change for undo/redo if needed (handled by SelectState mostly)
     
     @property
     def hp(self) -> int:

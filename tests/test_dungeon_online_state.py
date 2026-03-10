@@ -30,9 +30,12 @@ from dungeon_applet import (
 from character_archive import character_sync_content_hash
 from dungeon_commands import SpawnPingCommand
 from dungeon_constants import (
+    LAYER_FG,
+    LAYER_MID,
     ROLE_ENTITY_ID,
     ROLE_ICON,
     ROLE_LINKED_CHARACTER_ID,
+    ROLE_LAYER,
     ROLE_LABEL,
     ROLE_LINKED_SHEET_ID,
     ROLE_LINKED_SHEET_NAME,
@@ -848,6 +851,38 @@ def test_host_scene_change_debounce_waits_until_interaction_ends(dungeon_widget,
     qtbot.wait(260)
 
     assert calls == ["sent"]
+
+
+def test_player_scene_changes_do_not_send_state_update_without_undo_push(
+    dungeon_widget,
+    qtbot,
+    monkeypatch,
+):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._active_dungeon_id = "d1"
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_send_player_state_update",
+        lambda payload: calls.append(dict(payload)) or True,
+    )
+
+    entity = EntityItem(QPointF(10.0, 10.0))
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-local")
+    entity.setData(ROLE_ENTITY_ID, "owned-1")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._apply_online_permissions()
+
+    undo_index_before = dungeon_widget.canvas.undo_stack.index()
+    entity.setPos(QPointF(160.0, 180.0))
+    QApplication.processEvents()
+    qtbot.wait(120)
+
+    assert dungeon_widget.canvas.undo_stack.index() == undo_index_before
+    assert calls == []
 
 
 def test_switching_back_to_local_mode_hides_online_panels(dungeon_widget):
@@ -6758,6 +6793,266 @@ def test_client_snapshot_preserves_selected_entity(dungeon_widget):
         if isinstance(item, EntityItem)
     ]
     assert "e1" in selected_ids
+
+
+def test_player_snapshot_defers_scene_reload_while_drag_active(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    dungeon_widget.canvas.scene().addItem(entity)
+    entity.setSelected(True)
+
+    select_state = dungeon_widget.canvas._states[ToolType.SELECT]
+    select_state.is_dragging = True
+    select_state.drag_start_positions = {entity: QPointF(10, 10)}
+
+    snapshot = {
+        "players": {"player-1": "Alice"},
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Dungeon 1",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "e1",
+                            "label": "Wolf",
+                            "owner_player_id": "player-1",
+                            "pos": [120.0, 160.0],
+                            "color": "#3B82F6",
+                            "hp": 12,
+                            "max_hp": 12,
+                            "ac": 13,
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert entity.pos() == QPointF(10, 10)
+    assert dungeon_widget._deferred_client_sync_events
+
+    select_state.cancel_active_interaction()
+    dungeon_widget._last_local_player_scene_change_monotonic = 0.0
+    dungeon_widget._flush_deferred_client_sync_events()
+
+    reloaded = dungeon_widget._find_entity_by_id("e1")
+    assert reloaded is not None
+    assert reloaded.pos() == QPointF(120, 160)
+
+
+def test_player_patch_defers_owned_entity_apply_while_drag_active(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._dungeons = [_dungeon_record(_entity_state("e1", "player-1", pos=(10.0, 10.0)))]
+    dungeon_widget._load_dungeon_state(dungeon_widget._dungeons[0]["state"])
+
+    entity = dungeon_widget._find_entity_by_id("e1")
+    assert entity is not None
+    entity.setSelected(True)
+
+    select_state = dungeon_widget.canvas._states[ToolType.SELECT]
+    select_state.is_dragging = True
+    select_state.drag_start_positions = {entity: QPointF(10, 10)}
+
+    payload = {
+        "player_id": "player-1",
+        "dungeon_id": "d1",
+        "state": {
+            "items": [_entity_state("e1", "player-1", pos=(200.0, 210.0))],
+            "fog": {"path": []},
+        },
+    }
+
+    dungeon_widget._on_client_player_state_patch_received(payload)
+
+    assert entity.pos() == QPointF(10, 10)
+    assert dungeon_widget._deferred_client_sync_events
+
+    select_state.cancel_active_interaction()
+    dungeon_widget._last_local_player_scene_change_monotonic = 0.0
+    dungeon_widget._flush_deferred_client_sync_events()
+
+    updated = dungeon_widget._find_entity_by_id("e1")
+    assert updated is not None
+    assert updated.pos() == QPointF(200, 210)
+
+
+def test_player_snapshot_defers_while_inspector_has_pending_stat_edit(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget.inspector._track_change("hp", max(0, entity.hp - 1))
+
+    snapshot = {
+        "players": {"player-1": "Alice"},
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Dungeon 1",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "e1",
+                            "label": "Wolf",
+                            "owner_player_id": "player-1",
+                            "pos": [120.0, 160.0],
+                            "color": "#3B82F6",
+                            "hp": 12,
+                            "max_hp": 12,
+                            "ac": 13,
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert dungeon_widget.inspector._entity is entity
+    assert dungeon_widget._deferred_client_sync_events
+
+    dungeon_widget.inspector._commit_changes()
+    dungeon_widget._last_local_player_scene_change_monotonic = 0.0
+    dungeon_widget._flush_deferred_client_sync_events()
+
+    reloaded = dungeon_widget._find_entity_by_id("e1")
+    assert reloaded is not None
+    assert reloaded.pos() == QPointF(120, 160)
+
+
+def test_player_snapshot_defers_while_inspector_name_edit_is_dirty(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.waitExposed(dungeon_widget)
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    entity.setData(ROLE_LABEL, "Wolf")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget.inspector.name_edit.setFocus(Qt.FocusReason.MouseFocusReason)
+    dungeon_widget.inspector.name_edit.setText("Wolf Alpha")
+    QApplication.processEvents()
+
+    snapshot = {
+        "players": {"player-1": "Alice"},
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Dungeon 1",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "e1",
+                            "label": "Wolf",
+                            "owner_player_id": "player-1",
+                            "pos": [140.0, 170.0],
+                            "color": "#3B82F6",
+                            "hp": 12,
+                            "max_hp": 12,
+                            "ac": 13,
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert dungeon_widget.inspector.name_edit.text() == "Wolf Alpha"
+    assert dungeon_widget._deferred_client_sync_events
+
+    dungeon_widget.inspector._update_name()
+    dungeon_widget._last_local_player_scene_change_monotonic = 0.0
+    dungeon_widget._flush_deferred_client_sync_events()
+
+    reloaded = dungeon_widget._find_entity_by_id("e1")
+    assert reloaded is not None
+    assert reloaded.pos() == QPointF(140, 170)
+
+
+def test_player_can_select_owned_entity_on_non_current_layer(dungeon_widget, qtbot):
+    dungeon_widget.resize(1000, 700)
+    dungeon_widget.show()
+    qtbot.waitExposed(dungeon_widget)
+
+    entity = EntityItem(QPointF(0, 0))
+    entity.setData(ROLE_ENTITY_ID, "e-mid")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-local")
+    entity.setData(ROLE_LAYER, LAYER_MID)
+    dungeon_widget.canvas.scene().addItem(entity)
+
+    dungeon_widget.canvas.set_current_layer(LAYER_FG)
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._apply_online_permissions()
+
+    qtbot.mouseClick(
+        dungeon_widget.canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=dungeon_widget.canvas.mapFromScene(QPointF(0, 0)),
+    )
+
+    assert entity.isSelected()
+
+
+def test_equal_z_entity_stacking_order_round_trips(dungeon_widget):
+    first = EntityItem(QPointF(0, 0))
+    first.setData(ROLE_ENTITY_ID, "first")
+    first.setData(ROLE_LABEL, "First")
+    first.setZValue(10.0)
+    second = EntityItem(QPointF(0, 0))
+    second.setData(ROLE_ENTITY_ID, "second")
+    second.setData(ROLE_LABEL, "Second")
+    second.setZValue(10.0)
+    dungeon_widget.canvas.scene().addItem(first)
+    dungeon_widget.canvas.scene().addItem(second)
+
+    def _labels_at(scene: QGraphicsScene) -> list[str]:
+        return [
+            str(item.data(ROLE_LABEL) or "")
+            for item in scene.items(QPointF(0, 0))
+            if isinstance(item, EntityItem)
+        ]
+
+    state = dungeon_widget._serialize_scene()
+    round_trip_scene = QGraphicsScene()
+    dungeon_widget._populate_scene(round_trip_scene, state, include_fog=False)
+
+    assert _labels_at(dungeon_widget.canvas.scene())[:2] == ["Second", "First"]
+    assert _labels_at(round_trip_scene)[:2] == ["Second", "First"]
 
 
 def test_player_link_character_sends_host_sync_command(monkeypatch, dungeon_widget, tmp_path):

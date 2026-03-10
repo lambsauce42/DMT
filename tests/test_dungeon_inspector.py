@@ -50,3 +50,18 @@ def test_inspector_visibility(qtbot):
     
     assert widget.inspector.isHidden()
     assert widget.inspector._entity is None
+
+
+def test_inspector_pending_changes_clear_safely_on_state_reload(qtbot):
+    widget = DungeonAppletWidget()
+    qtbot.addWidget(widget)
+
+    entity = EntityItem(QPointF(0, 0))
+    widget.canvas.scene().addItem(entity)
+    widget.inspector.set_entity(entity)
+
+    widget.inspector._track_change("hp", max(0, entity.hp - 1))
+    widget._load_dungeon_state(widget._blank_dungeon_state())
+
+    assert widget.inspector._entity is None
+    assert widget.inspector.isHidden()

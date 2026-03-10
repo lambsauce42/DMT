@@ -27,7 +27,7 @@ from dungeon_commands import (
     ResizeImageCommand,
     ResizeRoomCommand,
 )
-from dungeon_items import WallItem, DungeonEllipseItem, RoomGroup, DungeonImageItem
+from dungeon_items import WallItem, DungeonEllipseItem, RoomGroup, DungeonImageItem, _qt_object_is_valid
 
 if TYPE_CHECKING:
     from dungeon_applet import DungeonCanvas
@@ -385,6 +385,8 @@ class SelectState(CanvasState):
     def _movable_anchor(item: QGraphicsItem | None) -> QGraphicsItem | None:
         current = item
         while current is not None:
+            if not _qt_object_is_valid(current):
+                return None
             if current.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable:
                 return current
             current = current.parentItem()
@@ -504,6 +506,13 @@ class SelectState(CanvasState):
         self._resize_start_path_local = None
         self._resize_last_path_local = None
         self._resize_pointer_offset_scene = None
+
+    def cancel_active_interaction(self) -> None:
+        self.is_dragging = False
+        self.drag_start_positions = {}
+        self._merge_requested_during_drag = False
+        self._clear_resize_state()
+        self.canvas.setCursor(Qt.CursorShape.ArrowCursor)
 
     def mousePressEvent(self, event, scene_pos: QPointF):
         if super().mousePressEvent(event, scene_pos): return True
@@ -765,8 +774,9 @@ class FreeDrawState(CanvasState):
         self.cleanup()
 
     def cleanup(self):
-        if self.preview_item and self.preview_item.scene():
-            self.canvas.scene().removeItem(self.preview_item)
+        if self.preview_item and _qt_object_is_valid(self.preview_item):
+            if self.preview_item.scene():
+                self.canvas.scene().removeItem(self.preview_item)
         self.preview_item = None
         self.current_path = None
         self.is_drawing = False
@@ -794,13 +804,16 @@ class FreeDrawState(CanvasState):
     def mouseMoveEvent(self, event, scene_pos: QPointF):
         if super().mouseMoveEvent(event, scene_pos): return
         if self.is_drawing and self.current_path and self.preview_item:
+            if not _qt_object_is_valid(self.preview_item):
+                self.cleanup()
+                return
             self.current_path.lineTo(scene_pos)
             self.preview_item.setPath(self.current_path)
 
     def mouseReleaseEvent(self, event, scene_pos: QPointF):
         if super().mouseReleaseEvent(event, scene_pos): return
         if event.button() == Qt.MouseButton.LeftButton and self.is_drawing:
-            if self.current_path and self.preview_item:
+            if self.current_path and self.preview_item and _qt_object_is_valid(self.preview_item):
                 # Finalize the stroke
                 final_item = QGraphicsPathItem(self.current_path)
                 
@@ -823,7 +836,8 @@ class FreeDrawState(CanvasState):
                 final_item.setData(ROLE_ENTITY_ID, uuid.uuid4().hex)
                 
                 # Remove preview and add final
-                self.canvas.scene().removeItem(self.preview_item)
+                if self.preview_item.scene():
+                    self.canvas.scene().removeItem(self.preview_item)
                 cmd = CreateItemCommand(self.canvas.scene(), final_item, "Draw Stroke")
                 self.canvas.undo_stack.push(cmd)
             self.cleanup()
@@ -842,7 +856,7 @@ class DrawingRectState(CanvasState):
         self.cleanup()
 
     def cleanup(self):
-        if self.preview_item:
+        if self.preview_item and _qt_object_is_valid(self.preview_item):
             self.canvas.scene().removeItem(self.preview_item)
             self.preview_item = None
         self.origin = None
@@ -873,6 +887,10 @@ class DrawingRectState(CanvasState):
     def mouseMoveEvent(self, event, scene_pos: QPointF):
         if super().mouseMoveEvent(event, scene_pos): return
         if self.origin and self.preview_item:
+            if not _qt_object_is_valid(self.preview_item):
+                self.preview_item = None
+                self.origin = None
+                return
             rect = _rect_from_points(self.origin, scene_pos, self.canvas.grid_size)
             if self.tool == TOOL_CORRIDOR and hasattr(self.canvas, '_corridor_rect'):
                  rect = self.canvas._corridor_rect(rect)
@@ -882,6 +900,9 @@ class DrawingRectState(CanvasState):
     def mouseReleaseEvent(self, event, scene_pos: QPointF):
         if super().mouseReleaseEvent(event, scene_pos): return
         if event.button() == Qt.MouseButton.LeftButton and self.origin and self.preview_item:
+            if not _qt_object_is_valid(self.preview_item):
+                self.cleanup()
+                return
             rect = self.preview_item.rect()
             is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
             if is_alt or (rect.width() >= self.canvas.grid_size and rect.height() >= self.canvas.grid_size):
@@ -943,7 +964,7 @@ class DrawingEllipseState(CanvasState):
         self.cleanup()
     
     def cleanup(self):
-        if self.preview_item:
+        if self.preview_item and _qt_object_is_valid(self.preview_item):
             if self.preview_item.scene():
                 self.canvas.scene().removeItem(self.preview_item)
             self.preview_item = None
@@ -975,6 +996,10 @@ class DrawingEllipseState(CanvasState):
     def mouseMoveEvent(self, event, scene_pos: QPointF):
         if super().mouseMoveEvent(event, scene_pos): return
         if self.origin and self.preview_item:
+            if not _qt_object_is_valid(self.preview_item):
+                self.preview_item = None
+                self.origin = None
+                return
             rect = _rect_from_points(self.origin, scene_pos, self.canvas.grid_size)
             self.preview_item.setPos(rect.topLeft())
             self.preview_item.setRect(0, 0, rect.width(), rect.height())
@@ -982,6 +1007,9 @@ class DrawingEllipseState(CanvasState):
     def mouseReleaseEvent(self, event, scene_pos: QPointF):
         if super().mouseReleaseEvent(event, scene_pos): return
         if event.button() == Qt.MouseButton.LeftButton and self.origin and self.preview_item:
+            if not _qt_object_is_valid(self.preview_item):
+                self.cleanup()
+                return
             rect = self.preview_item.rect()
             is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
             
@@ -1048,7 +1076,7 @@ class DrawingPolygonState(CanvasState):
         self.canvas.setCursor(Qt.CursorShape.CrossCursor)
 
     def on_exit(self):
-        if self.preview:
+        if self.preview and _qt_object_is_valid(self.preview):
             self.canvas.scene().removeItem(self.preview)
             self.preview = None
         self.points = []
@@ -1088,6 +1116,10 @@ class DrawingPolygonState(CanvasState):
     def mouseMoveEvent(self, event, scene_pos: QPointF):
         if super().mouseMoveEvent(event, scene_pos): return
         if self.preview and self.points:
+            if not _qt_object_is_valid(self.preview):
+                self.preview = None
+                self.points = []
+                return
             snapped_pos = _snap_point(scene_pos, self.canvas.grid_size)
             path = QPainterPath()
             path.moveTo(self.points[0])
@@ -1354,8 +1386,9 @@ class ImagePlacingState(CanvasState):
         self.canvas.current_tool = ToolType.SELECT
 
     def on_exit(self):
-        if self.preview_item and self.preview_item.scene():
-            self.canvas.scene().removeItem(self.preview_item)
+        if self.preview_item and _qt_object_is_valid(self.preview_item):
+            if self.preview_item.scene():
+                self.canvas.scene().removeItem(self.preview_item)
         self.preview_item = None
         self.pixmap = None
         self.file_path = None
@@ -1363,6 +1396,9 @@ class ImagePlacingState(CanvasState):
     def mouseMoveEvent(self, event, scene_pos: QPointF):
         if super().mouseMoveEvent(event, scene_pos): return
         if self.preview_item:
+            if not _qt_object_is_valid(self.preview_item):
+                self.preview_item = None
+                return
             # Snap the ghost if Alt is not held
             pos = _snap_point(scene_pos, self.canvas.grid_size)
             self.preview_item.setPos(pos)

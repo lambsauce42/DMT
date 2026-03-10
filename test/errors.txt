@@ -1,0 +1,614 @@
+qt.multimedia.ffmpeg: Using Qt multimedia with FFmpeg version 7.1.2 LGPL version 2.1 or later
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseReleaseEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1214, in mouseReleaseEvent
+    handled = bool(self._current_state.mouseReleaseEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 826, in mouseReleaseEvent
+    self.canvas.scene().removeItem(self.preview_item)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 798, in mouseMoveEvent
+    self.preview_item.setPath(self.current_path)
+RuntimeError: Internal C++ object (PySide6.QtWidgets.QGraphicsPathItem) already deleted.
+Error calling Python override of QGraphicsView::mouseMoveEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1193, in mouseMoveEvent
+    handled = bool(self._current_state.mouseMoveEvent(event, scene_pos))
+                   ^^^^^^^^^... (7 kB verbleibend)

@@ -1,0 +1,31 @@
+QPainter::begin: Paint device returned engine == 0, type: 3
+QPainter::setCompositionMode: Painter not active
+QPainter::fillRect: Painter not active
+QPainter::end: Painter not active, aborted
+QPainter::begin: Paint device returned engine == 0, type: 3
+QPainter::setCompositionMode: Painter not active
+QPainter::fillRect: Painter not active
+QPainter::end: Painter not active, aborted
+QPainter::begin: Paint device returned engine == 0, type: 3
+QPainter::setCompositionMode: Painter not active
+QPainter::fillRect: Painter not active
+QPainter::end: Painter not active, aborted
+QPainter::begin: Paint device returned engine == 0, type: 3
+QPainter::setCompositionMode: Painter not active
+QPainter::fillRect: Painter not active
+QPainter::end: Painter not active, aborted
+QPainter::begin: Paint device returned engine == 0, type: 3
+QPainter::setCompositionMode: Painter not active
+QPainter::fillRect: Painter not active
+QPainter::end: Painter not active, aborted
+Error calling Python override of QGraphicsView::mouseReleaseEvent(): Traceback (most recent call last):
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_applet.py", line 1214, in mouseReleaseEvent
+    handled = bool(self._current_state.mouseReleaseEvent(event, scene_pos))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 707, in mouseReleaseEvent
+    anchor = self._movable_anchor(candidate)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\Programme\Maxderlachs\DMT\src\dungeon_states.py", line 388, in _movable_anchor
+    if current.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable:
+       ^^^^^^^^^^^^^^^
+RuntimeError: Internal C++ object (EntityItem) already deleted.
