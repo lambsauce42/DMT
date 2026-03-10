@@ -4677,6 +4677,7 @@ class DungeonAppletWidget(QWidget):
         self._awaiting_player_snapshot: bool = False
         self._deferred_client_sync_events: list[tuple[str, dict]] = []
         self._last_local_player_scene_change_monotonic: float = 0.0
+        self._local_player_authoritative_state: dict | None = None
         self._suppress_external_inventory_forward = False
         self._online_inventory_sync_fingerprints: dict[str, str] = {}
         self._recent_local_character_sync_payloads_by_sheet_id: dict[str, dict] = {}
@@ -5430,6 +5431,7 @@ class DungeonAppletWidget(QWidget):
             self._deferred_client_sync_events.clear()
             self._deferred_client_sync_timer.stop()
             self._last_local_player_scene_change_monotonic = 0.0
+            self._local_player_authoritative_state = None
             self._online_inventory_sync_fingerprints.clear()
             self._recent_local_character_sync_payloads_by_sheet_id.clear()
             self._approved_host_inventory_sync_characters.clear()
@@ -10048,11 +10050,17 @@ class DungeonAppletWidget(QWidget):
             return
         self._pending_player_state_update = dict(payload)
         self._pending_player_state_update_request_id = ""
+        state = payload.get("state")
+        if isinstance(state, dict):
+            self._local_player_authoritative_state = self._copy_state_payload(state)
 
     def _send_player_state_update(self, payload: dict) -> bool:
         if not isinstance(payload, dict):
             return False
         pending = dict(payload)
+        state = pending.get("state")
+        if isinstance(state, dict):
+            self._local_player_authoritative_state = self._copy_state_payload(state)
         request_id = self._dispatch_player_command_with_request_id(
             "state_update",
             pending,
@@ -11832,6 +11840,87 @@ class DungeonAppletWidget(QWidget):
                 continue
             extracted_items.append(dict(item_data))
         return {"items": extracted_items, "fog": {"path": []}}
+
+    def _player_owned_item_sync_key(self, item_data: dict) -> str:
+        item_type = str(item_data.get("type") or "").strip()
+        if item_type == "entity":
+            return f"entity:{str(item_data.get('entity_id') or '').strip()}"
+        if item_type == "stroke":
+            return f"stroke:{self._stroke_sync_key(item_data)}"
+        return ""
+
+    def _replace_player_owned_state_slice(
+        self,
+        state: dict,
+        *,
+        player_id: str,
+        replacement_state: dict,
+    ) -> dict:
+        copied_state = self._copy_state_payload(state)
+        items = copied_state.get("items")
+        if not isinstance(items, list):
+            copied_state["items"] = []
+            items = copied_state["items"]
+        replacement_items_raw = replacement_state.get("items")
+        replacement_items = [
+            dict(item)
+            for item in replacement_items_raw
+            if isinstance(replacement_items_raw, list) and isinstance(item, dict)
+        ]
+        replacement_entries: list[tuple[str, dict]] = []
+        replacement_map: dict[str, dict] = {}
+        for replacement_item in replacement_items:
+            key = self._player_owned_item_sync_key(replacement_item)
+            if not key:
+                continue
+            replacement_entries.append((key, replacement_item))
+            replacement_map[key] = replacement_item
+
+        result_items: list[dict] = []
+        clean_player = str(player_id or "").strip()
+        insertion_index: int | None = None
+        for item_data in items:
+            if not isinstance(item_data, dict):
+                result_items.append(item_data)
+                continue
+            item_type = str(item_data.get("type") or "").strip()
+            owner = str(item_data.get("owner_player_id") or "").strip()
+            if item_type not in {"entity", "stroke"} or owner != clean_player:
+                result_items.append(item_data)
+                continue
+            if insertion_index is None:
+                insertion_index = len(result_items)
+            key = self._player_owned_item_sync_key(item_data)
+            if not key:
+                continue
+            replacement_item = replacement_map.pop(key, None)
+            if replacement_item is not None:
+                result_items.append(dict(replacement_item))
+
+        remaining_items = [dict(item) for key, item in replacement_entries if key in replacement_map]
+        if remaining_items:
+            insert_at = insertion_index if insertion_index is not None else len(result_items)
+            result_items[insert_at:insert_at] = remaining_items
+
+        copied_state["items"] = result_items
+        return copied_state
+
+    def _overlay_local_player_authoritative_state(self, state: dict) -> dict:
+        authoritative = self._local_player_authoritative_state
+        local_player_id = str(self._local_player_id or "").strip()
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return state
+        if not isinstance(state, dict) or not isinstance(authoritative, dict) or not local_player_id:
+            return state
+        incoming_owned = self._extract_player_owned_state(state, player_id=local_player_id)
+        if self._scene_signature(incoming_owned) == self._scene_signature(authoritative):
+            self._local_player_authoritative_state = None
+            return state
+        return self._replace_player_owned_state_slice(
+            state,
+            player_id=local_player_id,
+            replacement_state=authoritative,
+        )
 
     def _broadcast_player_state_patch_if_host(
         self,
@@ -16574,6 +16663,8 @@ class DungeonAppletWidget(QWidget):
         state = payload.get("state")
         if not player_id or not isinstance(state, dict):
             return
+        if player_id == str(self._local_player_id or "").strip():
+            state = self._overlay_local_player_authoritative_state(state)
         target_dungeon = self._find_dungeon(dungeon_id)
         if target_dungeon is None and dungeon_id == str(self._players_dungeon_id or ""):
             target_dungeon = self._current_dungeon()
@@ -16872,6 +16963,7 @@ class DungeonAppletWidget(QWidget):
                 dungeon_state = entry.get("state")
                 if not isinstance(dungeon_state, dict):
                     dungeon_state = self._blank_dungeon_state()
+                dungeon_state = self._overlay_local_player_authoritative_state(dungeon_state)
                 dungeons.append(
                     {
                         "id": str(entry.get("id") or uuid.uuid4().hex),
@@ -16939,6 +17031,7 @@ class DungeonAppletWidget(QWidget):
         scene = snapshot.get("scene")
         if not isinstance(scene, dict):
             return
+        scene = self._overlay_local_player_authoritative_state(scene)
         self._suppress_network_sync = True
         try:
             self._load_dungeon_state(scene)

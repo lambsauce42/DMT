@@ -6941,7 +6941,7 @@ def test_player_snapshot_defers_while_inspector_has_pending_stat_edit(dungeon_wi
 
     reloaded = dungeon_widget._find_entity_by_id("e1")
     assert reloaded is not None
-    assert reloaded.pos() == QPointF(120, 160)
+    assert reloaded.pos() == QPointF(10, 10)
 
 
 def test_player_snapshot_defers_while_inspector_name_edit_is_dirty(dungeon_widget, qtbot):
@@ -6999,7 +6999,65 @@ def test_player_snapshot_defers_while_inspector_name_edit_is_dirty(dungeon_widge
 
     reloaded = dungeon_widget._find_entity_by_id("e1")
     assert reloaded is not None
-    assert reloaded.pos() == QPointF(140, 170)
+    assert reloaded.pos() == QPointF(10, 10)
+
+
+def test_stale_snapshot_does_not_overwrite_recent_local_inspector_name_edit(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.waitExposed(dungeon_widget)
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        _dungeon_record(
+            _entity_state("e1", "player-1", pos=(10.0, 10.0), label="Wolf"),
+        )
+    ]
+    dungeon_widget._load_dungeon_state(dungeon_widget._dungeons[0]["state"])
+
+    entity = dungeon_widget._find_entity_by_id("e1")
+    assert entity is not None
+    entity.setSelected(True)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget.inspector.name_edit.setFocus(Qt.FocusReason.MouseFocusReason)
+    dungeon_widget.inspector.name_edit.setText("Wolf Alpha")
+    dungeon_widget.inspector._update_name()
+
+    stale_snapshot = {
+        "players": {"player-1": "Alice"},
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Dungeon 1",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "e1",
+                            "label": "Wolf",
+                            "owner_player_id": "player-1",
+                            "pos": [10.0, 10.0],
+                            "color": "#3B82F6",
+                            "hp": 100,
+                            "max_hp": 100,
+                            "ac": 20,
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+    }
+
+    dungeon_widget._process_client_snapshot_received(stale_snapshot)
+
+    reloaded = dungeon_widget._find_entity_by_id("e1")
+    assert reloaded is not None
+    assert str(reloaded.data(ROLE_LABEL) or "") == "Wolf Alpha"
 
 
 def test_player_can_select_owned_entity_on_non_current_layer(dungeon_widget, qtbot):
