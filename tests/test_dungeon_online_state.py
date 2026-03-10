@@ -1760,6 +1760,59 @@ def test_starting_host_disconnects_existing_client_controller(dungeon_widget, mo
     assert client_stub.disconnected is True
 
 
+def test_start_online_host_persists_dm_name_and_snapshot_host_name(dungeon_widget, monkeypatch):
+    class _HostOkStub:
+        def __init__(self):
+            self.players = {}
+            self.started_port = None
+
+        def stop(self):
+            pass
+
+        def start(self, port):
+            self.started_port = port
+            return True, ""
+
+    host_stub = _HostOkStub()
+    dungeon_widget._host_controller = host_stub
+    monkeypatch.setattr(dungeon_widget, "_broadcast_snapshot_if_host", lambda: None)
+
+    started = dungeon_widget.start_online_host(8765, dm_name="Rin")
+
+    assert started is True
+    assert host_stub.started_port == 8765
+    assert dungeon_widget._local_dm_name == "Rin"
+    assert dungeon_widget._local_profile["last_dm_name"] == "Rin"
+    snapshot = dungeon_widget._build_online_snapshot()
+    assert snapshot["host_name"] == "Rin"
+    assert dungeon_widget._participant_presence_entries()[0]["name"] == "Rin (DM)"
+
+
+def test_participant_presence_panel_collapses_and_expands_on_overflow(dungeon_widget):
+    dungeon_widget._host_display_name = "Rin"
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._update_connected_players(
+        {f"player-{index:02d}": f"Player {index:02d}" for index in range(1, 12)}
+    )
+
+    panel = dungeon_widget._participant_presence_panel
+    assert panel is not None
+    assert panel.isHidden() is False
+    assert dungeon_widget._participant_presence_entries()[0]["name"] == "Rin (DM)"
+
+    collapsed_height = panel.height()
+    assert panel._overflow_hint.isHidden() is False
+
+    panel.set_hover_expanded(True)
+
+    assert panel.height() > collapsed_height
+    assert panel._overflow_hint.isHidden() is True
+    assert (
+        panel._scroll.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+
+
 def test_joining_player_session_stops_existing_host_controller(dungeon_widget):
     class _HostStub:
         def __init__(self):

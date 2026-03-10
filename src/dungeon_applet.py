@@ -477,6 +477,199 @@ def _extract_character_stats_from_pdf(pdf_path: str) -> dict:
     return extract_character_stats_from_pdf(pdf_path)
 
 
+class _ElidedRightLabel(QLabel):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._raw_text = ""
+        self.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(0)
+        self.setFixedHeight(18)
+
+    def set_raw_text(self, text: str) -> None:
+        self._raw_text = str(text or "")
+        self._sync_text()
+
+    def raw_text(self) -> str:
+        return self._raw_text
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._sync_text()
+
+    def _sync_text(self) -> None:
+        available_width = max(0, self.contentsRect().width())
+        if available_width <= 0:
+            QLabel.setText(self, "")
+            return
+        metrics = QFontMetrics(self.font())
+        QLabel.setText(
+            self,
+            metrics.elidedText(
+                self._raw_text,
+                Qt.TextElideMode.ElideRight,
+                available_width,
+            ),
+        )
+        self.setToolTip(self._raw_text if self.text() != self._raw_text else "")
+
+
+class _ParticipantPresenceRow(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setFixedHeight(20)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self._name_label = _ElidedRightLabel(self)
+        self._name_label.setStyleSheet(
+            "QLabel { color: rgba(229, 231, 235, 235); background-color: transparent; font-size: 12px; }"
+        )
+
+        self._status_dot = QFrame(self)
+        self._status_dot.setFixedSize(8, 8)
+        self._status_dot.setStyleSheet(
+            "QFrame { background-color: #22c55e; border-radius: 4px; border: none; }"
+        )
+
+        layout.addStretch(1)
+        layout.addWidget(self._name_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def set_entry(self, name: str, *, online: bool = True) -> None:
+        self._name_label.set_raw_text(name)
+        self._status_dot.setVisible(bool(online))
+
+
+class _ParticipantPresencePanel(QFrame):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._entries: list[dict[str, object]] = []
+        self._hover_expanded = False
+        self._collapsed_rows = 4
+        self._expanded_rows = 9
+        self._row_height = 20
+        self._row_spacing = 3
+        self._overflow_hint_height = 12
+
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setMouseTracking(True)
+        self.setFixedWidth(240)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(
+            "QScrollArea { background-color: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background-color: transparent; }"
+            "QScrollBar:vertical { background-color: rgba(255, 255, 255, 26); width: 6px; margin: 0px; }"
+            "QScrollBar::handle:vertical { background-color: rgba(148, 163, 184, 170); border-radius: 3px; min-height: 18px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical, "
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { height: 0px; background: transparent; }"
+        )
+        self._scroll.viewport().setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+
+        self._rows_root = QWidget(self._scroll)
+        self._rows_root.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self._rows_layout = QVBoxLayout(self._rows_root)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(self._row_spacing)
+        self._scroll.setWidget(self._rows_root)
+
+        self._overflow_hint = QLabel("...", self)
+        self._overflow_hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._overflow_hint.setFixedHeight(self._overflow_hint_height)
+        self._overflow_hint.setStyleSheet(
+            "QLabel { color: rgba(229, 231, 235, 175); background-color: transparent; font-size: 12px; padding-right: 14px; }"
+        )
+
+        layout.addWidget(self._scroll, 0)
+        layout.addWidget(self._overflow_hint, 0)
+        self._apply_state()
+
+    def set_entries(self, entries: list[dict[str, object]]) -> None:
+        self._entries = [dict(entry) for entry in entries if isinstance(entry, dict)]
+        _clear_layout(self._rows_layout)
+        for entry in self._entries:
+            row = _ParticipantPresenceRow(self._rows_root)
+            row.set_entry(
+                str(entry.get("name") or ""),
+                online=bool(entry.get("online", True)),
+            )
+            self._rows_layout.addWidget(row, 0)
+        self._rows_layout.addStretch(1)
+        scroll_bar = self._scroll.verticalScrollBar()
+        if scroll_bar is not None:
+            scroll_bar.setValue(0)
+        self._apply_state()
+
+    def set_hover_expanded(self, expanded: bool) -> None:
+        clean_expanded = bool(expanded)
+        if self._hover_expanded == clean_expanded:
+            return
+        self._hover_expanded = clean_expanded
+        self._apply_state()
+
+    def has_entries(self) -> bool:
+        return bool(self._entries)
+
+    def enterEvent(self, event) -> None:
+        self.set_hover_expanded(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.set_hover_expanded(False)
+        super().leaveEvent(event)
+
+    def sizeHint(self) -> QSize:
+        return QSize(self.width(), self._target_height())
+
+    def _visible_rows(self) -> int:
+        if not self._entries:
+            return 0
+        limit = self._expanded_rows if self._hover_expanded else self._collapsed_rows
+        return min(len(self._entries), limit)
+
+    def _target_height(self) -> int:
+        visible_rows = self._visible_rows()
+        rows_height = 0
+        if visible_rows > 0:
+            rows_height = (visible_rows * self._row_height) + ((visible_rows - 1) * self._row_spacing)
+        overflow_height = self._overflow_hint_height if self._show_overflow_hint() else 0
+        return rows_height + overflow_height
+
+    def _show_overflow_hint(self) -> bool:
+        return (not self._hover_expanded) and len(self._entries) > self._collapsed_rows
+
+    def _apply_state(self) -> None:
+        target_rows = self._visible_rows()
+        rows_height = 0
+        if target_rows > 0:
+            rows_height = (target_rows * self._row_height) + ((target_rows - 1) * self._row_spacing)
+        self._scroll.setFixedHeight(rows_height)
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if self._hover_expanded and len(self._entries) > self._expanded_rows
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        show_hint = self._show_overflow_hint()
+        self._overflow_hint.setVisible(show_hint)
+        self._overflow_hint.setFixedHeight(self._overflow_hint_height if show_hint else 0)
+        self.setFixedHeight(self._target_height())
+        self.updateGeometry()
+
+
 def _serialize_path(path: QPainterPath) -> list[dict]:
     elements: list[dict] = []
     if path is None:
@@ -4321,6 +4514,8 @@ class DungeonAppletWidget(QWidget):
         self._local_player_id: str | None = None
         self._local_player_name: str = ""
         self._local_profile = self._load_or_create_local_profile()
+        self._local_dm_name: str = str(self._local_profile.get("last_dm_name") or "").strip()
+        self._host_display_name: str = self._local_dm_name or "DM"
         self._media_profile = self._load_or_create_media_profile()
         self._persistent_local_player_id: str = get_or_create_local_player_id()
         self._character_id_registry: dict[str, str] = dict(
@@ -4413,6 +4608,7 @@ class DungeonAppletWidget(QWidget):
         ).strip().lower() not in {"0", "false", "no", "off"}
         self._debug_log_path: Path = self._resolve_debug_log_path()
         self._connected_players: dict[str, str] = {}
+        self._participant_presence_panel: _ParticipantPresencePanel | None = None
         self._suppress_network_sync = False
         self._suppress_ping_sync = False
         self._suppress_remote_apply = False
@@ -4591,7 +4787,9 @@ class DungeonAppletWidget(QWidget):
         self._media_panel.hide()
         self._initiative_overlay = self._build_initiative_overlay()
         self._initiative_overlay.hide()
-        
+        self._participant_presence_panel = _ParticipantPresencePanel(self)
+        self._participant_presence_panel.hide()
+
         # Top Left: Origin + Coords
         tl_hud = QWidget()
         self._tl_hud = tl_hud
@@ -4831,11 +5029,18 @@ class DungeonAppletWidget(QWidget):
             self.destroyed.connect(self._remove_app_event_filter)
         self._debug_log("widget_init", app_event_filter=bool(self._app is not None))
 
-    def start_online_host(self, port: int, collection_path: str | None = None) -> bool:
+    def start_online_host(
+        self,
+        port: int,
+        collection_path: str | None = None,
+        dm_name: str | None = None,
+    ) -> bool:
+        requested_dm_name = str(dm_name or self._local_dm_name or "").strip() or "DM"
         self._debug_log(
             "start_online_host_begin",
             port=int(port),
             collection_path=str(collection_path or ""),
+            dm_name=requested_dm_name,
         )
         previous_runtime_cache_id = str(self._online_runtime_cache_id or "")
         self._session_loot_pool = []
@@ -4879,6 +5084,10 @@ class DungeonAppletWidget(QWidget):
         self._online_session_id = f"host_{int(port)}"
         self._online_runtime_cache_id = self._runtime_cache_session_id_for(self._online_session_id)
         self._host_port = int(port)
+        self._local_dm_name = requested_dm_name
+        self._host_display_name = requested_dm_name
+        self._local_profile["last_dm_name"] = self._local_dm_name
+        self._save_local_profile()
         self._set_online_mode(ONLINE_MODE_DM_HOST)
         if self._host_controller is None:
             self._host_controller = HostSessionController(self)
@@ -4961,6 +5170,7 @@ class DungeonAppletWidget(QWidget):
         self._online_session_id = f"join_{host_ip}_{int(port)}".replace(":", "_")
         self._online_runtime_cache_id = self._runtime_cache_session_id_for(self._online_session_id)
         self._host_ip = host_ip
+        self._host_display_name = "DM"
         self._media_player_endpoint_host = str(host_ip or "").strip()
         self._host_port = int(port)
         self._local_player_name = requested_player_name
@@ -5120,6 +5330,7 @@ class DungeonAppletWidget(QWidget):
             self._host_link_conflict_response_cache.clear()
             self._sent_character_override_fingerprints.clear()
         self._render_initiative_overlay()
+        self._refresh_participant_presence_panel()
         self._update_loot_pool_badge()
         self._apply_online_permissions()
 
@@ -5253,8 +5464,36 @@ class DungeonAppletWidget(QWidget):
         if hasattr(self, "_media_btn") and self._media_btn is not None:
             btn_size = self._media_btn.size()
             btn_x = max(8, self.width() - btn_size.width() - 64)
+            initiative_btn = getattr(self, "_initiative_reopen_btn", None)
+            if initiative_btn is not None and initiative_btn.isVisible():
+                button_gap = 12
+                btn_x = max(
+                    8,
+                    self.width()
+                    - initiative_btn.width()
+                    - button_gap
+                    - btn_size.width()
+                    - 20,
+                )
             self._media_btn.move(btn_x, 20)
             self._media_btn.raise_()
+        participant_panel = getattr(self, "_participant_presence_panel", None)
+        if participant_panel is not None and participant_panel.isVisible():
+            anchor_width = (
+                self._initiative_reopen_btn.width()
+                if hasattr(self, "_initiative_reopen_btn") and self._initiative_reopen_btn is not None
+                else 34
+            )
+            anchor_height = (
+                self._initiative_reopen_btn.height()
+                if hasattr(self, "_initiative_reopen_btn") and self._initiative_reopen_btn is not None
+                else 34
+            )
+            anchor_x = max(8, self.width() - anchor_width - 20)
+            panel_x = max(8, anchor_x + anchor_width - participant_panel.width())
+            panel_y = 20 + anchor_height + 10
+            participant_panel.move(panel_x, panel_y)
+            participant_panel.raise_()
         if hasattr(self, "_media_panel") and self._media_panel is not None and self._media_panel.isVisible():
             media_anim = getattr(self, "_media_panel_anim", None)
             if media_anim is None or media_anim.state() != QAbstractAnimation.State.Running:
@@ -10093,7 +10332,7 @@ class DungeonAppletWidget(QWidget):
                 )
             return
         if self._online_mode == ONLINE_MODE_DM_HOST and self._host_controller is not None:
-            self._host_controller.broadcast_chat(actor_name="DM", text=text, system=False)
+            self._host_controller.broadcast_chat(actor_name=self._dm_display_name(), text=text, system=False)
             return
         if self._online_mode == ONLINE_MODE_PLAYER and self._client_controller is not None:
             if not self._player_network_actions_available():
@@ -10158,6 +10397,7 @@ class DungeonAppletWidget(QWidget):
         self.inspector.set_player_options(self._connected_players)
         self._seed_initiative_state()
         self._render_initiative_overlay()
+        self._refresh_participant_presence_panel()
         if self._online_mode == ONLINE_MODE_PLAYER:
             self._apply_online_permissions()
 
@@ -10336,6 +10576,7 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode == ONLINE_MODE_PLAYER:
             self._hide_reconnect_status_dialog()
             self._append_server_log("[INFO] Connected to host")
+            self._refresh_participant_presence_panel()
 
     @staticmethod
     def _is_name_taken_join_error(message: str) -> bool:
@@ -10482,6 +10723,7 @@ class DungeonAppletWidget(QWidget):
             self._rollback_pending_loot_claim(claim_id)
         self._local_player_id = None
         self._update_connected_players({})
+        self._refresh_participant_presence_panel()
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
         should_redact_scene = not (
@@ -10568,6 +10810,7 @@ class DungeonAppletWidget(QWidget):
             ),
             True,
         )
+        self._refresh_participant_presence_panel()
         self._apply_online_permissions()
 
     def _copy_state_payload(self, state: object) -> dict:
@@ -10578,6 +10821,48 @@ class DungeonAppletWidget(QWidget):
         except Exception:
             return self._blank_dungeon_state()
         return copied if isinstance(copied, dict) else self._blank_dungeon_state()
+
+    def _dm_display_name(self) -> str:
+        return str(self._host_display_name or self._local_dm_name or "DM").strip() or "DM"
+
+    def _player_has_live_host_connection(self) -> bool:
+        if self._online_mode != ONLINE_MODE_PLAYER or self._client_controller is None:
+            return False
+        client = getattr(self._client_controller, "client", None)
+        return bool(client is not None and client.is_connected())
+
+    def _participant_presence_entries(self) -> list[dict[str, object]]:
+        if self._online_mode == ONLINE_MODE_DM_HOST:
+            include_dm = True
+        elif self._online_mode == ONLINE_MODE_PLAYER:
+            include_dm = self._player_has_live_host_connection()
+        else:
+            include_dm = False
+        if not include_dm and not self._connected_players:
+            return []
+        entries: list[dict[str, object]] = []
+        if include_dm:
+            entries.append({"name": f"{self._dm_display_name()} (DM)", "online": True, "is_dm": True})
+        for player_id, player_name in sorted(
+            self._connected_players.items(),
+            key=lambda entry: str(entry[1] or entry[0]).casefold(),
+        ):
+            clean_name = str(player_name or player_id).strip() or str(player_id or "").strip()
+            if not clean_name:
+                continue
+            entries.append({"name": clean_name, "online": True, "is_dm": False})
+        return entries
+
+    def _refresh_participant_presence_panel(self) -> None:
+        panel = getattr(self, "_participant_presence_panel", None)
+        if panel is None:
+            return
+        entries = self._participant_presence_entries()
+        panel.set_entries(entries)
+        show_panel = bool(entries) and self._online_mode in (ONLINE_MODE_DM_HOST, ONLINE_MODE_PLAYER)
+        panel.setVisible(show_panel)
+        if show_panel:
+            self._position_floating_overlays()
 
     def _player_visible_initiative_state(self, player_id: str) -> dict:
         base_state = self._initiative_state if isinstance(self._initiative_state, dict) else {}
@@ -10652,6 +10937,7 @@ class DungeonAppletWidget(QWidget):
             "players_dungeon_id": players_dungeon_id or self._players_dungeon_id,
             "collection_name": self._collection_name,
             "collection_id": str(self._collection_id or ""),
+            "host_name": self._dm_display_name(),
             "dungeons": dungeons_payload,
             "players": self._connected_players,
             "loot_pool": list(self._session_loot_pool),
@@ -16358,6 +16644,9 @@ class DungeonAppletWidget(QWidget):
         if was_waiting_for_snapshot:
             self._append_server_log("[INFO] Host snapshot received. Player actions restored.")
         preserved_entity_id = self._selected_entity_id()
+        host_name = str(snapshot.get("host_name") or "").strip()
+        if host_name:
+            self._host_display_name = host_name
         players = snapshot.get("players")
         if isinstance(players, dict):
             self._update_connected_players({str(k): str(v) for k, v in players.items()})
@@ -16885,6 +17174,7 @@ class DungeonAppletWidget(QWidget):
             "character_ids": {},
             "known_players": {},
             "last_player_name": "",
+            "last_dm_name": "",
             "autosave_enabled": False,
         }
         path = self._local_profile_path()
@@ -16946,6 +17236,9 @@ class DungeonAppletWidget(QWidget):
             payload["known_players"] = dict(getattr(self, "_known_player_profiles", {}) or {})
             payload["last_player_name"] = str(
                 getattr(self, "_local_player_name", "") or payload.get("last_player_name") or ""
+            )
+            payload["last_dm_name"] = str(
+                getattr(self, "_local_dm_name", "") or payload.get("last_dm_name") or ""
             )
             payload["autosave_enabled"] = bool(getattr(self, "_autosave_enabled", False))
             path.parent.mkdir(parents=True, exist_ok=True)

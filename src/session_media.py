@@ -31,6 +31,7 @@ SUPPORTED_MEDIA_EXTENSIONS: dict[str, str] = {
     ".flac": "audio/flac",
 }
 EFFECT_POOL_SIZE = 4
+DEFAULT_MEDIA_STREAM_PORT = 8766
 
 
 def validate_media_source_path(path: str) -> tuple[bool, str]:
@@ -180,7 +181,11 @@ class SessionMediaHttpServer:
         if self._server is not None:
             return True, ""
         try:
-            self._server = _MediaThreadingHttpServer(("0.0.0.0", 0), _MediaRequestHandler, self)
+            self._server = _MediaThreadingHttpServer(
+                ("0.0.0.0", DEFAULT_MEDIA_STREAM_PORT),
+                _MediaRequestHandler,
+                self,
+            )
         except OSError as exc:
             self._server = None
             return False, str(exc)

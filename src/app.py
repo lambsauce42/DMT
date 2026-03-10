@@ -1652,21 +1652,24 @@ def build_applet_widget(parent: QWidget, key: str, applet: Dict[str, object]) ->
         online_cfg = applet.get("online", {}) if isinstance(applet.get("online"), dict) else {}
         port = int(online_cfg.get("port", 8765))
         collection_path = str(online_cfg.get("collection_path") or "").strip()
+        dm_name = str(online_cfg.get("dm_name") or "DM").strip() or "DM"
         _append_online_launch_log(
             "online_host_launch_begin",
             key=str(key),
             port=int(port),
             collection_path=collection_path,
+            dm_name=dm_name,
         )
         try:
             widget = DungeonAppletWidget(parent)
-            started = widget.start_online_host(port, collection_path or None)
+            started = widget.start_online_host(port, collection_path or None, dm_name)
         except Exception as exc:
             _append_online_launch_log(
                 "online_host_launch_exception",
                 key=str(key),
                 port=int(port),
                 collection_path=collection_path,
+                dm_name=dm_name,
                 error=str(exc),
                 traceback=traceback.format_exc(),
             )
@@ -1679,6 +1682,7 @@ def build_applet_widget(parent: QWidget, key: str, applet: Dict[str, object]) ->
                 key=str(key),
                 port=int(port),
                 collection_path=collection_path,
+                dm_name=dm_name,
             )
             if widget is not None:
                 widget.deleteLater()
@@ -1688,6 +1692,7 @@ def build_applet_widget(parent: QWidget, key: str, applet: Dict[str, object]) ->
             key=str(key),
             port=int(port),
             collection_path=collection_path,
+            dm_name=dm_name,
         )
         return widget
     if str(key).startswith("online_join::"):
@@ -2361,6 +2366,7 @@ class HomeWidget(QWidget):
             return
         filename = str(details["collection_path"]).strip()
         port = int(details["port"])
+        dm_name = str(details["dm_name"]).strip()
         if not filename:
             _append_online_launch_log("home_host_prompt_rejected_blank_collection")
             QMessageBox.warning(self, "Host Online Session", "Dungeon collection is required.")
@@ -2376,12 +2382,21 @@ class HomeWidget(QWidget):
                 "Choose an existing dungeon collection file.",
             )
             return
+        if not dm_name:
+            _append_online_launch_log(
+                "home_host_prompt_rejected_blank_dm_name",
+                collection_path=str(filename),
+                port=int(port),
+            )
+            QMessageBox.warning(self, "Host Online Session", "DM name is required.")
+            return
         collection_name = Path(filename).stem or "Collection"
         _append_online_launch_log(
             "home_host_applet_queued",
             collection_path=str(filename),
             port=int(port),
             collection_name=str(collection_name),
+            dm_name=str(dm_name),
         )
         key = f"online_host::{port}::{collection_name}::{int(datetime.now().timestamp())}"
         applet = {
@@ -2394,6 +2409,7 @@ class HomeWidget(QWidget):
             "online": {
                 "port": int(port),
                 "collection_path": filename,
+                "dm_name": dm_name,
             },
         }
         self._on_open(applet, True)
@@ -2461,13 +2477,26 @@ class HomeWidget(QWidget):
             pass
         return "Player"
 
+    def _last_host_dm_name(self) -> str:
+        path = dnd_saves_dir() / "settings" / LOCAL_DUNGEON_PROFILE_FILENAME
+        try:
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    clean_name = str(payload.get("last_dm_name") or "").strip()
+                    if clean_name:
+                        return clean_name
+        except Exception:
+            pass
+        return "DM"
+
     def _prompt_host_dungeon_collection_details(self) -> Optional[Dict[str, object]]:
         base_dir = dungeon_collections_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
 
         dialog = ModernDialog("Host Online Session", self)
         dialog.setMinimumWidth(620)
-        dialog.add_text("Choose a collection file and port, then start the host.")
+        dialog.add_text("Choose a collection file, port, and DM name, then start the host.")
 
         content = QWidget(dialog)
         layout = QVBoxLayout(content)
@@ -2502,6 +2531,11 @@ class HomeWidget(QWidget):
         port_spin.setMinimumHeight(36)
         form.addRow("Port", port_spin)
 
+        dm_name_edit = QLineEdit(dialog)
+        dm_name_edit.setText(self._last_host_dm_name())
+        dm_name_edit.setMinimumHeight(36)
+        form.addRow("DM Name", dm_name_edit)
+
         def _browse_for_collection() -> None:
             filename, _ = QFileDialog.getOpenFileName(
                 dialog,
@@ -2535,6 +2569,15 @@ class HomeWidget(QWidget):
                     "Choose an existing dungeon collection file.",
                 )
                 return
+            dm_name = dm_name_edit.text().strip()
+            if not dm_name:
+                _append_online_launch_log(
+                    "home_host_prompt_rejected_blank_dm_name",
+                    collection_path=filename,
+                    port=int(port_spin.value()),
+                )
+                QMessageBox.warning(dialog, "Host Online Session", "DM name is required.")
+                return
             dialog.accept()
 
         submit_button.clicked.connect(_accept_if_valid)
@@ -2548,6 +2591,7 @@ class HomeWidget(QWidget):
         return {
             "collection_path": collection_edit.text().strip(),
             "port": int(port_spin.value()),
+            "dm_name": dm_name_edit.text().strip(),
         }
 
     def _prompt_join_online_details(self) -> Optional[Dict[str, object]]:

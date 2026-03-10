@@ -3,7 +3,7 @@ import sys
 import json
 
 import pytest
-from PySide6.QtWidgets import QApplication, QCheckBox, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QLineEdit, QPushButton, QWidget
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -37,7 +37,7 @@ def test_host_online_builds_online_host_applet(monkeypatch, qapp, tmp_path):
     monkeypatch.setattr(
         HomeWidget,
         "_prompt_host_dungeon_collection_details",
-        lambda self: {"collection_path": str(collection_path), "port": 8765},
+        lambda self: {"collection_path": str(collection_path), "port": 8765, "dm_name": "Aria"},
     )
 
     widget = HomeWidget(APPLET_DEFINITIONS, _on_open)
@@ -49,6 +49,7 @@ def test_host_online_builds_online_host_applet(monkeypatch, qapp, tmp_path):
     assert str(applet["key"]).startswith("online_host::")
     assert applet["online"]["port"] == 8765
     assert applet["online"]["collection_path"] == str(collection_path)
+    assert applet["online"]["dm_name"] == "Aria"
 
 
 def test_join_online_builds_online_join_applet(monkeypatch, qapp):
@@ -96,6 +97,27 @@ def test_join_online_prompt_prefills_last_saved_player_name(monkeypatch, qapp, t
     assert widget._prompt_join_online_details() is None
 
 
+def test_host_online_prompt_prefills_last_saved_dm_name(monkeypatch, qapp, tmp_path):
+    monkeypatch.setattr("app.dnd_saves_dir", lambda: tmp_path)
+    settings_dir = tmp_path / "settings"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    (settings_dir / "dungeon_profile.json").write_text(
+        json.dumps({"last_dm_name": "Keeper"}),
+        encoding="utf-8",
+    )
+
+    widget = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
+
+    def _fake_exec(self):
+        line_edits = self.findChildren(QLineEdit)
+        assert any(edit.text() == "Keeper" for edit in line_edits)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr("app.ModernDialog.exec", _fake_exec)
+
+    assert widget._prompt_host_dungeon_collection_details() is None
+
+
 def test_host_online_cancelled_dialog_does_not_open_applet(monkeypatch, qapp):
     opened = []
 
@@ -123,7 +145,7 @@ def test_host_online_invalid_collection_does_not_open_applet(monkeypatch, qapp, 
     monkeypatch.setattr(
         HomeWidget,
         "_prompt_host_dungeon_collection_details",
-        lambda self: {"collection_path": str(tmp_path / "missing.dmtcollection"), "port": 8765},
+        lambda self: {"collection_path": str(tmp_path / "missing.dmtcollection"), "port": 8765, "dm_name": "Aria"},
     )
     warnings = []
     monkeypatch.setattr(
@@ -271,8 +293,8 @@ def test_online_host_launch_failed_writes_diagnostics_log(monkeypatch, qapp, tmp
         def __init__(self, parent=None):
             _ = parent
 
-        def start_online_host(self, port, collection_path):
-            _ = (port, collection_path)
+        def start_online_host(self, port, collection_path, dm_name):
+            _ = (port, collection_path, dm_name)
             return False
 
         def deleteLater(self):
