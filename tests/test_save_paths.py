@@ -212,5 +212,10 @@ class TestSavePaths(unittest.TestCase):
         assets_dir = save_paths.collection_icon_assets_dir(path)
         self.assertEqual(assets_dir, Path("My Collection_assets/icons"))
 
+    def test_collection_image_assets_dir_is_related_to_collection_file(self):
+        path = Path("My Collection.json")
+        assets_dir = save_paths.collection_image_assets_dir(path)
+        self.assertEqual(assets_dir, Path("My Collection_assets/images"))
+
 if __name__ == "__main__":
     unittest.main()

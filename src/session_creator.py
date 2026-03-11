@@ -998,6 +998,36 @@ class SessionCreatorWidget(QWidget):
         ref_layout.setContentsMargins(0, 0, 0, 0)
         
         self.ref_tabs = QTabWidget()
+        self.ref_tabs.setDocumentMode(True)
+        self.ref_tabs.setStyleSheet(
+            """
+            QTabWidget::pane {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 10px;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #161b22;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-bottom: none;
+                min-height: 34px;
+                padding: 0 14px;
+                margin-right: 6px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+            }
+            QTabBar::tab:selected {
+                background-color: #0d1117;
+                color: #f0f6fc;
+                border-color: #58a6ff;
+            }
+            QTabBar::tab:!selected:hover {
+                background-color: #1f2937;
+            }
+            """
+        )
         
         # Plan Tab (scratchpad-like rich text editor + plain-text import)
         plan_tab = QWidget()
@@ -1195,6 +1225,29 @@ class SessionCreatorWidget(QWidget):
             combo.setFixedHeight(32)
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(1)
+            combo.setStyleSheet(
+                """
+                QComboBox {
+                    background-color: #0d1117;
+                    color: #e6edf3;
+                    border: 1px solid #30363d;
+                    border-radius: 8px;
+                    padding: 0 10px;
+                }
+                QComboBox::drop-down {
+                    width: 28px;
+                    border: none;
+                    background: transparent;
+                }
+                QComboBox QAbstractItemView {
+                    background-color: #0d1117;
+                    color: #e6edf3;
+                    selection-background-color: #1f6feb;
+                    selection-color: #f8fafc;
+                    border: 1px solid #30363d;
+                }
+                """
+            )
         context_control_size = 32
         
         # Helper for rows

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+from bundled_data import data_dir, data_path
 from save_paths import dnd_saves_dir
 
 
@@ -87,14 +88,14 @@ def parse_tags_text(text: str) -> tuple[str, ...]:
 
 
 def _data_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "data"
+    return data_dir()
 
 
 def resolve_monster_db_path() -> Path:
     override = dnd_saves_dir() / "imports" / "dnd_monsters_full.csv"
     if override.exists():
         return override
-    return _data_dir() / "dnd_monsters_full.csv"
+    return data_path("dnd_monsters_full.csv")
 
 
 def parse_cr_value(cr: str) -> float:
@@ -182,7 +183,7 @@ def load_monsters(path: Path | None = None) -> list[Monster]:
 
 
 def load_difficulty_table(path: Path | None = None) -> DifficultyTable:
-    resolved_path = path or (_data_dir() / "EncounterDifficulty.csv")
+    resolved_path = path or data_path("EncounterDifficulty.csv")
     if not resolved_path.exists():
         raise EncounterDataError(
             f"Difficulty table missing: {resolved_path}. Place the CSV there."
@@ -226,7 +227,7 @@ def compute_target_xp(player_levels: list[int], difficulty: str) -> int:
 
 
 def load_multiplier_table(path: Path | None = None) -> MultiplierTable:
-    resolved_path = path or (_data_dir() / "EncounterMultipliers.csv")
+    resolved_path = path or data_path("EncounterMultipliers.csv")
     if not resolved_path.exists():
         raise EncounterDataError(
             f"Multiplier table missing: {resolved_path}. Place the CSV there."

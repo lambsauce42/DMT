@@ -25,6 +25,7 @@ from dungeon_applet import (
     ONLINE_MODE_LOCAL_DM,
     ONLINE_MODE_PLAYER,
     SESSION_ICON_PREFIX,
+    SESSION_IMAGE_PREFIX,
     ToolType,
 )
 from character_archive import character_sync_content_hash
@@ -41,10 +42,10 @@ from dungeon_constants import (
     ROLE_LINKED_SHEET_NAME,
     ROLE_OWNER_PLAYER_ID,
 )
-from dungeon_items import EntityItem
+from dungeon_items import DungeonImageItem, EntityItem
 from dmt_package import read_dmt_package_info
 from item_file_format import build_item_document, load_item_payload, write_item_document
-from save_paths import online_icon_cache_dir
+from save_paths import online_icon_cache_dir, online_image_cache_dir
 
 _PNG_1X1_BYTES = (
     base64.b64decode(
@@ -2047,6 +2048,42 @@ def test_client_icon_asset_rejects_invalid_image_payload(dungeon_widget, monkeyp
     assert not cache_dir.exists()
 
 
+def test_client_image_asset_does_not_escape_image_cache(dungeon_widget, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "session" / "cache" / "images"
+    monkeypatch.setattr("dungeon_applet.online_image_cache_dir", lambda _sid: cache_dir)
+    dungeon_widget._online_session_id = "session-image-1"
+
+    dungeon_widget._on_client_image_asset(
+        "missing-image",
+        "../escaped.png",
+        base64.b64encode(_PNG_1X1_BYTES).decode("ascii"),
+    )
+
+    escaped_target = cache_dir.parent / "escaped.png"
+    assert not escaped_target.exists()
+
+
+def test_client_image_asset_updates_matching_session_image(dungeon_widget, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "session" / "cache" / "images"
+    monkeypatch.setattr("dungeon_applet.online_image_cache_dir", lambda _sid: cache_dir)
+    dungeon_widget._online_session_id = "session-image-2"
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+
+    image = DungeonImageItem(QPixmap(), QPointF(0, 0), source_path=f"{SESSION_IMAGE_PREFIX}scene.png")
+    image.setData(ROLE_ENTITY_ID, "image-1")
+    dungeon_widget.canvas.scene().addItem(image)
+
+    dungeon_widget._on_client_image_asset(
+        "image-1",
+        "scene.png",
+        base64.b64encode(_PNG_1X1_BYTES).decode("ascii"),
+    )
+
+    assert cache_dir.exists()
+    assert (cache_dir / "scene.png").exists()
+    assert image.source_path == f"{SESSION_IMAGE_PREFIX}scene.png"
+
+
 def test_local_ping_is_forwarded_by_mode(dungeon_widget):
     host_calls = []
     player_calls = []
@@ -2328,6 +2365,67 @@ def test_host_snapshot_requested_sends_icon_assets_for_session_refs(dungeon_widg
     assert payload["filename"] == "token.png"
 
 
+def test_host_snapshot_requested_sends_image_assets_for_session_refs(dungeon_widget, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "session" / "cache" / "images"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "scene.png").write_bytes(_PNG_1X1_BYTES)
+    monkeypatch.setattr("dungeon_applet.online_image_cache_dir", lambda _sid: cache_dir)
+    dungeon_widget._online_session_id = "session-image-snap"
+
+    class _HostStub:
+        def __init__(self):
+            self.snapshots = []
+            self.assets = []
+
+        def send_snapshot_to(self, player_id, snapshot):
+            self.snapshots.append((player_id, snapshot))
+
+        def send_image_asset(self, player_id, **kwargs):
+            self.assets.append((player_id, kwargs))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    image = DungeonImageItem(QPixmap(), QPointF(0, 0), source_path=f"{SESSION_IMAGE_PREFIX}scene.png")
+    image.setData(ROLE_ENTITY_ID, "image-1")
+    dungeon_widget.canvas.scene().addItem(image)
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "image",
+                        "image_id": "image-1",
+                        "source_path": f"{SESSION_IMAGE_PREFIX}scene.png",
+                        "pos": [0.0, 0.0],
+                        "width": 32.0,
+                        "height": 32.0,
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._players_dungeon_id = "d1"
+
+    dungeon_widget._on_host_snapshot_requested("player-x")
+
+    assert dungeon_widget._host_controller.snapshots
+    assert dungeon_widget._host_controller.assets
+    player_id, payload = dungeon_widget._host_controller.assets[0]
+    assert player_id == "player-x"
+    assert payload["image_id"] == "image-1"
+    assert payload["filename"] == "scene.png"
+
+
 def test_materialize_state_icons_for_archive_moves_session_refs_to_assets(dungeon_widget, monkeypatch, tmp_path):
     cache_dir = tmp_path / "online" / "cache" / "icons"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -2353,6 +2451,35 @@ def test_materialize_state_icons_for_archive_moves_session_refs_to_assets(dungeo
     assert icon_path.startswith("assets/icons/")
     assert icon_path.endswith(".png")
     assert icon_path in assets
+
+
+def test_materialize_state_images_for_archive_moves_session_refs_to_assets(dungeon_widget, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "online" / "cache" / "images"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "scene.png").write_bytes(_PNG_1X1_BYTES)
+    monkeypatch.setattr("dungeon_applet.online_image_cache_dir", lambda _sid: cache_dir)
+    dungeon_widget._online_session_id = "session-image-save"
+
+    state = {
+        "items": [
+            {
+                "type": "image",
+                "image_id": "image-2",
+                "source_path": f"{SESSION_IMAGE_PREFIX}scene.png",
+                "pos": [0.0, 0.0],
+                "width": 32.0,
+                "height": 32.0,
+            }
+        ],
+        "fog": {"path": []},
+    }
+    assets = {}
+    result = dungeon_widget._materialize_state_images_for_archive(state, assets)
+
+    image_path = str(result["items"][0]["source_path"])
+    assert image_path.startswith("assets/images/")
+    assert image_path.endswith(".png")
+    assert image_path in assets
 
 
 def test_sync_collection_icon_assets_dir_prunes_stale_files_and_refreshes_bytes(dungeon_widget, tmp_path):
@@ -6237,6 +6364,123 @@ def test_dm_initiative_ok_button_confirms_player_row_value(dungeon_widget, qtbot
     assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 19
 
 
+def test_dm_initiative_nat_buttons_apply_literal_values_without_sorting(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice", "player-2": "Bob"}
+    for entity_id, owner_id, label in (("e1", "player-1", "Wolf"), ("e2", "player-2", "Bear")):
+        entity = EntityItem(QPointF(0, 0))
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_LABEL, label)
+        entity.setData(ROLE_OWNER_PLAYER_ID, owner_id)
+        dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._seed_initiative_state()
+    dungeon_widget._initiative_state["player_entries"] = {
+        "player-1:e1": dungeon_widget._initiative_state["player_entries"]["player-1:e1"],
+        "player-2:e2": dungeon_widget._initiative_state["player_entries"]["player-2:e2"],
+    }
+    dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] = 5
+    dungeon_widget._initiative_state["player_entries"]["player-2:e2"]["initiative"] = 11
+    dungeon_widget._render_initiative_overlay()
+    QApplication.processEvents()
+    initial_order = list(dungeon_widget._initiative_state["player_entries"].keys())
+
+    edits = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QLineEdit)
+        if str(candidate.property("initiative_kind") or "") == "player"
+        and str(candidate.property("initiative_id") or "") == "player-1:e1"
+    ]
+    assert edits
+    edit = edits[-1]
+    row_buttons = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QPushButton)
+        if str(candidate.parentWidget().property("initiative_id") or "") == "player-1:e1"
+        if str(candidate.text() or "") in {"nat1", "nat20"}
+    ]
+    assert len(row_buttons) == 2
+    nat1_button = next(button for button in row_buttons if button.text() == "nat1")
+    nat20_button = next(button for button in row_buttons if button.text() == "nat20")
+
+    assert nat1_button.height() == edit.height()
+    assert nat20_button.height() == edit.height()
+
+    qtbot.mouseClick(nat20_button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 20
+    assert list(dungeon_widget._initiative_state["player_entries"].keys()) == initial_order
+
+    qtbot.mouseClick(nat1_button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 1
+    assert list(dungeon_widget._initiative_state["player_entries"].keys()) == initial_order
+
+
+def test_dm_initiative_value_edit_does_not_auto_sort_until_requested(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice", "player-2": "Bob"}
+    for entity_id, owner_id, label in (("e1", "player-1", "Wolf"), ("e2", "player-2", "Bear")):
+        entity = EntityItem(QPointF(0, 0))
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_LABEL, label)
+        entity.setData(ROLE_OWNER_PLAYER_ID, owner_id)
+        dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._seed_initiative_state()
+    dungeon_widget._initiative_state["player_entries"] = {
+        "player-2:e2": dungeon_widget._initiative_state["player_entries"]["player-2:e2"],
+        "player-1:e1": dungeon_widget._initiative_state["player_entries"]["player-1:e1"],
+    }
+    dungeon_widget._initiative_state["player_entries"]["player-2:e2"]["initiative"] = 14
+    dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] = 8
+
+    dungeon_widget._on_initiative_value_changed("player", "player-1:e1", "20")
+
+    assert list(dungeon_widget._initiative_state["player_entries"].keys()) == [
+        "player-2:e2",
+        "player-1:e1",
+    ]
+
+    dungeon_widget._on_initiative_sort_cards_requested()
+
+    assert list(dungeon_widget._initiative_state["player_entries"].keys()) == [
+        "player-1:e1",
+        "player-2:e2",
+    ]
+
+
+def test_dm_initiative_drag_reorders_rows_within_same_group(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice", "player-2": "Bob"}
+    for entity_id, owner_id, label in (("e1", "player-1", "Wolf"), ("e2", "player-2", "Bear")):
+        entity = EntityItem(QPointF(0, 0))
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_LABEL, label)
+        entity.setData(ROLE_OWNER_PLAYER_ID, owner_id)
+        dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._seed_initiative_state()
+    dungeon_widget._initiative_state["player_entries"] = {
+        "player-1:e1": dungeon_widget._initiative_state["player_entries"]["player-1:e1"],
+        "player-2:e2": dungeon_widget._initiative_state["player_entries"]["player-2:e2"],
+    }
+    dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] = 12
+    dungeon_widget._initiative_state["player_entries"]["player-2:e2"]["initiative"] = 12
+
+    changed = dungeon_widget._move_initiative_row("player", "player-2:e2", "player-1:e1")
+
+    assert changed is True
+    assert list(dungeon_widget._initiative_state["player_entries"].keys()) == [
+        "player-2:e2",
+        "player-1:e1",
+    ]
+
+
 def test_player_mode_shows_initiative_reopen_button_only_with_visible_rows(dungeon_widget):
     dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
     assert dungeon_widget._initiative_reopen_btn.isHidden()
@@ -6795,6 +7039,197 @@ def test_client_snapshot_preserves_selected_entity(dungeon_widget):
     assert "e1" in selected_ids
 
 
+def test_player_snapshot_live_refreshes_selected_inspector_without_reselect(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+
+    selected = EntityItem(QPointF(10, 10))
+    selected.setData(ROLE_ENTITY_ID, "e1")
+    selected.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    selected.setData(ROLE_LABEL, "Wolf")
+    dungeon_widget.canvas.scene().addItem(selected)
+    selected.setSelected(True)
+    dungeon_widget._on_selection_changed()
+
+    snapshot = {
+        "players": {"player-1": "Alice"},
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Dungeon 1",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "e1",
+                            "label": "Wolf Veteran",
+                            "owner_player_id": "player-1",
+                            "pos": [10.0, 10.0],
+                            "color": "#3B82F6",
+                            "hp": 17,
+                            "max_hp": 22,
+                            "ac": 15,
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+    }
+
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    assert dungeon_widget.inspector._entity is not None
+    assert dungeon_widget.inspector.name_edit.text() == "Wolf Veteran"
+    assert dungeon_widget.inspector.hp_stat.curr_edit.value() == 17
+    assert dungeon_widget.inspector.hp_stat.max_edit.value() == 22
+    assert dungeon_widget.inspector.shield_widget.spin.value() == 15
+
+
+def test_player_disconnect_clears_deferred_inbound_sync_and_authoritative_state(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = types.SimpleNamespace(
+        consume_terminal_disconnect_message=lambda: "",
+        disconnect=lambda: None,
+    )
+
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    dungeon_widget.canvas.scene().addItem(entity)
+
+    snapshot = {
+        "players": {"player-1": "Alice"},
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Dungeon 1",
+                "state": {
+                    "items": [
+                        {
+                            "type": "entity",
+                            "entity_id": "e1",
+                            "label": "Wolf",
+                            "owner_player_id": "player-1",
+                            "pos": [120.0, 160.0],
+                            "color": "#3B82F6",
+                            "hp": 12,
+                            "max_hp": 12,
+                            "ac": 13,
+                        }
+                    ],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+    }
+    dungeon_widget._deferred_client_sync_events = [("snapshot", snapshot)]
+    dungeon_widget._local_player_authoritative_state = {
+        "items": [_entity_state("e1", "player-1", pos=(10.0, 10.0), label="Wolf")],
+        "fog": {"path": []},
+    }
+
+    dungeon_widget._on_client_disconnected()
+
+    assert dungeon_widget._deferred_client_sync_events == []
+    assert dungeon_widget._local_player_authoritative_state is None
+    dungeon_widget._flush_deferred_client_sync_events()
+    assert dungeon_widget._find_entity_by_id("e1") is None
+
+
+def test_stale_link_character_result_without_pending_request_is_ignored(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    dungeon_widget.canvas.scene().addItem(entity)
+
+    dungeon_widget._on_client_command_result(
+        {
+            "ok": True,
+            "request_id": "old-request",
+            "data": {
+                "action": "link_character_entity",
+                "entity_id": "e1",
+                "sheet_id": "sheet-1",
+                "sheet_name": "Hero",
+                "character_id": "character-1",
+                "inventory": {"inventory": []},
+                "stats": {"name": "Hero"},
+                "archive_b64": _valid_archive_b64(),
+            },
+        }
+    )
+
+    assert str(entity.data(ROLE_LINKED_SHEET_ID) or "") == ""
+    assert str(entity.data(ROLE_LINKED_CHARACTER_ID) or "") == ""
+
+
+def test_stale_icon_asset_is_ignored_when_entity_does_not_reference_it(dungeon_widget):
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_ICON, "")
+    entity.icon_path = ""
+    dungeon_widget.canvas.scene().addItem(entity)
+
+    dungeon_widget._on_client_icon_asset(
+        "e1",
+        "token.png",
+        base64.b64encode(_PNG_1X1_BYTES).decode("ascii"),
+    )
+
+    assert str(entity.data(ROLE_ICON) or "") == ""
+    assert str(getattr(entity, "icon_path", "") or "") == ""
+
+
+def test_player_patch_live_refreshes_selected_inspector_without_reselect(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._dungeons = [_dungeon_record(_entity_state("e1", "player-1", pos=(10.0, 10.0), label="Wolf"))]
+    dungeon_widget._load_dungeon_state(dungeon_widget._dungeons[0]["state"])
+
+    entity = dungeon_widget._find_entity_by_id("e1")
+    assert entity is not None
+    entity.setSelected(True)
+    dungeon_widget._on_selection_changed()
+
+    payload = {
+        "player_id": "player-1",
+        "dungeon_id": "d1",
+        "state": {
+            "items": [
+                _entity_state(
+                    "e1",
+                    "player-1",
+                    pos=(10.0, 10.0),
+                    label="Wolf Captain",
+                    hp=21,
+                    max_hp=24,
+                    ac=18,
+                )
+            ],
+            "fog": {"path": []},
+        },
+    }
+
+    dungeon_widget._on_client_player_state_patch_received(payload)
+
+    assert dungeon_widget.inspector._entity is entity
+    assert dungeon_widget.inspector.name_edit.text() == "Wolf Captain"
+    assert dungeon_widget.inspector.hp_stat.curr_edit.value() == 21
+    assert dungeon_widget.inspector.hp_stat.max_edit.value() == 24
+    assert dungeon_widget.inspector.shield_widget.spin.value() == 18
+
+
 def test_player_snapshot_defers_scene_reload_while_drag_active(dungeon_widget):
     dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
     dungeon_widget._local_player_id = "player-1"
@@ -7058,6 +7493,87 @@ def test_stale_snapshot_does_not_overwrite_recent_local_inspector_name_edit(dung
     reloaded = dungeon_widget._find_entity_by_id("e1")
     assert reloaded is not None
     assert str(reloaded.data(ROLE_LABEL) or "") == "Wolf Alpha"
+
+
+def test_linked_character_refresh_does_not_override_dirty_inspector_name(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.waitExposed(dungeon_widget)
+
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_LABEL, "Wolf")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget.inspector.name_edit.setFocus(Qt.FocusReason.MouseFocusReason)
+    dungeon_widget.inspector.name_edit.setText("Wolf Alpha")
+    QApplication.processEvents()
+
+    dungeon_widget._apply_character_link_to_entity(
+        entity,
+        sheet_id="sheet-1",
+        sheet_name="Hero",
+        character_id="character-1",
+        authority_player_id="player-1",
+        linked_inventory={"inventory": []},
+        stats={"name": "Hero Name", "hp": 12, "ac": 14},
+        archive_b64=_valid_archive_b64(),
+    )
+    dungeon_widget.inspector.set_entity(entity)
+
+    assert str(entity.data(ROLE_LABEL) or "") == "Hero Name"
+    assert dungeon_widget.inspector.name_edit.text() == "Wolf Alpha"
+
+
+def test_authoritative_override_clears_when_host_snapshot_matches_player_fields_with_extra_link_data(
+    dungeon_widget,
+):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    entity.setData(ROLE_LABEL, "Wolf")
+    entity.hp = 12
+    entity._max_hp = 12
+    entity.ac = 13
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._local_player_authoritative_state = (
+        dungeon_widget._serialize_scene_for_player_state_update()
+    )
+    snapshot_item = dict(dungeon_widget._local_player_authoritative_state["items"][0])
+    snapshot_item.update(
+        {
+            "linked_sheet_id": "sheet-1",
+            "linked_sheet_name": "Hero",
+            "linked_character_id": "character-1",
+            "linked_inventory": {"inventory": [{"item_id": "item-a", "quantity": 1}]},
+            "linked_sheet_archive_b64": _valid_archive_b64(),
+        }
+    )
+
+    snapshot = {
+        "players": {"player-1": "Alice"},
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Dungeon 1",
+                "state": {
+                    "items": [snapshot_item],
+                    "fog": {"path": []},
+                },
+            }
+        ],
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+    }
+
+    dungeon_widget._process_client_snapshot_received(snapshot)
+
+    entity = dungeon_widget._find_entity_by_id("e1")
+    assert entity is not None
+    assert dungeon_widget._local_player_authoritative_state is None
+    assert str(entity.data(ROLE_LINKED_SHEET_ID) or "") == "sheet-1"
+    assert str(entity.data(ROLE_LINKED_CHARACTER_ID) or "") == "character-1"
 
 
 def test_player_can_select_owned_entity_on_non_current_layer(dungeon_widget, qtbot):

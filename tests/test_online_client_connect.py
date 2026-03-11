@@ -377,3 +377,71 @@ def test_client_controller_connect_timeout_forces_next_reconnect_attempt(monkeyp
     controller._on_reconnect_connect_timeout()
 
     assert disconnect_calls == [True]
+
+
+def test_client_controller_connected_transport_without_hello_ack_still_forces_retry(monkeypatch):
+    controller = ClientSessionController()
+    disconnect_calls = []
+    monkeypatch.setattr(controller.client, "is_connected", lambda: True)
+    monkeypatch.setattr(controller.client, "is_connecting", lambda: False)
+    monkeypatch.setattr(controller.client, "disconnect", lambda: disconnect_calls.append(True))
+
+    controller._manual_disconnect = False
+    controller._reconnect_paused = False
+    controller._session_established = False
+    controller._on_reconnect_connect_timeout()
+
+    assert disconnect_calls == [True]
+
+
+def test_client_controller_hello_ack_clears_reconnect_timeout_and_marks_connected():
+    controller = ClientSessionController()
+    states = []
+    connected_events = []
+    hello_acks = []
+    controller.reconnect_state_changed.connect(states.append)
+    controller.connected.connect(lambda: connected_events.append(True))
+    controller.hello_ack_received.connect(
+        lambda player_id, resumed: hello_acks.append((player_id, resumed))
+    )
+
+    controller._active_transport_epoch = 4
+    controller._reconnect_attempt = 3
+    controller._reconnect_paused = True
+    controller._reconnect_connect_timeout_timer.start()
+
+    controller._on_hello_ack(4, "player-7", True)
+
+    assert controller._session_established is True
+    assert controller._reconnect_attempt == 0
+    assert controller._reconnect_paused is False
+    assert not controller._reconnect_connect_timeout_timer.isActive()
+    assert states
+    assert states[-1]["status"] == "connected"
+    assert connected_events == [True]
+    assert hello_acks == [("player-7", True)]
+
+
+def test_client_controller_ignores_stale_transport_snapshot_message():
+    controller = ClientSessionController()
+    controller._active_transport_epoch = 2
+    received = []
+    controller.snapshot_received.connect(received.append)
+
+    controller._on_message(
+        1,
+        {"type": "snapshot", "state": {"items": [], "fog": {"path": []}}},
+    )
+
+    assert received == []
+
+
+def test_client_controller_ignores_stale_transport_hello_ack():
+    controller = ClientSessionController()
+    controller._active_transport_epoch = 2
+    hello_acks = []
+    controller.hello_ack_received.connect(lambda player_id, resumed: hello_acks.append((player_id, resumed)))
+
+    controller._on_hello_ack(1, "player-1", False)
+
+    assert hello_acks == []

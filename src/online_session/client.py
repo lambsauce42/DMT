@@ -19,11 +19,11 @@ def _normalize_connect_host(host: str) -> tuple[str, bool]:
 
 class OnlineSessionClient(QObject):
     log_line = Signal(str)
-    connected_to_server = Signal()
-    disconnected_from_server = Signal()
-    hello_ack = Signal(str, bool)
-    socket_error = Signal(str)
-    message_received = Signal(dict)
+    connected_to_server = Signal(int)
+    disconnected_from_server = Signal(int)
+    hello_ack = Signal(int, str, bool)
+    socket_error = Signal(int, str)
+    message_received = Signal(int, dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -33,6 +33,7 @@ class OnlineSessionClient(QObject):
         self._player_id: Optional[str] = None
         self._session_token: str = ""
         self._persistent_player_id: str = ""
+        self._transport_epoch: int = 0
 
         self._socket.connected.connect(self._on_connected)
         self._socket.disconnected.connect(self._on_disconnected)
@@ -46,6 +47,10 @@ class OnlineSessionClient(QObject):
     @property
     def session_token(self) -> str:
         return str(self._session_token or "")
+
+    @property
+    def transport_epoch(self) -> int:
+        return int(self._transport_epoch)
 
     def connect_to_host(
         self,
@@ -68,6 +73,7 @@ class OnlineSessionClient(QObject):
             or (persistent_player_id is None and previous_name and previous_name != next_name)
         ):
             self._session_token = ""
+        self._transport_epoch += 1
         target_host, rewritten = _normalize_connect_host(host)
         if rewritten:
             self.log_line.emit(
@@ -112,7 +118,7 @@ class OnlineSessionClient(QObject):
         return True
 
     def _on_connected(self) -> None:
-        self.connected_to_server.emit()
+        self.connected_to_server.emit(self._transport_epoch)
         self.log_line.emit("[INFO] Connected. Sending hello...")
         payload = {"type": "hello", "name": self._requested_name}
         if self._session_token:
@@ -125,13 +131,13 @@ class OnlineSessionClient(QObject):
         self._player_id = None
         # Drop any partial frame bytes from the previous socket lifetime.
         self._decoder = FrameDecoder()
-        self.disconnected_from_server.emit()
+        self.disconnected_from_server.emit(self._transport_epoch)
         self.log_line.emit("[INFO] Disconnected from host")
 
     def _on_error(self, _err) -> None:
         reason = str(self._socket.errorString() or "").strip() or "Unknown socket error"
         self.log_line.emit(f"[ERROR] Socket error: {reason}")
-        self.socket_error.emit(reason)
+        self.socket_error.emit(self._transport_epoch, reason)
 
     def _on_ready_read(self) -> None:
         try:
@@ -151,6 +157,6 @@ class OnlineSessionClient(QObject):
                 if session_token:
                     self._session_token = session_token
                 if self._player_id:
-                    self.hello_ack.emit(self._player_id, resumed)
+                    self.hello_ack.emit(self._transport_epoch, self._player_id, resumed)
                 continue
-            self.message_received.emit(message)
+            self.message_received.emit(self._transport_epoch, message)

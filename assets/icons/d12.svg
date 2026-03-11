@@ -1,0 +1,4 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M32 8L46 12L54 24L52 40L42 52H22L12 40L10 24L18 12L32 8Z" fill="#161B22" stroke="#58A6FF" stroke-width="3"/>
+  <text x="32" y="39" text-anchor="middle" fill="#E6EDF3" font-size="15" font-family="Arial" font-weight="700">12</text>
+</svg>

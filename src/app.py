@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
 import re
 
 from item_creator import ItemCreatorWidget
+from bundled_data import cleanup_current_bundled_runtime_data, cleanup_stale_bundled_runtime_data
 from dungeon_applet import DungeonAppletWidget
 from loot_applet import LootAppletWidget
 from maps_applet import MapsWidget, load_map_entries_from_storage
@@ -78,6 +79,7 @@ from save_paths import (
     dnd_saves_dir,
     default_dnd_save_dir,
 )
+from online_logging import append_active_online_session_crash_event, is_runtime_logging_enabled
 from tab_workspace import TabWorkspaceController, WorkspaceTabsHost
 from ui.encounter_panel import EncounterPanel
 from user_settings import (
@@ -1828,6 +1830,8 @@ def _append_json_line(path: Path, payload: dict[str, object], *, warn_prefix: st
 
 
 def _append_online_launch_log(event: str, **fields: object) -> None:
+    if not is_runtime_logging_enabled():
+        return
     payload: dict[str, object] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "pid": os.getpid(),
@@ -1865,6 +1869,8 @@ def _app_crash_instance_log_path() -> Path:
 
 
 def _append_app_crash_log(event: str, **fields: object) -> None:
+    if not is_runtime_logging_enabled():
+        return
     payload: dict[str, object] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "pid": os.getpid(),
@@ -1920,11 +1926,15 @@ def _install_crash_logging() -> None:
         )
 
     def _sys_excepthook(exc_type, exc_value, exc_traceback):
+        crash_payload = {
+            "exception_type": getattr(exc_type, "__name__", str(exc_type)),
+            "error": str(exc_value or ""),
+            "traceback": "".join(traceback.format_exception(exc_type, exc_value, exc_traceback)),
+        }
+        append_active_online_session_crash_event("uncaught_exception", **crash_payload)
         _append_app_crash_log(
             "uncaught_exception",
-            exception_type=getattr(exc_type, "__name__", str(exc_type)),
-            error=str(exc_value or ""),
-            traceback="".join(traceback.format_exception(exc_type, exc_value, exc_traceback)),
+            **crash_payload,
         )
         _ORIGINAL_SYS_EXCEPTHOOK(exc_type, exc_value, exc_traceback)
 
@@ -1932,18 +1942,22 @@ def _install_crash_logging() -> None:
 
     if _ORIGINAL_THREADING_EXCEPTHOOK is not None and hasattr(threading, "excepthook"):
         def _threading_excepthook(args):
-            _append_app_crash_log(
-                "uncaught_thread_exception",
-                thread_name=str(getattr(getattr(args, "thread", None), "name", "")),
-                exception_type=getattr(getattr(args, "exc_type", None), "__name__", str(getattr(args, "exc_type", ""))),
-                error=str(getattr(args, "exc_value", "") or ""),
-                traceback="".join(
+            crash_payload = {
+                "thread_name": str(getattr(getattr(args, "thread", None), "name", "")),
+                "exception_type": getattr(getattr(args, "exc_type", None), "__name__", str(getattr(args, "exc_type", ""))),
+                "error": str(getattr(args, "exc_value", "") or ""),
+                "traceback": "".join(
                     traceback.format_exception(
                         getattr(args, "exc_type", None),
                         getattr(args, "exc_value", None),
                         getattr(args, "exc_traceback", None),
                     )
                 ),
+            }
+            append_active_online_session_crash_event("uncaught_thread_exception", **crash_payload)
+            _append_app_crash_log(
+                "uncaught_thread_exception",
+                **crash_payload,
             )
             _ORIGINAL_THREADING_EXCEPTHOOK(args)
 
@@ -2477,6 +2491,19 @@ class HomeWidget(QWidget):
             pass
         return "Player"
 
+    def _last_join_host_ip(self) -> str:
+        path = dnd_saves_dir() / "settings" / LOCAL_DUNGEON_PROFILE_FILENAME
+        try:
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    host_ip = str(payload.get("last_join_host_ip") or "").strip()
+                    if host_ip:
+                        return host_ip
+        except Exception:
+            pass
+        return "127.0.0.1"
+
     def _last_host_dm_name(self) -> str:
         path = dnd_saves_dir() / "settings" / LOCAL_DUNGEON_PROFILE_FILENAME
         try:
@@ -2489,6 +2516,19 @@ class HomeWidget(QWidget):
         except Exception:
             pass
         return "DM"
+
+    def _last_host_collection_path(self) -> str:
+        path = dnd_saves_dir() / "settings" / LOCAL_DUNGEON_PROFILE_FILENAME
+        try:
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    collection_path = str(payload.get("last_host_collection_path") or "").strip()
+                    if collection_path and Path(collection_path).is_file():
+                        return collection_path
+        except Exception:
+            pass
+        return ""
 
     def _prompt_host_dungeon_collection_details(self) -> Optional[Dict[str, object]]:
         base_dir = dungeon_collections_dir()
@@ -2511,6 +2551,7 @@ class HomeWidget(QWidget):
         collection_edit = QLineEdit(dialog)
         collection_edit.setPlaceholderText("Select a dungeon collection file")
         collection_edit.setMinimumHeight(36)
+        collection_edit.setText(self._last_host_collection_path())
 
         browse_button = QPushButton("Browse", dialog)
         browse_button.setObjectName("SecondaryButton")
@@ -2605,7 +2646,7 @@ class HomeWidget(QWidget):
         form.setSpacing(10)
 
         host_edit = QLineEdit(dialog)
-        host_edit.setText("127.0.0.1")
+        host_edit.setText(self._last_join_host_ip())
         host_edit.setMinimumHeight(36)
         form.addRow("Host IP", host_edit)
 
@@ -2751,6 +2792,7 @@ def main() -> int:
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     clear_all_online_runtime_caches()
     clear_all_disposable_caches()
+    cleanup_stale_bundled_runtime_data()
     try:
         refresh_character_sheet_index_cache()
     except Exception:
@@ -2772,6 +2814,8 @@ def main() -> int:
             traceback=traceback.format_exc(),
         )
         raise
+    finally:
+        cleanup_current_bundled_runtime_data()
 
 
 if __name__ == "__main__":

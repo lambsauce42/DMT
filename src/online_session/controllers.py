@@ -163,6 +163,36 @@ class HostSessionController(QObject):
             }
         )
 
+    def send_image_asset(
+        self,
+        player_id: str,
+        *,
+        image_id: str,
+        filename: str,
+        content_b64: str,
+    ) -> None:
+        self.server.send_to_player(
+            player_id,
+            {
+                "type": "image_asset",
+                "image_id": image_id,
+                "filename": filename,
+                "content_b64": content_b64,
+                "ts": _utc_timestamp(),
+            },
+        )
+
+    def broadcast_image_asset(self, *, image_id: str, filename: str, content_b64: str) -> None:
+        self.server.broadcast(
+            {
+                "type": "image_asset",
+                "image_id": image_id,
+                "filename": filename,
+                "content_b64": content_b64,
+                "ts": _utc_timestamp(),
+            }
+        )
+
     def _on_player_connected(self, player_id: str, name: str, resumed: bool) -> None:
         self.players_changed.emit(self.players)
         self.broadcast_chat(
@@ -204,12 +234,14 @@ class ClientSessionController(QObject):
     log_line = Signal(str)
     connected = Signal()
     disconnected = Signal()
+    hello_ack_received = Signal(str, bool)
     players_changed = Signal(dict)
     chat_received = Signal(str, str, bool)
     snapshot_received = Signal(dict)
     command_result = Signal(dict)
     player_state_patch_received = Signal(dict)
     icon_asset_received = Signal(str, str, str)
+    image_asset_received = Signal(str, str, str)
     ping_received = Signal(float, float, str)
     media_event_received = Signal(dict)
     reconnect_state_changed = Signal(dict)
@@ -236,6 +268,7 @@ class ClientSessionController(QObject):
         self._terminal_disconnect_message = ""
         self._session_established = False
         self._last_transport_error = ""
+        self._active_transport_epoch = 0
 
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setSingleShot(False)
@@ -281,12 +314,14 @@ class ClientSessionController(QObject):
         self._reconnect_timer.stop()
         self._reconnect_connect_timeout_timer.stop()
         self._emit_reconnect_state("idle")
+        self._reconnect_connect_timeout_timer.start()
         self.client.connect_to_host(
             host,
             port,
             name,
             persistent_player_id=self._connect_persistent_player_id,
         )
+        self._active_transport_epoch = int(self.client.transport_epoch)
 
     def disconnect(self) -> None:
         self._manual_disconnect = True
@@ -331,18 +366,17 @@ class ClientSessionController(QObject):
         if self.client.is_connected():
             self.client.send({"type": "request_snapshot"})
 
-    def _on_connected(self) -> None:
-        self._reconnect_attempt = 0
-        self._reconnect_paused = False
-        self._terminal_disconnect_message = ""
-        self._last_transport_error = ""
+    def _on_connected(self, transport_epoch: int | None = None) -> None:
+        effective_epoch = self._active_transport_epoch if transport_epoch is None else int(transport_epoch)
+        if int(effective_epoch) != int(self._active_transport_epoch):
+            return
         self._heartbeat_timer.start()
         self._reset_heartbeat_timeout()
-        self._reconnect_connect_timeout_timer.stop()
-        self._emit_reconnect_state("connected")
-        self.connected.emit()
 
-    def _on_disconnected(self) -> None:
+    def _on_disconnected(self, transport_epoch: int | None = None) -> None:
+        effective_epoch = self._active_transport_epoch if transport_epoch is None else int(transport_epoch)
+        if int(effective_epoch) != int(self._active_transport_epoch):
+            return
         had_session = bool(self._session_established)
         if had_session:
             # Once a session was established, reconnect attempts can continue
@@ -375,17 +409,48 @@ class ClientSessionController(QObject):
             self._emit_reconnect_state("idle")
         self._last_transport_error = ""
 
-    def _on_hello_ack(self, player_id: str, resumed: bool) -> None:
+    def _on_hello_ack(
+        self,
+        transport_epoch: int | str | None,
+        player_id: str | bool | None = None,
+        resumed: bool = False,
+    ) -> None:
+        if isinstance(transport_epoch, int):
+            effective_epoch = int(transport_epoch)
+            effective_player_id = str(player_id or "")
+            effective_resumed = bool(resumed)
+        else:
+            effective_epoch = int(self._active_transport_epoch)
+            effective_player_id = str(transport_epoch or "")
+            effective_resumed = bool(player_id)
+        if int(effective_epoch) != int(self._active_transport_epoch):
+            return
+        self._reconnect_attempt = 0
+        self._reconnect_paused = False
+        self._terminal_disconnect_message = ""
+        self._last_transport_error = ""
+        self._reconnect_connect_timeout_timer.stop()
         self._session_established = True
         self._reconnect_requires_established_session = False
         self.log_line.emit(
-            f"[INFO] {'Reconnected' if resumed else 'Joined'} as {player_id}"
+            f"[INFO] {'Reconnected' if effective_resumed else 'Joined'} as {effective_player_id}"
         )
         self._reset_heartbeat_timeout()
+        self._emit_reconnect_state("connected")
+        self.hello_ack_received.emit(str(effective_player_id or ""), bool(effective_resumed))
+        self.connected.emit()
         self.request_snapshot()
 
-    def _on_socket_error(self, reason: str) -> None:
-        self._last_transport_error = str(reason or "").strip()
+    def _on_socket_error(self, transport_epoch: int | str, reason: str | None = None) -> None:
+        if isinstance(transport_epoch, int):
+            effective_epoch = int(transport_epoch)
+            effective_reason = str(reason or "")
+        else:
+            effective_epoch = int(self._active_transport_epoch)
+            effective_reason = str(transport_epoch or "")
+        if int(effective_epoch) != int(self._active_transport_epoch):
+            return
+        self._last_transport_error = str(effective_reason or "").strip()
 
     @staticmethod
     def _friendly_join_error_message(reason: str) -> str:
@@ -401,66 +466,81 @@ class ClientSessionController(QObject):
             return "Player name is required."
         return clean_reason or "Host rejected the connection."
 
-    def _on_message(self, message: dict) -> None:
+    def _on_message(self, transport_epoch: int | dict, message: dict | None = None) -> None:
+        if isinstance(transport_epoch, int):
+            effective_epoch = int(transport_epoch)
+            effective_message = message if isinstance(message, dict) else {}
+        else:
+            effective_epoch = int(self._active_transport_epoch)
+            effective_message = transport_epoch if isinstance(transport_epoch, dict) else {}
+        if int(effective_epoch) != int(self._active_transport_epoch):
+            return
         self._reset_heartbeat_timeout()
-        msg_type = message.get("type")
+        msg_type = effective_message.get("type")
         if msg_type == "heartbeat_ack":
             return
         if msg_type == "presence":
-            players = message.get("players") or {}
+            players = effective_message.get("players") or {}
             if isinstance(players, dict):
                 self._players = {str(k): str(v) for k, v in players.items()}
                 self.players_changed.emit(self.players)
             return
         if msg_type == "chat":
-            actor_name = str(message.get("actor_name", "Player"))
-            text = str(message.get("text", ""))
-            system = bool(message.get("system", False))
+            actor_name = str(effective_message.get("actor_name", "Player"))
+            text = str(effective_message.get("text", ""))
+            system = bool(effective_message.get("system", False))
             self.chat_received.emit(actor_name, text, system)
             return
         if msg_type == "snapshot":
-            state = message.get("state")
+            state = effective_message.get("state")
             if isinstance(state, dict):
                 self.snapshot_received.emit(state)
             return
         if msg_type == "command_result":
-            self.command_result.emit(message)
+            self.command_result.emit(effective_message)
             return
         if msg_type == "player_state_patch":
-            self.player_state_patch_received.emit(dict(message))
+            self.player_state_patch_received.emit(dict(effective_message))
             return
         if msg_type == "icon_asset":
-            entity_id = str(message.get("entity_id", ""))
-            filename = str(message.get("filename", "icon.png"))
-            content_b64 = str(message.get("content_b64", ""))
+            entity_id = str(effective_message.get("entity_id", ""))
+            filename = str(effective_message.get("filename", "icon.png"))
+            content_b64 = str(effective_message.get("content_b64", ""))
             if entity_id and content_b64:
                 self.icon_asset_received.emit(entity_id, filename, content_b64)
             return
+        if msg_type == "image_asset":
+            image_id = str(effective_message.get("image_id", ""))
+            filename = str(effective_message.get("filename", "image.png"))
+            content_b64 = str(effective_message.get("content_b64", ""))
+            if image_id and content_b64:
+                self.image_asset_received.emit(image_id, filename, content_b64)
+            return
         if msg_type == "ping":
             try:
-                x = float(message.get("x"))
-                y = float(message.get("y"))
+                x = float(effective_message.get("x"))
+                y = float(effective_message.get("y"))
             except (TypeError, ValueError):
                 return
-            sender_player_id = str(message.get("sender_player_id", ""))
+            sender_player_id = str(effective_message.get("sender_player_id", ""))
             local_player_id = str(self.player_id or "")
             if sender_player_id and local_player_id and sender_player_id == local_player_id:
                 return
-            dungeon_id = str(message.get("dungeon_id", ""))
+            dungeon_id = str(effective_message.get("dungeon_id", ""))
             self.ping_received.emit(x, y, dungeon_id)
             return
         if msg_type == "media_event":
-            self.media_event_received.emit(dict(message))
+            self.media_event_received.emit(dict(effective_message))
             return
         if msg_type == "error":
-            reason = str(message.get("message", "")).strip() or "unknown error"
+            reason = str(effective_message.get("message", "")).strip() or "unknown error"
             self.log_line.emit(f"[ERROR] {reason}")
             if not self._session_established:
                 self._terminal_disconnect_message = self._friendly_join_error_message(reason)
                 self._manual_disconnect = True
             return
         if msg_type == "kicked":
-            reason = str(message.get("message", "")).strip() or "Removed from host."
+            reason = str(effective_message.get("message", "")).strip() or "Removed from host."
             self._manual_disconnect = True
             self._terminal_disconnect_message = reason
             self.log_line.emit(f"[ERROR] {reason}")
@@ -540,16 +620,17 @@ class ClientSessionController(QObject):
             self._connect_name,
             persistent_player_id=self._connect_persistent_player_id,
         )
+        self._active_transport_epoch = int(self.client.transport_epoch)
         self._reconnect_connect_timeout_timer.start()
 
     def _on_reconnect_connect_timeout(self) -> None:
         if self._manual_disconnect or self._reconnect_paused:
             return
-        if self.client.is_connected():
+        if self._session_established:
             return
-        if self.client.is_connecting():
+        if self.client.is_connected() or self.client.is_connecting():
             self.log_line.emit(
-                "[WARN] Reconnect attempt timed out. Forcing reconnect retry."
+                "[WARN] Reconnect handshake timed out. Forcing reconnect retry."
             )
             self.client.disconnect()
             return

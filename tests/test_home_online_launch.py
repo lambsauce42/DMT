@@ -97,6 +97,27 @@ def test_join_online_prompt_prefills_last_saved_player_name(monkeypatch, qapp, t
     assert widget._prompt_join_online_details() is None
 
 
+def test_join_online_prompt_prefills_last_saved_host_ip(monkeypatch, qapp, tmp_path):
+    monkeypatch.setattr("app.dnd_saves_dir", lambda: tmp_path)
+    settings_dir = tmp_path / "settings"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    (settings_dir / "dungeon_profile.json").write_text(
+        json.dumps({"last_join_host_ip": "10.0.0.42"}),
+        encoding="utf-8",
+    )
+
+    widget = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
+
+    def _fake_exec(self):
+        line_edits = self.findChildren(QLineEdit)
+        assert any(edit.text() == "10.0.0.42" for edit in line_edits)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr("app.ModernDialog.exec", _fake_exec)
+
+    assert widget._prompt_join_online_details() is None
+
+
 def test_host_online_prompt_prefills_last_saved_dm_name(monkeypatch, qapp, tmp_path):
     monkeypatch.setattr("app.dnd_saves_dir", lambda: tmp_path)
     settings_dir = tmp_path / "settings"
@@ -111,6 +132,29 @@ def test_host_online_prompt_prefills_last_saved_dm_name(monkeypatch, qapp, tmp_p
     def _fake_exec(self):
         line_edits = self.findChildren(QLineEdit)
         assert any(edit.text() == "Keeper" for edit in line_edits)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr("app.ModernDialog.exec", _fake_exec)
+
+    assert widget._prompt_host_dungeon_collection_details() is None
+
+
+def test_host_online_prompt_prefills_last_existing_collection(monkeypatch, qapp, tmp_path):
+    monkeypatch.setattr("app.dnd_saves_dir", lambda: tmp_path)
+    settings_dir = tmp_path / "settings"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    collection_path = tmp_path / "cached.dmtcollection"
+    collection_path.write_text("{}", encoding="utf-8")
+    (settings_dir / "dungeon_profile.json").write_text(
+        json.dumps({"last_host_collection_path": str(collection_path)}),
+        encoding="utf-8",
+    )
+
+    widget = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
+
+    def _fake_exec(self):
+        line_edits = self.findChildren(QLineEdit)
+        assert any(edit.text() == str(collection_path) for edit in line_edits)
         return QDialog.DialogCode.Rejected
 
     monkeypatch.setattr("app.ModernDialog.exec", _fake_exec)

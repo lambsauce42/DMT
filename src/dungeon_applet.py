@@ -5,6 +5,7 @@ import hashlib
 import os
 import json
 import math
+import random
 import shutil
 import sys
 import time
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget, 
     QVBoxLayout, 
     QHBoxLayout, 
+    QBoxLayout,
     QGraphicsView, 
     QGraphicsScene, 
     QGraphicsItem,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QTextEdit,
     QSpinBox,
+    QStackedLayout,
     QStackedWidget,
     QListWidget,
     QListWidgetItem,
@@ -122,10 +125,11 @@ from dungeon_states import (
     DrawingPolygonState, PlacingState, EraserState, FogState, EncounterPlacingState,
     PingState, ImagePlacingState
 )
-from dungeon_items import EntityItem, FogItem, _qt_object_is_valid
+from dungeon_items import DungeonImageItem, EntityItem, FogItem, _qt_object_is_valid
 from ui.widgets import PlusMinusSpinBox
 from online_session.authz import authorize_command
 from online_session.controllers import ClientSessionController, HostSessionController
+from online_logging import OnlineSessionLogger, set_runtime_logging_enabled
 from online_session.types import OnlineRole
 from dmt_package import list_dmt_package_assets, read_dmt_package_asset, read_dmt_package_info, write_dmt_package
 from save_paths import (
@@ -134,11 +138,14 @@ from save_paths import (
     items_dir,
     media_settings_path,
     online_icon_cache_dir,
+    online_image_cache_dir,
     online_media_cache_dir,
     online_loot_item_cache_dir,
     clear_online_runtime_cache as clear_online_runtime_storage,
     collection_icon_assets_dir,
+    collection_image_assets_dir,
     working_collection_icon_assets_dir,
+    working_collection_image_assets_dir,
     selected_debug_save_profile,
 )
 from character_archive import (
@@ -200,6 +207,17 @@ COLLECTION_FILE_FORMAT = "dmtcollection.v1"
 LOCAL_DUNGEON_PROFILE_FILENAME = "dungeon_profile.json"
 FOG_OVERLAY_Z = 200.0
 MAX_ONLINE_ICON_BYTES = 2 * 1024 * 1024
+MAX_ONLINE_SCENE_IMAGE_BYTES = 12 * 1024 * 1024
+COMMON_DICE_OPTIONS: tuple[tuple[str, int], ...] = (
+    ("d4", 4),
+    ("d6", 6),
+    ("d8", 8),
+    ("d10", 10),
+    ("d12", 12),
+    ("d20", 20),
+    ("d100", 100),
+)
+DICE_SIDES_BY_KEY = {die_key: sides for die_key, sides in COMMON_DICE_OPTIONS}
 
 
 def _sanitize_filename(name: str, fallback: str = "dungeon_collection") -> str:
@@ -316,6 +334,11 @@ def _clear_layout(layout) -> None:
             widget.deleteLater()
 
 
+def _format_signed_value(value: int) -> str:
+    amount = int(value or 0)
+    return f"+{amount}" if amount > 0 else str(amount)
+
+
 def _sanitize_audio_preferences(payload: object) -> dict[str, object]:
     defaults = _default_audio_preferences()
     if not isinstance(payload, dict):
@@ -405,6 +428,17 @@ def _validate_online_icon_payload(raw: bytes) -> tuple[bool, str]:
     image = QImage.fromData(raw)
     if image.isNull():
         return False, "Invalid icon image"
+    return True, ""
+
+
+def _validate_online_scene_image_payload(raw: bytes) -> tuple[bool, str]:
+    if not raw:
+        return False, "Image payload is empty"
+    if len(raw) > MAX_ONLINE_SCENE_IMAGE_BYTES:
+        return False, "Image too large"
+    image = QImage.fromData(raw)
+    if image.isNull():
+        return False, "Invalid image payload"
     return True, ""
 
 
@@ -793,6 +827,7 @@ ONLINE_MODE_LOCAL_DM = "local_dm"
 ONLINE_MODE_DM_HOST = "online_dm"
 ONLINE_MODE_PLAYER = "online_player"
 SESSION_ICON_PREFIX = "session_icon://"
+SESSION_IMAGE_PREFIX = "session_image://"
 PLAYER_ALLOWED_TOOLS = {
     ToolType.SELECT,
     ToolType.FREE_DRAW,
@@ -2906,21 +2941,107 @@ class EntityInspectorPanel(QWidget):
         target = self._entity if entity is None else entity
         return bool(target is not None and _qt_object_is_valid(target))
 
+    def bound_entity_id(self) -> str:
+        if not self._entity_is_valid():
+            return ""
+        return str(self._entity.data(ROLE_ENTITY_ID) or "").strip()
+
+    def _name_edit_is_dirty(self) -> bool:
+        if getattr(self, "name_edit", None) is None or not self._entity_is_valid():
+            return False
+        current_label = str(self._entity.data(ROLE_LABEL) or "Entity")
+        return bool(
+            self.name_edit.text() != current_label
+            and (self.name_edit.hasFocus() or self.name_edit.isModified())
+        )
+
+    def _apply_entity_to_ui(self, entity: object, *, preserve_local_edits: bool) -> None:
+        if not self._entity_is_valid(entity):
+            return
+        target = entity
+        pending_attrs = set(self._pending_changes.keys()) if preserve_local_edits else set()
+        preserve_name = preserve_local_edits and self._name_edit_is_dirty()
+
+        hp_value = self.hp_stat.curr_edit.value() if "hp" in pending_attrs else int(getattr(target, "hp", 0) or 0)
+        max_hp_value = (
+            self.hp_stat.max_edit.value()
+            if "_max_hp" in pending_attrs
+            else int(getattr(target, "_max_hp", 0) or 0)
+        )
+        self.hp_stat.set_data(hp_value, max_hp_value)
+
+        if "ac" not in pending_attrs:
+            with QSignalBlocker(self.shield_widget.spin):
+                self.shield_widget.spin.setValue(int(getattr(target, "ac", 0) or 0))
+
+        for name, widget in self.stat_widgets.items():
+            attr = self.stat_map[name]
+            if attr in pending_attrs:
+                continue
+            val = int(getattr(target, attr, 10) or 10)
+            with QSignalBlocker(widget.edit.spin):
+                with QSignalBlocker(widget.edit):
+                    widget.edit.spin.setValue(val)
+                    widget.edit.lbl.setText(str(val))
+
+        self.actions_text.setText(str(getattr(target, "actions", "") or "").strip())
+        self.desc_text.setText(str(getattr(target, "description", "") or "").strip())
+
+        if "size_w_cells" not in pending_attrs:
+            with QSignalBlocker(self.size_w_spin):
+                self.size_w_spin.setValue(int(getattr(target, "size_w_cells", 1) or 1))
+        if "size_h_cells" not in pending_attrs:
+            with QSignalBlocker(self.size_h_spin):
+                self.size_h_spin.setValue(int(getattr(target, "size_h_cells", 1) or 1))
+        if "lock_square" not in pending_attrs:
+            with QSignalBlocker(self.lock_square_check):
+                self.lock_square_check.setChecked(bool(getattr(target, "lock_square", True)))
+        self.size_h_spin.setEnabled(not self.lock_square_check.isChecked())
+
+        if not preserve_name:
+            name = target.data(ROLE_LABEL) or "Entity"
+            self.name_edit.setText(str(name))
+            self.name_edit.setModified(False)
+
+        owner_id = target.data(ROLE_OWNER_PLAYER_ID) or ""
+        owner_index = self.connected_player_combo.findData(owner_id)
+        if owner_index < 0:
+            owner_index = 0
+        with QSignalBlocker(self.connected_player_combo):
+            self.connected_player_combo.setCurrentIndex(owner_index)
+        self.connected_player_combo.setEnabled(self._player_assignment_enabled)
+        self._update_entity_type_label()
+
+        linked_name = str(target.data(ROLE_LINKED_SHEET_NAME) or "").strip()
+        if linked_name:
+            self.linked_character_lbl.setText(f"Linked Character: {linked_name}")
+        else:
+            self.linked_character_lbl.setText("Linked Character: None")
+        self.link_character_btn.setEnabled(self._link_character_enabled)
+        self._sync_linked_character_mode()
+
+        if "icon_path" not in pending_attrs:
+            self._update_icon_status_label()
+
     def has_pending_local_edits(self) -> bool:
         if self._change_timer.isActive() or bool(self._pending_changes):
             return True
         if not self._entity_is_valid():
             return False
-        current_label = str(self._entity.data(ROLE_LABEL) or "Entity")
-        if (
-            getattr(self, "name_edit", None) is not None
-            and self.name_edit.hasFocus()
-            and self.name_edit.text() != current_label
-        ):
-            return True
-        return False
+        return self._name_edit_is_dirty()
+
+    def refresh_from_live_entity(self) -> None:
+        if not self._entity_is_valid():
+            self._entity = None
+            self.hide()
+            return
+        self._apply_entity_to_ui(self._entity, preserve_local_edits=True)
+        self.show()
 
     def set_entity(self, entity):
+        if self._entity_is_valid(entity) and entity is self._entity:
+            self.refresh_from_live_entity()
+            return
         self._commit_changes() # Commit any pending from previous entity
         self._entity = entity if self._entity_is_valid(entity) else None
         self._pending_changes.clear()
@@ -2930,58 +3051,7 @@ class EntityInspectorPanel(QWidget):
             self.link_character_btn.setEnabled(False)
             self.hide()
             return
-        entity = self._entity
-            
-        # Update UI from entity
-        self.hp_stat.set_data(entity.hp, entity._max_hp)
-        with QSignalBlocker(self.shield_widget.spin):
-            self.shield_widget.spin.setValue(entity.ac)
-        
-        # Update stats
-        for name, widget in self.stat_widgets.items():
-            attr = self.stat_map[name]
-            val = getattr(entity, attr, 10)
-            with QSignalBlocker(widget.edit.spin):
-                with QSignalBlocker(widget.edit):
-                    widget.edit.spin.setValue(val)
-                    widget.edit.lbl.setText(str(val))
-            
-        # Update optional lore text (shown only when actual content exists).
-        self.actions_text.setText(str(getattr(entity, "actions", "") or "").strip())
-        self.desc_text.setText(str(getattr(entity, "description", "") or "").strip())
-
-        size_w = int(getattr(entity, "size_w_cells", 1))
-        size_h = int(getattr(entity, "size_h_cells", 1))
-        lock_square = bool(getattr(entity, "lock_square", True))
-        with QSignalBlocker(self.size_w_spin):
-            self.size_w_spin.setValue(size_w)
-        with QSignalBlocker(self.size_h_spin):
-            self.size_h_spin.setValue(size_h)
-        with QSignalBlocker(self.lock_square_check):
-            self.lock_square_check.setChecked(lock_square)
-        self.size_h_spin.setEnabled(not lock_square)
-        self._update_icon_status_label()
-        
-        # Name
-        name = entity.data(ROLE_LABEL) or "Entity"
-        self.name_edit.setText(name)
-        self.name_edit.setModified(False)
-        owner_id = entity.data(ROLE_OWNER_PLAYER_ID) or ""
-        owner_index = self.connected_player_combo.findData(owner_id)
-        if owner_index < 0:
-            owner_index = 0
-        with QSignalBlocker(self.connected_player_combo):
-            self.connected_player_combo.setCurrentIndex(owner_index)
-        self.connected_player_combo.setEnabled(self._player_assignment_enabled)
-        self._update_entity_type_label()
-        linked_name = str(entity.data(ROLE_LINKED_SHEET_NAME) or "").strip()
-        if linked_name:
-            self.linked_character_lbl.setText(f"Linked Character: {linked_name}")
-        else:
-            self.linked_character_lbl.setText("Linked Character: None")
-        self.link_character_btn.setEnabled(self._link_character_enabled)
-        self._sync_linked_character_mode()
-        
+        self._apply_entity_to_ui(self._entity, preserve_local_edits=False)
         self.show()
 
     def set_player_options(self, players: dict[str, str]) -> None:
@@ -4718,10 +4788,28 @@ class DungeonAppletWidget(QWidget):
             os.environ.get("DMT_ONLINE_DEBUG_LOG", "0")
         ).strip().lower() not in {"0", "false", "no", "off"}
         self._debug_log_path: Path = self._resolve_debug_log_path()
+        self._online_session_logger: OnlineSessionLogger | None = None
+        self._runtime_logging_enabled: bool = True
         self._connected_players: dict[str, str] = {}
         self._participant_presence_panel: _ParticipantPresencePanel | None = None
         self._suppress_network_sync = False
         self._suppress_ping_sync = False
+        self._dice_groups: list[dict[str, object]] = []
+        self._dice_mode: str = "normal"
+        self._dice_overall_modifier: int = 0
+        self._dice_last_result: dict | None = None
+        self._dice_history: list[dict] = []
+        self._dice_tile_buttons: dict[str, QToolButton] = {}
+        self._dice_mode_buttons: dict[str, QToolButton] = {}
+        self._dice_mode_center: QWidget | None = None
+        self._dice_detail_view: str = "breakdown"
+        self._dice_detail_buttons: dict[str, QToolButton] = {}
+        self._dice_group_row_widgets: list[QWidget] = []
+        self._dice_group_remove_buttons: list[QPushButton] = []
+        self._dice_layout_width_override: int | None = None
+        self._dice_left_container: QWidget | None = None
+        self._dice_right_container: QWidget | None = None
+        self._dice_candidate_slot: QWidget | None = None
         self._suppress_remote_apply = False
         self._view_mode = "dm"
         self._collection_name = "Dungeon Collection"
@@ -4764,12 +4852,16 @@ class DungeonAppletWidget(QWidget):
         self._initiative_panel_anim: QPropertyAnimation | None = None
         self._loot_pool_panel_anim: QPropertyAnimation | None = None
         self._media_panel_anim: QPropertyAnimation | None = None
+        self._dice_panel_anim: QPropertyAnimation | None = None
         self._forwarding_initiative_key = False
         self._initiative_inactive_preview_visible = False
         self._player_initiative_overlay_collapsed = False
         self._initiative_last_target: tuple[str, str] | None = None
         self._initiative_draft_values: dict[str, str] = {}
         self._initiative_value_warning: str = ""
+        self._initiative_drag_source: tuple[str, str] | None = None
+        self._initiative_drag_started = False
+        self._initiative_drag_origin = QPoint()
         self._suppress_initiative_sync = False
         self._host_scene_sync_pending = False
         self._last_host_scene_signature = ""
@@ -4844,17 +4936,36 @@ class DungeonAppletWidget(QWidget):
         icon_minus = os.path.join(icon_dir, "minus_white.svg")
         icon_loot_pool = os.path.join(icon_dir, "lootpool.png")
         icon_media = os.path.join(icon_dir, "play.svg")
+        icon_dice = os.path.join(icon_dir, "dice.svg")
 
         # 2. HUD Overlays (Transparent Containers)
         hud_style = "background-color: transparent; border: none;"
 
         self._loot_pool_btn = QToolButton(self)
-        self._loot_pool_btn.setObjectName("SecondaryButton")
+        self._loot_pool_btn.setObjectName("")
         self._loot_pool_btn.setToolTip("Show Loot Pool")
         self._loot_pool_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._loot_pool_btn.setFixedSize(40, 40)
+        self._loot_pool_btn.setFixedSize(44, 44)
+        self._loot_pool_btn.setMinimumSize(44, 44)
+        self._loot_pool_btn.setMaximumSize(44, 44)
         self._loot_pool_btn.setIcon(QIcon(icon_loot_pool))
-        self._loot_pool_btn.setIconSize(QSize(24, 24))
+        self._loot_pool_btn.setIconSize(QSize(22, 22))
+        self._loot_pool_btn.setStyleSheet(
+            "QToolButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+            "border: 1px solid #3b424b;"
+            "border-radius: 8px;"
+            "padding: 0px;"
+            "min-width: 44px;"
+            "max-width: 44px;"
+            "min-height: 44px;"
+            "max-height: 44px;"
+            "}"
+            "QToolButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+            "border-color: #58a6ff;"
+            "}"
+        )
         self._loot_pool_btn.clicked.connect(self._toggle_loot_pool_panel)
         self._loot_pool_btn.setVisible(False)
         self._loot_pool_badge = QLabel("!", self._loot_pool_btn)
@@ -4867,25 +4978,26 @@ class DungeonAppletWidget(QWidget):
         self._loot_pool_panel = self._build_loot_pool_panel(icon_dir)
         self._loot_pool_panel.hide()
         self._media_btn = QToolButton(self)
-        self._media_btn.setObjectName("SecondaryButton")
+        self._media_btn.setObjectName("")
         self._media_btn.setToolTip("Show Media")
         self._media_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._media_btn.setProperty("compact", "true")
-        self._media_btn.setFixedSize(34, 34)
+        self._media_btn.setFixedSize(44, 44)
+        self._media_btn.setMinimumSize(44, 44)
+        self._media_btn.setMaximumSize(44, 44)
         self._media_btn.setIcon(QIcon(icon_media))
-        self._media_btn.setIconSize(QSize(18, 18))
+        self._media_btn.setIconSize(QSize(20, 20))
         self._media_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._media_btn.setStyleSheet(
             "QToolButton {"
             "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
             "border: 1px solid #3b424b;"
-            "border-radius: 6px;"
-            "padding: 4px;"
+            "border-radius: 8px;"
+            "padding: 0px;"
             "margin: 0px;"
-            "min-width: 34px;"
-            "max-width: 34px;"
-            "min-height: 34px;"
-            "max-height: 34px;"
+            "min-width: 44px;"
+            "max-width: 44px;"
+            "min-height: 44px;"
+            "max-height: 44px;"
             "}"
             "QToolButton:hover {"
             "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
@@ -4896,6 +5008,37 @@ class DungeonAppletWidget(QWidget):
         self._media_btn.setVisible(True)
         self._media_panel = self._build_media_panel(icon_dir)
         self._media_panel.hide()
+        self._dice_btn = QToolButton(self)
+        self._dice_btn.setObjectName("")
+        self._dice_btn.setToolTip("Open Dice Roller")
+        self._dice_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dice_btn.setFixedSize(44, 44)
+        self._dice_btn.setMinimumSize(44, 44)
+        self._dice_btn.setMaximumSize(44, 44)
+        self._dice_btn.setIcon(QIcon(icon_dice))
+        self._dice_btn.setIconSize(QSize(20, 20))
+        self._dice_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._dice_btn.setStyleSheet(
+            "QToolButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+            "border: 1px solid #3b424b;"
+            "border-radius: 8px;"
+            "padding: 0px;"
+            "margin: 0px;"
+            "min-width: 44px;"
+            "max-width: 44px;"
+            "min-height: 44px;"
+            "max-height: 44px;"
+            "}"
+            "QToolButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+            "border-color: #58a6ff;"
+            "}"
+        )
+        self._dice_btn.clicked.connect(self._toggle_dice_panel)
+        self._dice_btn.setVisible(True)
+        self._dice_panel = self._build_dice_panel(icon_dir)
+        self._dice_panel.hide()
         self._initiative_overlay = self._build_initiative_overlay()
         self._initiative_overlay.hide()
         self._participant_presence_panel = _ParticipantPresencePanel(self)
@@ -5197,7 +5340,16 @@ class DungeonAppletWidget(QWidget):
         self._host_port = int(port)
         self._local_dm_name = requested_dm_name
         self._host_display_name = requested_dm_name
+        self._start_online_session_log(
+            role="host",
+            session_id=self._online_session_id,
+            host=str(self._host_ip or ""),
+            port=int(port),
+            dm_name=requested_dm_name,
+            collection_path=str(collection_path or ""),
+        )
         self._local_profile["last_dm_name"] = self._local_dm_name
+        self._local_profile["last_host_collection_path"] = str(collection_path or "")
         self._save_local_profile()
         self._set_online_mode(ONLINE_MODE_DM_HOST)
         if self._host_controller is None:
@@ -5212,6 +5364,7 @@ class DungeonAppletWidget(QWidget):
         ok, error = self._host_controller.start(int(port))
         if not ok:
             self._debug_log("start_online_host_failed", port=int(port), error=str(error or ""))
+            self._online_log_event("host_start_failed", port=int(port), error=str(error or ""))
             self._set_online_mode(ONLINE_MODE_LOCAL_DM)
             self._update_connected_players({})
             self._clear_online_runtime_cache(self._online_runtime_cache_id)
@@ -5225,6 +5378,11 @@ class DungeonAppletWidget(QWidget):
             "Hosting started. Internet clients must connect to your public IP and forwarded port."
         )
         self._debug_log("start_online_host_ok", port=int(port))
+        self._online_log_event(
+            "host_start_succeeded",
+            port=int(port),
+            collection_path=str(collection_path or ""),
+        )
         self._update_connected_players(self._host_controller.players)
         self._broadcast_snapshot_if_host()
         return True
@@ -5240,8 +5398,10 @@ class DungeonAppletWidget(QWidget):
         requested_persistent_player_id = str(
             persistent_player_id or self._persistent_local_player_id or ""
         ).strip()
+        generated_temporary_identity = False
         if not requested_persistent_player_id:
             requested_persistent_player_id = generate_probabilistic_unique_id("player")
+            generated_temporary_identity = True
             self._append_server_log(
                 "[WARN] Missing local player identity. Generated a temporary identity for this join."
             )
@@ -5260,6 +5420,10 @@ class DungeonAppletWidget(QWidget):
         self._loot_claim_finalize_response_cache.clear()
         self._pending_loot_claim_rollbacks.clear()
         self._clear_pending_online_command_requests(reason="starting a new join session")
+        self._deferred_client_sync_events.clear()
+        self._deferred_client_sync_timer.stop()
+        self._last_local_player_scene_change_monotonic = 0.0
+        self._local_player_authoritative_state = None
         self._hide_reconnect_status_dialog()
         self._reset_media_runtime_state()
         self._initiative_state = {
@@ -5285,7 +5449,20 @@ class DungeonAppletWidget(QWidget):
         self._media_player_endpoint_host = str(host_ip or "").strip()
         self._host_port = int(port)
         self._local_player_name = requested_player_name
+        self._start_online_session_log(
+            role="player",
+            session_id=self._online_session_id,
+            host=str(host_ip or ""),
+            port=int(port),
+            player_name=requested_player_name,
+        )
+        self._online_log_event(
+            "join_requested",
+            persistent_player_id=str(requested_persistent_player_id or ""),
+            temporary_identity_generated=bool(generated_temporary_identity),
+        )
         self._local_profile["last_player_name"] = self._local_player_name
+        self._local_profile["last_join_host_ip"] = str(host_ip or "").strip()
         self._remember_known_player(requested_persistent_player_id, self._local_player_name)
         self._save_local_profile()
         self._local_player_id = None
@@ -5317,9 +5494,10 @@ class DungeonAppletWidget(QWidget):
             )
             self._client_controller.media_event_received.connect(self._on_client_media_event_received)
             self._client_controller.icon_asset_received.connect(self._on_client_icon_asset)
+            self._client_controller.image_asset_received.connect(self._on_client_image_asset)
             self._client_controller.ping_received.connect(self._on_network_ping_received)
             self._client_controller.reconnect_state_changed.connect(self._on_client_reconnect_state_changed)
-            self._client_controller.client.hello_ack.connect(self._on_client_hello_ack)
+            self._client_controller.hello_ack_received.connect(self._on_client_hello_ack)
         else:
             existing_client = getattr(self._client_controller, "client", None)
             self._suppress_client_disconnect_handler = bool(
@@ -5361,10 +5539,181 @@ class DungeonAppletWidget(QWidget):
             self._online_runtime_cache_id = expected_runtime_cache_id
         return self._online_runtime_cache_id
 
+    def _refresh_online_session_log_context(self) -> None:
+        if not getattr(self, "_runtime_logging_enabled", True):
+            return
+        logger = self._online_session_logger
+        if logger is None:
+            return
+        logger.update_context(
+            mode=str(self._online_mode or ""),
+            logical_session_id=str(self._online_session_id or ""),
+            runtime_cache_id=str(self._online_runtime_cache_id or ""),
+            local_player_id=str(self._local_player_id or ""),
+            local_player_name=str(self._local_player_name or ""),
+            host_ip=str(self._host_ip or ""),
+            host_port=int(self._host_port or 0),
+            dm_name=self._dm_display_name(),
+            collection_name=str(self._collection_name or ""),
+            connected_player_count=int(len(self._connected_players)),
+        )
+
+    def _start_online_session_log(
+        self,
+        *,
+        role: str,
+        session_id: str,
+        host: str = "",
+        port: int = 0,
+        player_name: str = "",
+        dm_name: str = "",
+        collection_path: str = "",
+    ) -> None:
+        if not getattr(self, "_runtime_logging_enabled", True):
+            return
+        self._close_online_session_log(reason="session_replaced")
+        self._online_session_logger = OnlineSessionLogger(
+            role=role,
+            session_id=session_id,
+            initial_context={
+                "host": str(host or ""),
+                "port": int(port or 0),
+                "player_name": str(player_name or ""),
+                "dm_name": str(dm_name or ""),
+                "collection_path": str(collection_path or ""),
+            },
+        )
+        self._refresh_online_session_log_context()
+        self._online_log_event(
+            "session_started",
+            role=str(role or ""),
+            host=str(host or ""),
+            port=int(port or 0),
+            player_name=str(player_name or ""),
+            dm_name=str(dm_name or ""),
+            collection_path=str(collection_path or ""),
+        )
+
+    def _close_online_session_log(self, *, reason: str = "") -> None:
+        logger = self._online_session_logger
+        if logger is None:
+            return
+        self._refresh_online_session_log_context()
+        self._online_session_logger = None
+        logger.close(reason=str(reason or "").strip())
+
+    def _online_log_event(self, event: str, **fields: object) -> None:
+        if not getattr(self, "_runtime_logging_enabled", True):
+            return
+        logger = self._online_session_logger
+        if logger is None:
+            return
+        self._refresh_online_session_log_context()
+        logger.write_event(str(event or "unknown"), **fields)
+
+    def _online_log_server_line(self, line: str) -> None:
+        if not getattr(self, "_runtime_logging_enabled", True):
+            return
+        clean_line = str(line or "").strip()
+        if not clean_line:
+            return
+        level = ""
+        message = clean_line
+        level_match = re.match(r"^\[(?P<level>[A-Za-z]+)\]\s*(?P<message>.*)$", clean_line)
+        if level_match is not None:
+            level = str(level_match.group("level") or "").upper()
+            message = str(level_match.group("message") or "").strip() or clean_line
+        self._online_log_event(
+            "server_log",
+            level=level or "INFO",
+            message=message,
+            raw=clean_line,
+        )
+
+    def _online_command_log_fields(self, action: str, payload: dict) -> dict[str, object]:
+        summary: dict[str, object] = {
+            "action": str(action or "").strip(),
+            "payload_keys": ",".join(sorted(str(key) for key in payload.keys())),
+            "payload_bytes": self._debug_json_size_bytes(payload),
+        }
+        for key in (
+            "dungeon_id",
+            "entity_id",
+            "image_id",
+            "sheet_id",
+            "sheet_name",
+            "character_id",
+            "claim_id",
+        ):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                summary[key] = value
+        inventory_payload = payload.get("inventory")
+        if isinstance(inventory_payload, dict):
+            summary["inventory_bytes"] = self._debug_json_size_bytes(inventory_payload)
+        state_payload = payload.get("state")
+        if isinstance(state_payload, dict):
+            summary.update(self._debug_state_summary(state_payload))
+        if str(action or "").strip() == "ping":
+            try:
+                summary["x"] = float(payload.get("x"))
+                summary["y"] = float(payload.get("y"))
+            except (TypeError, ValueError):
+                pass
+        return summary
+
+    def _current_online_log_details(self) -> dict[str, object] | None:
+        session_id = str(self._online_session_id or "").strip()
+        if not session_id:
+            return None
+        if self._online_mode == ONLINE_MODE_DM_HOST:
+            return {
+                "role": "host",
+                "session_id": session_id,
+                "host": str(self._host_ip or ""),
+                "port": int(self._host_port or 0),
+                "dm_name": str(self._local_dm_name or self._host_display_name or ""),
+                "collection_path": str(self._collection_path or ""),
+            }
+        if self._online_mode == ONLINE_MODE_PLAYER:
+            return {
+                "role": "player",
+                "session_id": session_id,
+                "host": str(self._host_ip or ""),
+                "port": int(self._host_port or 0),
+                "player_name": str(self._local_player_name or ""),
+            }
+        return None
+
+    def _set_runtime_logging_enabled(self, enabled: bool) -> None:
+        target_enabled = bool(enabled)
+        current_enabled = bool(getattr(self, "_runtime_logging_enabled", True))
+        if target_enabled == current_enabled:
+            return
+        if not target_enabled:
+            self._online_log_event("logging_disabled")
+            set_runtime_logging_enabled(False)
+            self._runtime_logging_enabled = False
+            self._close_online_session_log(reason="disabled_via_shortcut")
+            self._server_log_panel.append_log("[INFO] Runtime online logging disabled.")
+            return
+        set_runtime_logging_enabled(True)
+        self._runtime_logging_enabled = True
+        details = self._current_online_log_details()
+        if isinstance(details, dict):
+            self._start_online_session_log(**details)
+        self._server_log_panel.append_log("[INFO] Runtime online logging enabled.")
+        self._online_log_event("logging_enabled")
+
     def _set_online_mode(self, mode: str) -> None:
         previous_mode = str(self._online_mode)
         self._online_mode = mode
         self._debug_log("set_online_mode", previous=previous_mode, current=str(mode))
+        self._online_log_event(
+            "online_mode_changed",
+            previous_mode=previous_mode,
+            current_mode=str(mode or ""),
+        )
         is_online = mode in (ONLINE_MODE_DM_HOST, ONLINE_MODE_PLAYER)
         show_server_log = mode in (ONLINE_MODE_DM_HOST, ONLINE_MODE_PLAYER)
         is_player_mode = mode == ONLINE_MODE_PLAYER
@@ -5448,6 +5797,12 @@ class DungeonAppletWidget(QWidget):
         self._refresh_participant_presence_panel()
         self._update_loot_pool_badge()
         self._apply_online_permissions()
+        self._refresh_online_session_log_context()
+        if previous_mode in (ONLINE_MODE_DM_HOST, ONLINE_MODE_PLAYER) and mode not in (
+            ONLINE_MODE_DM_HOST,
+            ONLINE_MODE_PLAYER,
+        ):
+            self._close_online_session_log(reason=f"mode_changed_to_{mode}")
 
     def _toggle_session_panels_collapsed(self) -> None:
         self._set_session_panels_collapsed(not self._session_panels_collapsed, animate=True)
@@ -5565,33 +5920,29 @@ class DungeonAppletWidget(QWidget):
             inspector_y = max(8, inspector_base_y - required_lift)
             self.inspector.setGeometry(inspector_x, inspector_y, inspector_w, inspector_h)
             self.inspector.raise_()
-        if hasattr(self, "_loot_pool_btn") and self._loot_pool_btn is not None:
-            btn_size = self._loot_pool_btn.size()
-            btn_x = max(8, self.width() - btn_size.width() - 108)
-            btn_y = 20
-            self._loot_pool_btn.move(btn_x, btn_y)
-            self._loot_pool_btn.raise_()
-            if hasattr(self, "_loot_pool_badge"):
-                badge_x = 3
-                badge_y = max(0, btn_size.height() - self._loot_pool_badge.height() - 3)
-                self._loot_pool_badge.move(badge_x, badge_y)
-                self._loot_pool_badge.raise_()
-        if hasattr(self, "_media_btn") and self._media_btn is not None:
-            btn_size = self._media_btn.size()
-            btn_x = max(8, self.width() - btn_size.width() - 64)
-            initiative_btn = getattr(self, "_initiative_reopen_btn", None)
-            if initiative_btn is not None and initiative_btn.isVisible():
-                button_gap = 12
-                btn_x = max(
-                    8,
-                    self.width()
-                    - initiative_btn.width()
-                    - button_gap
-                    - btn_size.width()
-                    - 20,
-                )
-            self._media_btn.move(btn_x, 20)
-            self._media_btn.raise_()
+        controls_right_edge = self.width() - 20
+        initiative_btn = getattr(self, "_initiative_reopen_btn", None)
+        if initiative_btn is not None and initiative_btn.isVisible():
+            controls_right_edge -= initiative_btn.width() + 10
+        top_right_controls: list[QWidget] = []
+        if hasattr(self, "_media_btn") and self._media_btn is not None and self._media_btn.isVisible():
+            top_right_controls.append(self._media_btn)
+        if hasattr(self, "_dice_btn") and self._dice_btn is not None and self._dice_btn.isVisible():
+            top_right_controls.append(self._dice_btn)
+        if hasattr(self, "_loot_pool_btn") and self._loot_pool_btn is not None and self._loot_pool_btn.isVisible():
+            top_right_controls.append(self._loot_pool_btn)
+        next_x = controls_right_edge
+        for button in top_right_controls:
+            button_width = button.width()
+            button_x = max(8, next_x - button_width)
+            button.move(button_x, 20)
+            button.raise_()
+            next_x = button_x - 10
+        if hasattr(self, "_loot_pool_badge") and hasattr(self, "_loot_pool_btn") and self._loot_pool_btn is not None:
+            badge_x = 3
+            badge_y = max(0, self._loot_pool_btn.height() - self._loot_pool_badge.height() - 3)
+            self._loot_pool_badge.move(badge_x, badge_y)
+            self._loot_pool_badge.raise_()
         participant_panel = getattr(self, "_participant_presence_panel", None)
         if participant_panel is not None and participant_panel.isVisible():
             anchor_width = (
@@ -5614,6 +5965,12 @@ class DungeonAppletWidget(QWidget):
             if media_anim is None or media_anim.state() != QAbstractAnimation.State.Running:
                 self._media_panel.setGeometry(self._target_media_geometry())
             self._media_panel.raise_()
+        if hasattr(self, "_dice_panel") and self._dice_panel is not None and self._dice_panel.isVisible():
+            dice_anim = getattr(self, "_dice_panel_anim", None)
+            if dice_anim is None or dice_anim.state() != QAbstractAnimation.State.Running:
+                self._dice_panel.setGeometry(self._target_dice_geometry())
+            self._update_dice_panel_layout_mode()
+            self._dice_panel.raise_()
         if hasattr(self, "_loot_pool_panel") and self._loot_pool_panel is not None and self._loot_pool_panel.isVisible():
             loot_anim = getattr(self, "_loot_pool_panel_anim", None)
             if loot_anim is None or loot_anim.state() != QAbstractAnimation.State.Running:
@@ -5666,6 +6023,18 @@ class DungeonAppletWidget(QWidget):
         available_h = max(260, self.height() - (margin * 2))
         panel_w = max(680, int(available_w * 0.62))
         panel_h = max(450, int(available_h * 0.58))
+        panel_w = min(panel_w, available_w)
+        panel_h = min(panel_h, available_h)
+        panel_x = max(8, int((self.width() - panel_w) / 2))
+        panel_y = max(8, int((self.height() - panel_h) / 2))
+        return QRect(panel_x, panel_y, panel_w, panel_h)
+
+    def _target_dice_geometry(self) -> QRect:
+        margin = 12
+        available_w = max(280, self.width() - (margin * 2))
+        available_h = max(280, self.height() - (margin * 2))
+        panel_w = max(920, int(available_w * 0.76))
+        panel_h = max(580, int(available_h * 0.74))
         panel_w = min(panel_w, available_w)
         panel_h = min(panel_h, available_h)
         panel_x = max(8, int((self.width() - panel_w) / 2))
@@ -7204,6 +7573,14 @@ class DungeonAppletWidget(QWidget):
 
     def _toggle_media_panel(self) -> None:
         showing = self._media_panel.isHidden()
+        if showing and hasattr(self, "_dice_panel") and self._dice_panel is not None and self._dice_panel.isVisible():
+            self._animate_center_panel(
+                self._dice_panel,
+                show=False,
+                target_rect=self._target_dice_geometry(),
+                attr_name="_dice_panel_anim",
+                duration_ms=150,
+            )
         self._refresh_media_panel()
         self._animate_center_panel(
             self._media_panel,
@@ -7569,6 +7946,1133 @@ class DungeonAppletWidget(QWidget):
                 status_parts.append("Media stream is offline.")
         self._media_status_label.setText(" ".join(part for part in status_parts if str(part).strip()))
 
+    def _build_dice_panel(self, icon_dir: str) -> QFrame:
+        panel = QFrame(self)
+        panel.setObjectName("SubPanel")
+        panel.setMinimumSize(760, 520)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._dice_icon_paths = {
+            die_key: os.path.join(icon_dir, f"{die_key}.svg")
+            for die_key, _sides in COMMON_DICE_OPTIONS
+        }
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(10)
+        header_text = QVBoxLayout()
+        header_text.setContentsMargins(0, 0, 0, 0)
+        header_text.setSpacing(2)
+        title = QLabel("Dice Roller", panel)
+        title.setObjectName("PanelTitle")
+        header_text.addWidget(title)
+        subtitle = QLabel(
+            "Build separate roll groups, keep duplicate die types independent, and resolve the full throw with advantage.",
+            panel,
+        )
+        subtitle.setStyleSheet("color: #94a3b8;")
+        subtitle.setWordWrap(True)
+        header_text.addWidget(subtitle)
+        header.addLayout(header_text, 1)
+        header.addStretch(1)
+        self._dice_collapse_btn = QToolButton(panel)
+        self._dice_collapse_btn.setToolTip("Close Dice Roller")
+        self._dice_collapse_btn.setIcon(QIcon(os.path.join(icon_dir, "close.svg")))
+        self._dice_collapse_btn.setIconSize(QSize(18, 18))
+        self._dice_collapse_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._dice_collapse_btn.setFixedSize(34, 34)
+        self._dice_collapse_btn.setStyleSheet(
+            "QToolButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+            "border: 1px solid #3b424b;"
+            "border-radius: 6px;"
+            "padding: 4px;"
+            "min-width: 34px;"
+            "max-width: 34px;"
+            "min-height: 34px;"
+            "max-height: 34px;"
+            "}"
+            "QToolButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+            "border-color: #58a6ff;"
+            "}"
+        )
+        self._dice_collapse_btn.clicked.connect(self._toggle_dice_panel)
+        header.addWidget(self._dice_collapse_btn)
+        layout.addLayout(header)
+
+        body_scroll = QScrollArea(panel)
+        body_scroll.setWidgetResizable(True)
+        body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        body_root = QWidget(body_scroll)
+        body_root.setObjectName("TransparentContainer")
+        body_layout = QHBoxLayout(body_root)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
+        body_scroll.setWidget(body_root)
+        layout.addWidget(body_scroll, 1)
+        self._dice_body_scroll = body_scroll
+        self._dice_body_root = body_root
+        self._dice_body_layout = body_layout
+
+        left_container = QWidget(body_root)
+        left_container.setObjectName("TransparentContainer")
+        left_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        left_container.setMinimumWidth(0)
+        self._dice_left_container = left_container
+        left_column = QVBoxLayout(left_container)
+        left_column.setContentsMargins(0, 0, 0, 0)
+        left_column.setSpacing(10)
+        body_layout.addWidget(left_container, 6)
+
+        right_container = QWidget(body_root)
+        right_container.setObjectName("TransparentContainer")
+        right_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        right_container.setMinimumWidth(0)
+        self._dice_right_container = right_container
+        right_column = QVBoxLayout(right_container)
+        right_column.setContentsMargins(0, 0, 0, 0)
+        right_column.setSpacing(10)
+        body_layout.addWidget(right_container, 5)
+
+        row_height = 46
+        control_height = 46
+        icon_box = 40
+        group_label_width = 64
+        count_width = 78
+        pool_modifier_width = 88
+        pool_result_width = 88
+        remove_width = 88
+        controls_label_width = 92
+        mode_button_width = 102
+        control_button_width = 118
+        action_button_width = 116
+        row_action_height = 40
+
+        dice_action_primary_style = (
+            "QPushButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #238636, stop:1 #1a6329);"
+            "border: 1px solid #2ea043;"
+            "border-radius: 6px;"
+            "color: #ffffff;"
+            "padding: 0px;"
+            "margin: 0px;"
+            "min-width: 116px;"
+            "max-width: 116px;"
+            "min-height: 44px;"
+            "max-height: 44px;"
+            "font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2ea043, stop:1 #238636);"
+            "border-color: #3fb950;"
+            "}"
+        )
+        dice_action_secondary_style = (
+            "QPushButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+            "border: 1px solid #3b424b;"
+            "border-radius: 6px;"
+            "color: #e3e3e3;"
+            "padding: 0px;"
+            "margin: 0px;"
+            "min-width: 116px;"
+            "max-width: 116px;"
+            "min-height: 44px;"
+            "max-height: 44px;"
+            "font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+            "border-color: #58a6ff;"
+            "}"
+        )
+
+        dice_mode_button_style = (
+            "QToolButton {"
+            "background-color: transparent;"
+            "border: 1px solid transparent;"
+            "border-radius: 12px;"
+            "padding: 0px 8px;"
+            "margin: 0px;"
+            "color: #94a3b8;"
+            "font-weight: 600;"
+            "}"
+            "QToolButton:hover {"
+            "background-color: rgba(148, 163, 184, 0.08);"
+            "color: #e2e8f0;"
+            "}"
+            "QToolButton:checked {"
+            "background-color: transparent;"
+            "border: 1px solid #60a5fa;"
+            "color: #f8fafc;"
+            "}"
+        )
+
+        def _configure_row(widget: QWidget, row_layout: QHBoxLayout) -> None:
+            widget.setFixedHeight(row_height)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+
+        def _make_spinbox(parent: QWidget, *, minimum: int, maximum: int, width: int) -> QSpinBox:
+            spin = QSpinBox(parent)
+            spin.setRange(minimum, maximum)
+            spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            spin.setFixedSize(width, control_height)
+            spin.setKeyboardTracking(False)
+            return spin
+
+        def _make_value_pill(text: str, parent: QWidget, *, width: int) -> QLabel:
+            label = QLabel(text, parent)
+            label.setFixedWidth(width)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet(
+                "color: #e5e7eb; background-color: rgba(15, 23, 42, 150); "
+                "border: 1px solid #334155; border-radius: 6px; padding: 3px 6px;"
+            )
+            return label
+
+        quick_card = QFrame(panel)
+        quick_card.setObjectName("SubPanel")
+        quick_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        quick_layout = QVBoxLayout(quick_card)
+        quick_layout.setContentsMargins(12, 12, 12, 12)
+        quick_layout.setSpacing(8)
+        quick_title = QLabel("Add Dice Groups", quick_card)
+        quick_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        quick_layout.addWidget(quick_title)
+        quick_hint = QLabel(
+            "Each tap adds a new independent group, so `2d4` and `1d4+1` can live side by side.",
+            quick_card,
+        )
+        quick_hint.setWordWrap(True)
+        quick_hint.setStyleSheet("color: #94a3b8;")
+        quick_layout.addWidget(quick_hint)
+        quick_row = QHBoxLayout()
+        quick_row.setContentsMargins(0, 0, 0, 0)
+        quick_row.setSpacing(8)
+        for die_key, _sides in COMMON_DICE_OPTIONS:
+            tile = QToolButton(quick_card)
+            tile.setObjectName("")
+            tile.setCheckable(True)
+            tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            tile.setText(die_key)
+            tile.setToolTip(f"Add a new {die_key} group")
+            tile.setAccessibleName(die_key)
+            tile.setIcon(QIcon(self._dice_icon_paths[die_key]))
+            tile.setIconSize(QSize(42, 42))
+            tile.setCursor(Qt.CursorShape.PointingHandCursor)
+            tile.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            tile.setFixedSize(82, 82)
+            tile.setMinimumSize(82, 82)
+            tile.setMaximumSize(82, 82)
+            tile.setStyleSheet(
+                "QToolButton {"
+                "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+                "border: 1px solid #3b424b;"
+                "border-radius: 8px;"
+                "padding: 0px;"
+                "min-width: 82px;"
+                "max-width: 82px;"
+                "min-height: 82px;"
+                "max-height: 82px;"
+                "}"
+                "QToolButton:hover {"
+                "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+                "border-color: #58a6ff;"
+                "}"
+                "QToolButton:checked {"
+                "background-color: rgba(37, 99, 235, 48);"
+                "border-color: #60a5fa;"
+                "}"
+            )
+            tile.clicked.connect(lambda _checked=False, key=die_key: self._on_dice_tile_clicked(key))
+            quick_row.addWidget(tile)
+            self._dice_tile_buttons[die_key] = tile
+        quick_row.addStretch(1)
+        quick_layout.addLayout(quick_row)
+        left_column.addWidget(quick_card)
+        self._dice_quick_card = quick_card
+
+        pool_card = QFrame(panel)
+        pool_card.setObjectName("SubPanel")
+        pool_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        pool_layout = QVBoxLayout(pool_card)
+        pool_layout.setContentsMargins(12, 12, 12, 12)
+        pool_layout.setSpacing(8)
+        pool_title = QLabel("Dice Pool", pool_card)
+        pool_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        pool_layout.addWidget(pool_title)
+        self._dice_pool_summary_label = QLabel("No groups added yet.", pool_card)
+        self._dice_pool_summary_label.setWordWrap(True)
+        self._dice_pool_summary_label.setStyleSheet("color: #94a3b8;")
+        pool_layout.addWidget(self._dice_pool_summary_label)
+
+        header_row = QWidget(pool_card)
+        header_layout = QHBoxLayout(header_row)
+        _configure_row(header_row, header_layout)
+        for text, width in (
+            ("", icon_box),
+            ("Group", group_label_width),
+            ("Count", count_width),
+            ("Modifier", pool_modifier_width),
+            ("Result", pool_result_width),
+            ("Remove", remove_width),
+        ):
+            label = QLabel(text, header_row)
+            label.setFixedWidth(width)
+            label.setAlignment(
+                Qt.AlignmentFlag.AlignCenter
+                if not text
+                else (Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            )
+            label.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600; padding: 2px;")
+            header_layout.addWidget(label)
+        header_layout.addStretch(1)
+        pool_layout.addWidget(header_row)
+
+        self._dice_pool_scroll = QScrollArea(pool_card)
+        self._dice_pool_scroll.setWidgetResizable(True)
+        self._dice_pool_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._dice_pool_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._dice_pool_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._dice_pool_root = QWidget(self._dice_pool_scroll)
+        self._dice_pool_groups_layout = QVBoxLayout(self._dice_pool_root)
+        self._dice_pool_groups_layout.setContentsMargins(0, 0, 0, 0)
+        self._dice_pool_groups_layout.setSpacing(8)
+        self._dice_pool_scroll.setWidget(self._dice_pool_root)
+        pool_layout.addWidget(self._dice_pool_scroll, 1)
+        left_column.addWidget(pool_card, 1)
+        self._dice_pool_card = pool_card
+
+        controls_card = QFrame(panel)
+        controls_card.setObjectName("SubPanel")
+        controls_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        controls_layout = QVBoxLayout(controls_card)
+        controls_layout.setContentsMargins(12, 12, 12, 12)
+        controls_layout.setSpacing(8)
+        controls_title = QLabel("Roll Controls", controls_card)
+        controls_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        controls_layout.addWidget(controls_title)
+
+        mode_row = QWidget(controls_card)
+        mode_layout = QHBoxLayout(mode_row)
+        _configure_row(mode_row, mode_layout)
+        mode_label = QLabel("Mode", mode_row)
+        mode_label.setFixedWidth(controls_label_width)
+        mode_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        mode_label.setStyleSheet("color: #cbd5e1; font-weight: 600;")
+        mode_layout.addWidget(mode_label)
+        mode_center = QWidget(mode_row)
+        mode_center.setObjectName("TransparentContainer")
+        mode_center_layout = QHBoxLayout(mode_center)
+        mode_center_layout.setContentsMargins(0, 0, 0, 0)
+        mode_center_layout.setSpacing(0)
+        self._dice_mode_group = QButtonGroup(controls_card)
+        self._dice_mode_group.setExclusive(True)
+        mode_center_layout.addStretch(1)
+        for mode_key, text in (
+            ("normal", "Normal"),
+            ("advantage", "Advantage"),
+            ("disadvantage", "Disadvantage"),
+        ):
+            button = QToolButton(mode_center)
+            button.setObjectName("SecondaryButton")
+            button.setCheckable(True)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setText(text)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            button.setFixedSize(mode_button_width, 34)
+            button.setStyleSheet(dice_mode_button_style)
+            button.clicked.connect(lambda _checked=False, key=mode_key: self._on_dice_mode_selected(key))
+            mode_center_layout.addWidget(button)
+            mode_center_layout.addStretch(1)
+            self._dice_mode_group.addButton(button)
+            self._dice_mode_buttons[mode_key] = button
+        mode_layout.addWidget(mode_center, 1)
+        self._dice_mode_center = mode_center
+        controls_layout.addWidget(mode_row)
+
+        overall_row = QWidget(controls_card)
+        overall_layout = QHBoxLayout(overall_row)
+        _configure_row(overall_row, overall_layout)
+        overall_label = QLabel("Global Modifier", overall_row)
+        overall_label.setFixedWidth(controls_label_width)
+        overall_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        overall_label.setStyleSheet("color: #cbd5e1; font-weight: 600;")
+        overall_layout.addWidget(overall_label)
+        self._dice_overall_modifier_spin = _make_spinbox(overall_row, minimum=-999, maximum=999, width=control_button_width)
+        self._dice_overall_modifier_spin.valueChanged.connect(self._on_dice_overall_modifier_changed)
+        overall_layout.addWidget(self._dice_overall_modifier_spin)
+        self._dice_overall_modifier_value = _make_value_pill("+0", overall_row, width=control_button_width)
+        overall_layout.addWidget(self._dice_overall_modifier_value)
+        overall_layout.addStretch(1)
+        controls_layout.addWidget(overall_row)
+
+        action_row = QWidget(controls_card)
+        action_layout = QHBoxLayout(action_row)
+        _configure_row(action_row, action_layout)
+        action_gutter = QWidget(action_row)
+        action_gutter.setFixedSize(controls_label_width, control_height)
+        action_layout.addWidget(action_gutter)
+        self._dice_roll_btn = QPushButton("Roll Dice", action_row)
+        self._dice_roll_btn.setObjectName("")
+        self._dice_roll_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._dice_roll_btn.setFixedSize(action_button_width, 44)
+        self._dice_roll_btn.setStyleSheet(dice_action_primary_style)
+        self._dice_roll_btn.clicked.connect(self._on_dice_roll_requested)
+        action_layout.addWidget(self._dice_roll_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._dice_reset_btn = QPushButton("Clear Pool", action_row)
+        self._dice_reset_btn.setObjectName("")
+        self._dice_reset_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._dice_reset_btn.setFixedSize(action_button_width, 44)
+        self._dice_reset_btn.setStyleSheet(dice_action_secondary_style)
+        self._dice_reset_btn.clicked.connect(self._on_dice_reset_requested)
+        action_layout.addWidget(self._dice_reset_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        action_layout.addStretch(1)
+        controls_layout.addWidget(action_row)
+
+        self._dice_status_label = QLabel("", controls_card)
+        self._dice_status_label.setWordWrap(True)
+        self._dice_status_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        controls_layout.addWidget(self._dice_status_label)
+        right_column.addWidget(controls_card)
+        self._dice_controls_card = controls_card
+
+        result_card = QFrame(right_container)
+        result_card.setObjectName("SubPanel")
+        result_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        result_layout = QVBoxLayout(result_card)
+        result_layout.setContentsMargins(12, 12, 12, 12)
+        result_layout.setSpacing(8)
+        result_title = QLabel("Latest Result", result_card)
+        result_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        result_layout.addWidget(result_title)
+        self._dice_result_formula_label = QLabel("No formula queued.", result_card)
+        self._dice_result_formula_label.setWordWrap(True)
+        self._dice_result_formula_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._dice_result_formula_label.setStyleSheet("color: #94a3b8;")
+        result_layout.addWidget(self._dice_result_formula_label)
+        self._dice_total_label = QLabel("Ready", result_card)
+        self._dice_total_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._dice_total_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._dice_total_label.setStyleSheet("font-size: 40px; font-weight: 800; color: #f8fafc; padding: 8px 0px;")
+        result_layout.addWidget(self._dice_total_label)
+        self._dice_result_summary_label = QLabel("Build a pool on the left, then roll.", result_card)
+        self._dice_result_summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._dice_result_summary_label.setWordWrap(True)
+        self._dice_result_summary_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._dice_result_summary_label.setStyleSheet("color: #cbd5e1;")
+        result_layout.addWidget(self._dice_result_summary_label)
+        candidate_slot = QWidget(result_card)
+        candidate_slot.setObjectName("TransparentContainer")
+        candidate_slot.setFixedHeight(row_height)
+        candidate_stack = QStackedLayout(candidate_slot)
+        candidate_stack.setContentsMargins(0, 0, 0, 0)
+        candidate_stack.setStackingMode(QStackedLayout.StackingMode.StackOne)
+        candidate_empty = QWidget(candidate_slot)
+        candidate_empty.setObjectName("TransparentContainer")
+        candidate_stack.addWidget(candidate_empty)
+        candidate_row = QWidget(candidate_slot)
+        candidate_layout = QHBoxLayout(candidate_row)
+        _configure_row(candidate_row, candidate_layout)
+        self._dice_candidate_labels = []
+        candidate_layout.addStretch(1)
+        for _ in range(2):
+            label = _make_value_pill("Roll", candidate_row, width=148)
+            candidate_layout.addWidget(label)
+            self._dice_candidate_labels.append(label)
+        candidate_layout.addStretch(1)
+        self._dice_candidate_row = candidate_row
+        candidate_stack.addWidget(candidate_row)
+        candidate_stack.setCurrentIndex(0)
+        self._dice_candidate_slot = candidate_slot
+        self._dice_candidate_stack = candidate_stack
+        result_layout.addWidget(candidate_slot)
+        right_column.addWidget(result_card)
+        self._dice_result_card = result_card
+
+        detail_card = QFrame(panel)
+        detail_card.setObjectName("SubPanel")
+        detail_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        detail_layout = QVBoxLayout(detail_card)
+        detail_layout.setContentsMargins(12, 12, 12, 12)
+        detail_layout.setSpacing(8)
+        detail_header = QWidget(detail_card)
+        detail_header_layout = QHBoxLayout(detail_header)
+        detail_header_layout.setContentsMargins(0, 0, 0, 0)
+        detail_header_layout.setSpacing(8)
+        detail_title = QLabel("Details", detail_header)
+        detail_title.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+        detail_header_layout.addWidget(detail_title)
+        detail_header_layout.addStretch(1)
+        self._dice_detail_group = QButtonGroup(detail_card)
+        self._dice_detail_group.setExclusive(True)
+        for detail_key, text in (("breakdown", "Breakdown"), ("history", "Recent")):
+            button = QToolButton(detail_header)
+            button.setCheckable(True)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setText(text)
+            button.setFixedSize(126, control_height)
+            button.setStyleSheet(dice_mode_button_style)
+            button.clicked.connect(lambda _checked=False, key=detail_key: self._on_dice_detail_view_selected(key))
+            detail_header_layout.addWidget(button)
+            self._dice_detail_group.addButton(button)
+            self._dice_detail_buttons[detail_key] = button
+        detail_layout.addWidget(detail_header)
+
+        self._dice_detail_stack = QStackedWidget(detail_card)
+        self._dice_detail_stack.setContentsMargins(0, 0, 0, 0)
+        self._dice_detail_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._dice_breakdown_scroll = QScrollArea(detail_card)
+        self._dice_breakdown_scroll.setWidgetResizable(True)
+        self._dice_breakdown_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._dice_breakdown_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._dice_breakdown_root = QWidget(self._dice_breakdown_scroll)
+        self._dice_breakdown_layout = QVBoxLayout(self._dice_breakdown_root)
+        self._dice_breakdown_layout.setContentsMargins(0, 0, 0, 0)
+        self._dice_breakdown_layout.setSpacing(8)
+        self._dice_breakdown_scroll.setWidget(self._dice_breakdown_root)
+        self._dice_detail_stack.addWidget(self._dice_breakdown_scroll)
+
+        self._dice_history_scroll = QScrollArea(detail_card)
+        self._dice_history_scroll.setWidgetResizable(True)
+        self._dice_history_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._dice_history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._dice_history_root = QWidget(self._dice_history_scroll)
+        self._dice_history_layout = QVBoxLayout(self._dice_history_root)
+        self._dice_history_layout.setContentsMargins(0, 0, 0, 0)
+        self._dice_history_layout.setSpacing(8)
+        self._dice_history_scroll.setWidget(self._dice_history_root)
+        self._dice_detail_stack.addWidget(self._dice_history_scroll)
+        detail_layout.addWidget(self._dice_detail_stack, 1)
+        right_column.addWidget(detail_card, 1)
+        self._dice_detail_card = detail_card
+        self._dice_history_card = detail_card
+
+        self._refresh_dice_panel()
+        return panel
+
+    def _toggle_dice_panel(self) -> None:
+        showing = self._dice_panel.isHidden()
+        target_rect = self._target_dice_geometry()
+        if showing and hasattr(self, "_media_panel") and self._media_panel is not None and self._media_panel.isVisible():
+            self._animate_center_panel(
+                self._media_panel,
+                show=False,
+                target_rect=self._target_media_geometry(),
+                attr_name="_media_panel_anim",
+                duration_ms=150,
+            )
+        self._dice_layout_width_override = int(target_rect.width())
+        self._refresh_dice_panel()
+        self._animate_center_panel(
+            self._dice_panel,
+            show=showing,
+            target_rect=target_rect,
+            attr_name="_dice_panel_anim",
+            duration_ms=170,
+        )
+        if showing:
+            def _refresh_after_open() -> None:
+                if hasattr(self, "_dice_panel") and self._dice_panel is not None and self._dice_panel.isVisible():
+                    self._dice_layout_width_override = None
+                    self._refresh_dice_panel()
+
+            QTimer.singleShot(190, _refresh_after_open)
+        else:
+            self._dice_layout_width_override = None
+        self._position_floating_overlays()
+
+    def _make_dice_group(self, die_key: str) -> dict[str, object] | None:
+        clean_key = str(die_key or "").strip().lower()
+        sides = DICE_SIDES_BY_KEY.get(clean_key)
+        if sides is None:
+            return None
+        return {
+            "group_id": uuid.uuid4().hex,
+            "die_key": clean_key,
+            "sides": int(sides),
+            "count": 1,
+            "modifier": 0,
+        }
+
+    def _active_dice_groups(self) -> list[dict[str, object]]:
+        return [group for group in self._dice_groups if int(group.get("count", 0) or 0) > 0]
+
+    def _dice_group_by_id(self, group_id: str) -> dict[str, object] | None:
+        clean_id = str(group_id or "").strip()
+        for group in self._dice_groups:
+            if str(group.get("group_id") or "") == clean_id:
+                return group
+        return None
+
+    def _dice_group_notation(self, group: dict[str, object]) -> str:
+        count = max(0, int(group.get("count", 0) or 0))
+        die_key = str(group.get("die_key") or "").strip()
+        notation = f"{count}{die_key}" if die_key else str(count)
+        modifier = int(group.get("modifier", 0) or 0)
+        if modifier:
+            notation += _format_signed_value(modifier)
+        return notation
+
+    def _dice_formula_text(self) -> str:
+        terms = [self._dice_group_notation(group) for group in self._active_dice_groups()]
+        overall = int(self._dice_overall_modifier or 0)
+        if overall:
+            terms.append(_format_signed_value(overall))
+        if not terms:
+            return "0"
+        result = str(terms[0])
+        for term in terms[1:]:
+            clean_term = str(term)
+            if clean_term.startswith("-"):
+                result += f" - {clean_term[1:]}"
+            else:
+                result += f" + {clean_term.lstrip('+')}"
+        return result
+
+    def _on_dice_tile_clicked(self, die_key: str) -> None:
+        group = self._make_dice_group(die_key)
+        if group is None:
+            return
+        self._dice_groups.append(group)
+        self._dice_status_label.setText(f"Added a new {die_key} group.")
+        self._refresh_dice_panel()
+
+    def _on_dice_group_count_changed(self, group_id: str, value: int) -> None:
+        group = self._dice_group_by_id(group_id)
+        if group is None:
+            return
+        group["count"] = max(0, int(value or 0))
+        self._refresh_dice_panel()
+
+    def _on_dice_group_modifier_changed(self, group_id: str, value: int) -> None:
+        group = self._dice_group_by_id(group_id)
+        if group is None:
+            return
+        group["modifier"] = int(value or 0)
+        self._refresh_dice_panel()
+
+    def _on_dice_group_removed(self, group_id: str) -> None:
+        clean_id = str(group_id or "").strip()
+        self._dice_groups = [
+            group for group in self._dice_groups if str(group.get("group_id") or "") != clean_id
+        ]
+        self._refresh_dice_panel()
+
+    def _on_dice_mode_selected(self, mode_key: str) -> None:
+        clean_mode = str(mode_key or "").strip().lower()
+        if clean_mode not in {"normal", "advantage", "disadvantage"}:
+            return
+        self._dice_mode = clean_mode
+        self._refresh_dice_panel()
+
+    def _on_dice_detail_view_selected(self, view_key: str) -> None:
+        clean_view = str(view_key or "").strip().lower()
+        if clean_view not in {"breakdown", "history"}:
+            return
+        self._dice_detail_view = clean_view
+        self._refresh_dice_panel()
+
+    def _on_dice_overall_modifier_changed(self, value: int) -> None:
+        self._dice_overall_modifier = int(value or 0)
+        self._refresh_dice_panel()
+
+    def _build_dice_attempt(self) -> dict:
+        parts: list[dict] = []
+        total = int(self._dice_overall_modifier or 0)
+        for group in self._active_dice_groups():
+            count = int(group.get("count", 0) or 0)
+            sides = max(1, int(group.get("sides", 0) or 0))
+            modifier = int(group.get("modifier", 0) or 0)
+            rolls = [random.randint(1, sides) for _ in range(count)]
+            subtotal = sum(rolls) + modifier
+            parts.append(
+                {
+                    "group_id": str(group.get("group_id") or ""),
+                    "die_key": str(group.get("die_key") or ""),
+                    "count": count,
+                    "modifier": modifier,
+                    "rolls": rolls,
+                    "subtotal": subtotal,
+                    "notation": self._dice_group_notation(group),
+                }
+            )
+            total += subtotal
+        return {
+            "total": total,
+            "overall_modifier": int(self._dice_overall_modifier or 0),
+            "parts": parts,
+            "formula": self._dice_formula_text(),
+        }
+
+    def _select_dice_attempt(self, attempts: list[dict]) -> int:
+        if len(attempts) <= 1:
+            return 0
+        ranked = list(enumerate(attempts))
+        if self._dice_mode == "disadvantage":
+            return min(ranked, key=lambda item: (int(item[1].get("total", 0)), item[0]))[0]
+        return max(ranked, key=lambda item: (int(item[1].get("total", 0)), -item[0]))[0]
+
+    def _on_dice_roll_requested(self) -> None:
+        if not self._active_dice_groups() and int(self._dice_overall_modifier or 0) == 0:
+            self._dice_status_label.setText("Add at least one dice group or set an overall modifier before rolling.")
+            self._refresh_dice_panel()
+            return
+        attempt_count = 2 if self._dice_mode in {"advantage", "disadvantage"} else 1
+        attempts = [self._build_dice_attempt() for _ in range(attempt_count)]
+        selected_index = self._select_dice_attempt(attempts)
+        chosen_attempt = attempts[selected_index]
+        timestamp_text = datetime.now().strftime("%H:%M:%S")
+        self._dice_last_result = {
+            "mode": self._dice_mode,
+            "attempts": attempts,
+            "selected_index": selected_index,
+            "timestamp": timestamp_text,
+            "total": int(chosen_attempt.get("total", 0) or 0),
+            "formula": str(chosen_attempt.get("formula") or ""),
+        }
+        self._dice_history.insert(0, dict(self._dice_last_result))
+        self._dice_history = self._dice_history[:8]
+        if self._dice_mode == "normal":
+            self._dice_status_label.setText(f"Rolled {self._dice_formula_text()} at {timestamp_text}.")
+        else:
+            kept_word = "higher" if self._dice_mode == "advantage" else "lower"
+            self._dice_status_label.setText(f"Rolled twice at {timestamp_text} and kept the {kept_word} total.")
+        self._refresh_dice_panel()
+
+    def _on_dice_reset_requested(self) -> None:
+        self._dice_groups = []
+        self._dice_overall_modifier = 0
+        self._dice_mode = "normal"
+        self._dice_last_result = None
+        self._dice_status_label.setText("Dice pool cleared.")
+        self._refresh_dice_panel()
+
+    def _update_dice_tile_button_sizes(self, available_width: int) -> None:
+        if not self._dice_tile_buttons:
+            return
+        tile_count = max(1, len(self._dice_tile_buttons))
+        spacing = 8
+        usable_width = max(0, int(available_width))
+        tile_side = max(56, min(82, int((usable_width - ((tile_count - 1) * spacing)) / tile_count)))
+        icon_side = max(28, min(42, tile_side - 24))
+        style = (
+            "QToolButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+            "border: 1px solid #3b424b;"
+            "border-radius: 8px;"
+            "padding: 0px;"
+            f"min-width: {tile_side}px;"
+            f"max-width: {tile_side}px;"
+            f"min-height: {tile_side}px;"
+            f"max-height: {tile_side}px;"
+            "}"
+            "QToolButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+            "border-color: #58a6ff;"
+            "}"
+            "QToolButton:checked {"
+            "background-color: rgba(37, 99, 235, 48);"
+            "border-color: #60a5fa;"
+            "}"
+        )
+        for tile in self._dice_tile_buttons.values():
+            tile.setIconSize(QSize(icon_side, icon_side))
+            tile.setFixedSize(tile_side, tile_side)
+            tile.setMinimumSize(tile_side, tile_side)
+            tile.setMaximumSize(tile_side, tile_side)
+            tile.setStyleSheet(style)
+
+    def _update_dice_panel_layout_mode(self) -> None:
+        body_layout = getattr(self, "_dice_body_layout", None)
+        body_scroll = getattr(self, "_dice_body_scroll", None)
+        if body_layout is None or body_scroll is None:
+            return
+        viewport_width = int(getattr(self, "_dice_layout_width_override", 0) or 0)
+        if viewport_width > 0:
+            viewport_width = max(0, viewport_width - 38)
+        viewport = body_scroll.viewport()
+        if viewport_width <= 0:
+            viewport_width = int(viewport.width()) if viewport is not None else 0
+        if viewport_width <= 0 and hasattr(self, "_dice_panel") and self._dice_panel is not None:
+            viewport_width = max(0, int(self._dice_panel.width()) - 24)
+        stacked = viewport_width < 900
+        target_direction = QBoxLayout.Direction.TopToBottom if stacked else QBoxLayout.Direction.LeftToRight
+        if body_layout.direction() != target_direction:
+            body_layout.setDirection(target_direction)
+        if stacked:
+            body_layout.setStretch(0, 0)
+            body_layout.setStretch(1, 0)
+            tile_available_width = max(0, viewport_width - 24)
+            if self._dice_left_container is not None:
+                self._dice_left_container.setMinimumWidth(0)
+                self._dice_left_container.setMaximumWidth(16777215)
+            if self._dice_right_container is not None:
+                self._dice_right_container.setMinimumWidth(0)
+                self._dice_right_container.setMaximumWidth(16777215)
+            if hasattr(self, "_dice_result_card") and self._dice_result_card is not None:
+                self._dice_result_card.setMinimumHeight(260)
+            if hasattr(self, "_dice_detail_card") and self._dice_detail_card is not None:
+                self._dice_detail_card.setMinimumHeight(320)
+            if hasattr(self, "_dice_detail_stack") and self._dice_detail_stack is not None:
+                self._dice_detail_stack.setMinimumHeight(250)
+            if hasattr(self, "_dice_breakdown_scroll") and self._dice_breakdown_scroll is not None:
+                self._dice_breakdown_scroll.setMinimumHeight(220)
+            if hasattr(self, "_dice_history_scroll") and self._dice_history_scroll is not None:
+                self._dice_history_scroll.setMinimumHeight(220)
+        else:
+            body_layout.setStretch(0, 6)
+            body_layout.setStretch(1, 5)
+            available_width = max(0, viewport_width - body_layout.spacing())
+            left_width = max(0, int(round(available_width * (6 / 11))))
+            right_width = max(0, available_width - left_width)
+            if self._dice_left_container is not None:
+                self._dice_left_container.setFixedWidth(left_width)
+            if self._dice_right_container is not None:
+                self._dice_right_container.setFixedWidth(right_width)
+            tile_available_width = max(0, left_width - 24)
+            if hasattr(self, "_dice_result_card") and self._dice_result_card is not None:
+                self._dice_result_card.setMinimumHeight(0)
+            if hasattr(self, "_dice_detail_card") and self._dice_detail_card is not None:
+                self._dice_detail_card.setMinimumHeight(0)
+            if hasattr(self, "_dice_detail_stack") and self._dice_detail_stack is not None:
+                self._dice_detail_stack.setMinimumHeight(0)
+            if hasattr(self, "_dice_breakdown_scroll") and self._dice_breakdown_scroll is not None:
+                self._dice_breakdown_scroll.setMinimumHeight(0)
+            if hasattr(self, "_dice_history_scroll") and self._dice_history_scroll is not None:
+                self._dice_history_scroll.setMinimumHeight(0)
+        self._update_dice_tile_button_sizes(tile_available_width)
+
+    def _refresh_dice_group_rows(self, chosen_parts: dict[str, dict]) -> None:
+        _clear_layout(self._dice_pool_groups_layout)
+        self._dice_group_row_widgets = []
+        self._dice_group_remove_buttons = []
+        if not self._dice_groups:
+            placeholder = QLabel("Add dice from the top row to start building throw groups.", self._dice_pool_root)
+            placeholder.setWordWrap(True)
+            placeholder.setStyleSheet("color: #94a3b8;")
+            self._dice_pool_groups_layout.addWidget(placeholder)
+            self._dice_pool_groups_layout.addStretch(1)
+            return
+
+        row_height = 40
+        control_height = 40
+        icon_box = 40
+        group_label_width = 64
+        count_width = 78
+        modifier_width = 88
+        result_width = 88
+        remove_width = 88
+        row_action_height = 40
+        result_style = (
+            "color: #e5e7eb; background-color: rgba(15, 23, 42, 150); "
+            "border: 1px solid #334155; border-radius: 6px; padding: 3px 6px;"
+        )
+        remove_button_style = (
+            "QPushButton {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
+            "border: 1px solid #3b424b;"
+            "border-radius: 6px;"
+            "padding: 0px 10px;"
+            "margin: 0px;"
+            "color: #e5e7eb;"
+            "font-size: 12px;"
+            "font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
+            "border-color: #58a6ff;"
+            "}"
+        )
+
+        for group in self._dice_groups:
+            group_id = str(group.get("group_id") or "")
+            die_key = str(group.get("die_key") or "")
+            row_widget = QWidget(self._dice_pool_root)
+            row_widget.setFixedHeight(row_height)
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+
+            icon_label = QLabel(row_widget)
+            icon_label.setFixedSize(icon_box, icon_box)
+            icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_label.setStyleSheet(
+                "background-color: rgba(15, 23, 42, 150); border: 1px solid #334155; border-radius: 6px;"
+            )
+            icon = QIcon(self._dice_icon_paths.get(die_key, ""))
+            icon_label.setPixmap(icon.pixmap(QSize(24, 24)))
+            row_layout.addWidget(icon_label)
+
+            group_label = QLabel(die_key, row_widget)
+            group_label.setFixedSize(group_label_width, control_height)
+            group_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            group_label.setStyleSheet(
+                "color: #f8fafc; background-color: rgba(37, 99, 235, 45); "
+                "border: 1px solid #3b82f6; border-radius: 6px; font-weight: 700; padding: 4px 6px;"
+            )
+            row_layout.addWidget(group_label)
+
+            count_spin = QSpinBox(row_widget)
+            count_spin.setRange(0, 99)
+            count_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            count_spin.setKeyboardTracking(False)
+            count_spin.setFixedSize(count_width, control_height)
+            count_spin.setValue(int(group.get("count", 0) or 0))
+            count_spin.valueChanged.connect(
+                lambda value, current_group_id=group_id: self._on_dice_group_count_changed(current_group_id, value)
+            )
+            row_layout.addWidget(count_spin)
+
+            modifier_spin = QSpinBox(row_widget)
+            modifier_spin.setRange(-999, 999)
+            modifier_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            modifier_spin.setKeyboardTracking(False)
+            modifier_spin.setFixedSize(modifier_width, control_height)
+            modifier_spin.setValue(int(group.get("modifier", 0) or 0))
+            modifier_spin.valueChanged.connect(
+                lambda value, current_group_id=group_id: self._on_dice_group_modifier_changed(current_group_id, value)
+            )
+            row_layout.addWidget(modifier_spin)
+
+            chosen_part = chosen_parts.get(group_id)
+            result_text = (
+                str(int(chosen_part.get("subtotal", 0) or 0))
+                if chosen_part is not None
+                else (_format_signed_value(int(group.get("modifier", 0) or 0)) if int(group.get("modifier", 0) or 0) else "Ready")
+            )
+            result_label = QLabel(result_text, row_widget)
+            result_label.setFixedSize(result_width, control_height)
+            result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            result_label.setStyleSheet(result_style)
+            row_layout.addWidget(result_label)
+
+            remove_button = QPushButton("Remove", row_widget)
+            remove_button.setObjectName("SecondaryButton")
+            remove_button.setFixedSize(remove_width, row_action_height)
+            remove_button.setStyleSheet(remove_button_style)
+            remove_button.clicked.connect(
+                lambda _checked=False, current_group_id=group_id: self._on_dice_group_removed(current_group_id)
+            )
+            row_layout.addWidget(remove_button)
+            row_layout.addStretch(1)
+
+            self._dice_pool_groups_layout.addWidget(row_widget)
+            self._dice_group_row_widgets.append(row_widget)
+            self._dice_group_remove_buttons.append(remove_button)
+        self._dice_pool_groups_layout.addStretch(1)
+
+    def _refresh_dice_panel(self) -> None:
+        if not hasattr(self, "_dice_panel"):
+            return
+        self._update_dice_panel_layout_mode()
+        active_groups = self._active_dice_groups()
+        chosen_attempt = None
+        chosen_parts: dict[str, dict] = {}
+        attempts: list[dict] = []
+        selected_index = 0
+        if isinstance(self._dice_last_result, dict):
+            attempts = list(self._dice_last_result.get("attempts") or [])
+            selected_index = int(self._dice_last_result.get("selected_index", 0) or 0)
+            if 0 <= selected_index < len(attempts):
+                chosen_attempt = attempts[selected_index]
+                chosen_parts = {
+                    str(part.get("group_id") or ""): dict(part)
+                    for part in chosen_attempt.get("parts", [])
+                    if str(part.get("group_id") or "").strip()
+                }
+
+        group_count_by_key = {
+            die_key: sum(1 for group in self._dice_groups if str(group.get("die_key") or "") == die_key)
+            for die_key, _sides in COMMON_DICE_OPTIONS
+        }
+        for die_key, tile in self._dice_tile_buttons.items():
+            group_count = int(group_count_by_key.get(die_key, 0) or 0)
+            with QSignalBlocker(tile):
+                tile.setChecked(group_count > 0)
+            tile.setToolTip(
+                f"{die_key}: add a new roll group."
+                if group_count <= 0
+                else f"{die_key}: {group_count} group(s) queued. Click to add another."
+            )
+
+        total_dice = sum(int(group.get("count", 0) or 0) for group in active_groups)
+        if active_groups:
+            self._dice_pool_summary_label.setText(
+                f"{len(active_groups)} group(s) queued | {total_dice} die/dice total | Formula: {self._dice_formula_text()}"
+            )
+        else:
+            self._dice_pool_summary_label.setText("No groups added yet.")
+
+        self._refresh_dice_group_rows(chosen_parts)
+
+        with QSignalBlocker(self._dice_overall_modifier_spin):
+            self._dice_overall_modifier_spin.setValue(int(self._dice_overall_modifier or 0))
+        self._dice_overall_modifier_value.setText(_format_signed_value(self._dice_overall_modifier))
+        for mode_key, button in self._dice_mode_buttons.items():
+            with QSignalBlocker(button):
+                button.setChecked(mode_key == self._dice_mode)
+        for detail_key, button in self._dice_detail_buttons.items():
+            with QSignalBlocker(button):
+                button.setChecked(detail_key == self._dice_detail_view)
+        if hasattr(self, "_dice_detail_stack") and self._dice_detail_stack is not None:
+            self._dice_detail_stack.setCurrentIndex(0 if self._dice_detail_view == "breakdown" else 1)
+
+        can_roll = bool(active_groups) or int(self._dice_overall_modifier or 0) != 0
+        self._dice_roll_btn.setEnabled(can_roll)
+        self._dice_reset_btn.setEnabled(can_roll or self._dice_last_result is not None)
+        self._dice_result_formula_label.setText(self._dice_formula_text() if active_groups or self._dice_overall_modifier else "No formula queued.")
+
+        if chosen_attempt is None:
+            self._dice_total_label.setText("Ready")
+            self._dice_result_summary_label.setText("Build a pool on the left, then roll.")
+        else:
+            total_value = int(chosen_attempt.get("total", 0) or 0)
+            self._dice_total_label.setText(str(total_value))
+            if self._dice_mode == "normal":
+                self._dice_result_summary_label.setText("Single throw resolved.")
+            else:
+                other_index = 1 - selected_index
+                other_total = int(attempts[other_index].get("total", 0) or 0) if 0 <= other_index < len(attempts) else 0
+                kept_word = "higher" if self._dice_mode == "advantage" else "lower"
+                self._dice_result_summary_label.setText(
+                    f"Resolved with {self._dice_mode}; kept the {kept_word} total over {other_total}."
+                )
+
+        show_candidates = self._dice_mode in {"advantage", "disadvantage"} and len(attempts) >= 2
+        kept_candidate_style = (
+            "color: #f0fdf4; background-color: rgba(22, 101, 52, 110); "
+            "border: 1px solid #22c55e; border-radius: 6px; padding: 3px 6px;"
+        )
+        dropped_candidate_style = (
+            "color: #cbd5e1; background-color: rgba(15, 23, 42, 110); "
+            "border: 1px solid #475569; border-radius: 6px; padding: 3px 6px;"
+        )
+        if show_candidates:
+            for index, label in enumerate(self._dice_candidate_labels):
+                prefix = "Kept" if index == selected_index else "Drop"
+                label.setText(f"{prefix}: {int(attempts[index].get('total', 0) or 0)}")
+                label.setStyleSheet(kept_candidate_style if index == selected_index else dropped_candidate_style)
+        if hasattr(self, "_dice_candidate_stack") and self._dice_candidate_stack is not None:
+            self._dice_candidate_stack.setCurrentIndex(1 if show_candidates else 0)
+
+        self._rebuild_dice_breakdown(chosen_attempt)
+        self._rebuild_dice_history()
+
+    def _rebuild_dice_breakdown(self, chosen_attempt: dict | None) -> None:
+        _clear_layout(self._dice_breakdown_layout)
+        if not chosen_attempt:
+            placeholder = QLabel("The winning attempt and each group subtotal will appear here.", self._dice_breakdown_root)
+            placeholder.setWordWrap(True)
+            placeholder.setStyleSheet("color: #94a3b8;")
+            self._dice_breakdown_layout.addWidget(placeholder)
+            self._dice_breakdown_layout.addStretch(1)
+            return
+        parts = list(chosen_attempt.get("parts") or [])
+        for part in parts:
+            card = QFrame(self._dice_breakdown_root)
+            card.setObjectName("SubPanel")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 10, 10, 10)
+            card_layout.setSpacing(6)
+            header = QHBoxLayout()
+            header.setContentsMargins(0, 0, 0, 0)
+            header.setSpacing(8)
+            title = QLabel(str(part.get("notation") or ""), card)
+            title.setStyleSheet("font-weight: 700; color: #f8fafc;")
+            header.addWidget(title)
+            header.addStretch(1)
+            subtotal = QLabel(str(int(part.get("subtotal", 0) or 0)), card)
+            subtotal.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            subtotal.setFixedWidth(74)
+            subtotal.setStyleSheet(
+                "color: #e5e7eb; background-color: rgba(15, 23, 42, 150); "
+                "border: 1px solid #334155; border-radius: 6px; padding: 3px 6px;"
+            )
+            header.addWidget(subtotal)
+            card_layout.addLayout(header)
+            detail = QLabel(f"Rolls: {', '.join(str(value) for value in part.get('rolls', []))}", card)
+            detail.setWordWrap(True)
+            detail.setStyleSheet("color: #cbd5e1;")
+            card_layout.addWidget(detail)
+            self._dice_breakdown_layout.addWidget(card)
+        overall_modifier = int(chosen_attempt.get("overall_modifier", 0) or 0)
+        if overall_modifier:
+            overall_card = QFrame(self._dice_breakdown_root)
+            overall_card.setObjectName("SubPanel")
+            overall_layout = QHBoxLayout(overall_card)
+            overall_layout.setContentsMargins(10, 10, 10, 10)
+            overall_layout.setSpacing(8)
+            label = QLabel("Overall Modifier", overall_card)
+            label.setStyleSheet("font-weight: 600; color: #e5e7eb;")
+            overall_layout.addWidget(label)
+            overall_layout.addStretch(1)
+            value_label = QLabel(_format_signed_value(overall_modifier), overall_card)
+            value_label.setFixedWidth(74)
+            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            value_label.setStyleSheet(
+                "color: #e5e7eb; background-color: rgba(15, 23, 42, 150); "
+                "border: 1px solid #334155; border-radius: 6px; padding: 3px 6px;"
+            )
+            overall_layout.addWidget(value_label)
+            self._dice_breakdown_layout.addWidget(overall_card)
+        self._dice_breakdown_layout.addStretch(1)
+
+    def _rebuild_dice_history(self) -> None:
+        _clear_layout(self._dice_history_layout)
+        if not self._dice_history:
+            placeholder = QLabel("Recent throws will stack here for quick comparison.", self._dice_history_root)
+            placeholder.setWordWrap(True)
+            placeholder.setStyleSheet("color: #94a3b8;")
+            self._dice_history_layout.addWidget(placeholder)
+            self._dice_history_layout.addStretch(1)
+            return
+        for entry in self._dice_history:
+            card = QFrame(self._dice_history_root)
+            card.setObjectName("SubPanel")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 10, 10, 10)
+            card_layout.setSpacing(4)
+            header = QHBoxLayout()
+            header.setContentsMargins(0, 0, 0, 0)
+            header.setSpacing(8)
+            total = QLabel(str(int(entry.get("total", 0) or 0)), card)
+            total.setStyleSheet("font-size: 20px; font-weight: 800; color: #f8fafc;")
+            header.addWidget(total)
+            header.addStretch(1)
+            stamp = QLabel(str(entry.get("timestamp") or ""), card)
+            stamp.setStyleSheet("color: #94a3b8; font-size: 11px;")
+            header.addWidget(stamp)
+            card_layout.addLayout(header)
+            formula = QLabel(str(entry.get("formula") or ""), card)
+            formula.setWordWrap(True)
+            formula.setStyleSheet("color: #cbd5e1;")
+            card_layout.addWidget(formula)
+            mode = str(entry.get("mode") or "normal").strip().title()
+            attempts = list(entry.get("attempts") or [])
+            selected_index = int(entry.get("selected_index", 0) or 0)
+            summary = mode
+            if len(attempts) >= 2:
+                kept = int(attempts[selected_index].get("total", 0) or 0)
+                other = int(attempts[1 - selected_index].get("total", 0) or 0)
+                comparison = "over" if mode == "Advantage" else "under"
+                summary = f"{mode}: kept {kept} {comparison} {other}"
+            summary_label = QLabel(summary, card)
+            summary_label.setWordWrap(True)
+            summary_label.setStyleSheet("color: #94a3b8;")
+            card_layout.addWidget(summary_label)
+            self._dice_history_layout.addWidget(card)
+        self._dice_history_layout.addStretch(1)
+
     def _format_media_time(self, value_ms: int) -> str:
         total_seconds = max(0, int(value_ms or 0) // 1000)
         minutes, seconds = divmod(total_seconds, 60)
@@ -7804,6 +9308,8 @@ class DungeonAppletWidget(QWidget):
             if not bool(endpoint.get("active")):
                 return ""
             host = str(self._host_ip or self._media_player_endpoint_host or "127.0.0.1").strip() or "127.0.0.1"
+            if host in {"0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0"}:
+                host = "127.0.0.1"
             port = int(endpoint.get("port") or 0)
             token = urllib.parse.quote(str(endpoint.get("token") or ""))
             if port <= 0 or not token:
@@ -9078,26 +10584,27 @@ class DungeonAppletWidget(QWidget):
         layout.addWidget(self._initiative_hint)
 
         self._initiative_reopen_btn = QToolButton(self)
-        self._initiative_reopen_btn.setObjectName("SecondaryButton")
+        self._initiative_reopen_btn.setObjectName("")
         self._initiative_reopen_btn.setToolTip("Initiative")
         light_icon = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "lightning.svg"))
         self._initiative_reopen_btn.setIcon(QIcon(light_icon))
-        self._initiative_reopen_btn.setIconSize(QSize(18, 18))
+        self._initiative_reopen_btn.setIconSize(QSize(20, 20))
         self._initiative_reopen_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self._initiative_reopen_btn.setProperty("compact", "true")
-        self._initiative_reopen_btn.setFixedSize(34, 34)
+        self._initiative_reopen_btn.setFixedSize(44, 44)
+        self._initiative_reopen_btn.setMinimumSize(44, 44)
+        self._initiative_reopen_btn.setMaximumSize(44, 44)
         # Keep icon-only action square even with global button style padding.
         self._initiative_reopen_btn.setStyleSheet(
             "QToolButton {"
             "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1c2128, stop:1 #0d1117);"
             "border: 1px solid #3b424b;"
-            "border-radius: 6px;"
-            "padding: 4px;"
+            "border-radius: 8px;"
+            "padding: 0px;"
             "margin: 0px;"
-            "min-width: 34px;"
-            "max-width: 34px;"
-            "min-height: 34px;"
-            "max-height: 34px;"
+            "min-width: 44px;"
+            "max-width: 44px;"
+            "min-height: 44px;"
+            "max-height: 44px;"
             "}"
             "QToolButton:hover {"
             "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #21262d, stop:1 #161b22);"
@@ -9141,6 +10648,7 @@ class DungeonAppletWidget(QWidget):
             self._initiative_state["entity_entries"] = entity_entries
 
         current_entity_entries: dict[str, str] = {}
+        current_player_rows: dict[str, dict] = {}
         for item in self.canvas.scene().items():
             if not isinstance(item, EntityItem):
                 continue
@@ -9158,21 +10666,36 @@ class DungeonAppletWidget(QWidget):
             if not isinstance(initiative, int):
                 initiative = None
             player_name = self._connected_players.get(owner_player_id, owner_player_id)
-            player_entries[row_id] = {
+            current_player_rows[row_id] = {
                 "player_id": owner_player_id,
                 "entity_id": entity_id,
                 "name": f"{player_name} - {label}",
                 "initiative": initiative,
             }
+        for row_id, previous in previous_player_entries.items():
+            if row_id in current_player_rows:
+                player_entries[row_id] = current_player_rows.pop(row_id)
+        for row_id, current in current_player_rows.items():
+            player_entries[row_id] = current
         self._initiative_state["player_entries"] = player_entries
 
-        for entity_id, name in current_entity_entries.items():
-            entry = entity_entries.setdefault(entity_id, {})
-            entry["name"] = name
+        previous_entity_entries = dict(entity_entries)
+        ordered_entity_entries: dict[str, dict] = {}
+        for entity_id, previous in previous_entity_entries.items():
+            if entity_id not in current_entity_entries:
+                continue
+            entry = dict(previous) if isinstance(previous, dict) else {}
+            entry["name"] = current_entity_entries[entity_id]
             entry.setdefault("initiative", None)
-        stale_entities = [eid for eid in list(entity_entries.keys()) if eid not in current_entity_entries]
-        for entity_id in stale_entities:
-            entity_entries.pop(entity_id, None)
+            ordered_entity_entries[entity_id] = entry
+        for entity_id, name in current_entity_entries.items():
+            if entity_id in ordered_entity_entries:
+                continue
+            entry = {}
+            entry["name"] = name
+            entry["initiative"] = None
+            ordered_entity_entries[entity_id] = entry
+        self._initiative_state["entity_entries"] = ordered_entity_entries
 
     def _request_initiative_round(
         self,
@@ -9232,8 +10755,38 @@ class DungeonAppletWidget(QWidget):
             return (0, -initiative, name)
         return (1, 0, name)
 
+    def _ordered_initiative_entries(self, group_key: str) -> list[tuple[str, dict]]:
+        group = self._initiative_state.get(group_key, {})
+        if not isinstance(group, dict):
+            return []
+        return [(key, value) for key, value in group.items() if isinstance(value, dict)]
+
+    def _move_initiative_row(self, kind: str, source_id: str, target_id: str) -> bool:
+        group_key = "player_entries" if str(kind or "").strip() == "player" else "entity_entries"
+        ordered_entries = self._ordered_initiative_entries(group_key)
+        ordered_ids = [entry_id for entry_id, _entry in ordered_entries]
+        if source_id not in ordered_ids or target_id not in ordered_ids or source_id == target_id:
+            return False
+        source_index = ordered_ids.index(source_id)
+        target_index = ordered_ids.index(target_id)
+        moved_entry = ordered_entries.pop(source_index)
+        ordered_entries.insert(target_index, moved_entry)
+        self._initiative_state[group_key] = {entry_id: entry for entry_id, entry in ordered_entries}
+        self._render_initiative_overlay()
+        if self._online_mode == ONLINE_MODE_DM_HOST:
+            self._broadcast_snapshot_if_host()
+        return True
+
     def _initiative_cache_key(self, kind: str, key: str) -> str:
         return f"{kind}:{key}"
+
+    def _find_initiative_row_widget(self, widget: QWidget | None) -> QWidget | None:
+        current = widget
+        while current is not None:
+            if bool(current.property("initiative_row")):
+                return current
+            current = current.parentWidget()
+        return None
 
     def _find_initiative_input(self, kind: str, key: str) -> QLineEdit | None:
         if not hasattr(self, "_initiative_rows_root") or self._initiative_rows_root is None:
@@ -9385,6 +10938,12 @@ class DungeonAppletWidget(QWidget):
             self._broadcast_snapshot_if_host()
         self._render_initiative_overlay()
 
+    def _set_initiative_value_quick(self, kind: str, key: str, value: int) -> None:
+        target_edit = self._find_initiative_input(kind, key)
+        if target_edit is not None:
+            target_edit.setText(str(int(value)))
+        self._on_initiative_value_changed(kind, key, str(int(value)))
+
     def _render_initiative_overlay(self) -> None:
         if not hasattr(self, "_initiative_rows_layout"):
             return
@@ -9449,7 +11008,9 @@ class DungeonAppletWidget(QWidget):
             value: object,
             editable: bool,
         ) -> None:
+            control_height = 30
             edit.setFixedWidth(70)
+            edit.setFixedHeight(control_height)
             edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cache_key = self._initiative_cache_key(kind, key)
             draft = self._initiative_draft_values.get(cache_key)
@@ -9490,43 +11051,90 @@ class DungeonAppletWidget(QWidget):
             edit: QLineEdit,
             editable: bool,
         ) -> QPushButton:
-            button = QPushButton("OK", parent)
-            button.setObjectName("InlinePrimaryButton")
+            button = _build_initiative_inline_button(
+                parent,
+                text="OK",
+                edit=edit,
+                editable=editable,
+                object_name="InlinePrimaryButton",
+                on_click=lambda source=edit: self._commit_initiative_input(source),
+            )
             button.setProperty("initiative_commit_button", True)
             button.setProperty("initiative_kind", str(edit.property("initiative_kind") or ""))
             button.setProperty("initiative_id", str(edit.property("initiative_id") or ""))
+            return button
+
+        def _build_initiative_inline_button(
+            parent: QWidget,
+            *,
+            text: str,
+            edit: QLineEdit,
+            editable: bool,
+            object_name: str,
+            on_click: Callable[[], None],
+        ) -> QPushButton:
+            button = QPushButton(text, parent)
+            button.setObjectName(object_name)
             button.setEnabled(editable)
-            target_height = max(1, edit.sizeHint().height())
+            target_height = max(1, edit.height())
             button.setFixedHeight(target_height)
-            button.setMinimumWidth(max(button.sizeHint().width(), edit.sizeHint().height()))
+            button.setFixedWidth(max(56, target_height + 8))
             button.setStyleSheet(
                 f"QPushButton {{ min-height: 0px; max-height: {target_height}px; padding-top: 0px; padding-bottom: 0px; }}"
             )
-            button.clicked.connect(lambda _checked=False, source=edit: self._commit_initiative_input(source))
+            button.clicked.connect(lambda _checked=False: on_click())
             return button
+
+        def _build_initiative_nat_button(
+            parent: QWidget,
+            *,
+            edit: QLineEdit,
+            editable: bool,
+            nat_value: int,
+            kind: str,
+            row_id: str,
+        ) -> QPushButton:
+            return _build_initiative_inline_button(
+                parent,
+                text=f"nat{nat_value}",
+                edit=edit,
+                editable=editable,
+                object_name="SecondaryButton",
+                on_click=lambda target_kind=kind, target_row_id=row_id, target_value=nat_value: self._set_initiative_value_quick(
+                    target_kind,
+                    target_row_id,
+                    target_value,
+                ),
+            )
 
         player_entries = self._initiative_state.get("player_entries", {})
         displayed_player_rows = 0
         if isinstance(player_entries, dict):
-            for player_id, entry in sorted(
-                player_entries.items(),
-                key=self._initiative_sort_key,
-            ):
+            for player_id, entry in self._ordered_initiative_entries("player_entries"):
                 if not isinstance(entry, dict):
                     continue
                 entry_player_id = str(entry.get("player_id") or "").strip()
                 if is_player and entry_player_id != local_id:
                     continue
                 displayed_player_rows += 1
-                row_widget = QWidget(self._initiative_rows_root)
+                row_widget = QFrame(self._initiative_rows_root)
+                row_widget.setProperty("initiative_row", True)
+                row_widget.setProperty("initiative_kind", "player")
+                row_widget.setProperty("initiative_id", player_id)
+                row_widget.setFrameShape(QFrame.Shape.NoFrame)
+                row_widget.setCursor(Qt.CursorShape.OpenHandCursor)
                 row_layout = QHBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(6)
                 value = entry.get("initiative")
                 label = QLabel(str(entry.get("name") or player_id), row_widget)
+                label.setProperty("initiative_row_label", True)
+                label.setCursor(Qt.CursorShape.OpenHandCursor)
                 row_layout.addWidget(label)
                 check = QLabel("OK" if isinstance(value, int) else "", row_widget)
+                check.setProperty("initiative_row_label", True)
                 check.setStyleSheet("color: #22c55e; font-weight: bold;")
+                check.setCursor(Qt.CursorShape.OpenHandCursor)
                 row_layout.addWidget(check)
                 row_layout.addStretch(1)
                 edit = QLineEdit(row_widget)
@@ -9542,6 +11150,26 @@ class DungeonAppletWidget(QWidget):
                     first_editable_player_edit = edit
                 row_layout.addWidget(edit)
                 row_layout.addWidget(
+                    _build_initiative_nat_button(
+                        row_widget,
+                        edit=edit,
+                        editable=editable,
+                        nat_value=1,
+                        kind="player",
+                        row_id=player_id,
+                    )
+                )
+                row_layout.addWidget(
+                    _build_initiative_nat_button(
+                        row_widget,
+                        edit=edit,
+                        editable=editable,
+                        nat_value=20,
+                        kind="player",
+                        row_id=player_id,
+                    )
+                )
+                row_layout.addWidget(
                     _build_initiative_commit_button(
                         row_widget,
                         edit=edit,
@@ -9553,21 +11181,27 @@ class DungeonAppletWidget(QWidget):
         if is_dm:
             entity_entries = self._initiative_state.get("entity_entries", {})
             if isinstance(entity_entries, dict):
-                for entity_id, entry in sorted(
-                    entity_entries.items(),
-                    key=self._initiative_sort_key,
-                ):
+                for entity_id, entry in self._ordered_initiative_entries("entity_entries"):
                     if not isinstance(entry, dict):
                         continue
-                    row_widget = QWidget(self._initiative_rows_root)
+                    row_widget = QFrame(self._initiative_rows_root)
+                    row_widget.setProperty("initiative_row", True)
+                    row_widget.setProperty("initiative_kind", "entity")
+                    row_widget.setProperty("initiative_id", entity_id)
+                    row_widget.setFrameShape(QFrame.Shape.NoFrame)
+                    row_widget.setCursor(Qt.CursorShape.OpenHandCursor)
                     row_layout = QHBoxLayout(row_widget)
                     row_layout.setContentsMargins(0, 0, 0, 0)
                     row_layout.setSpacing(6)
                     value = entry.get("initiative")
                     label = QLabel(f"Entity: {str(entry.get('name') or entity_id)}", row_widget)
+                    label.setProperty("initiative_row_label", True)
+                    label.setCursor(Qt.CursorShape.OpenHandCursor)
                     row_layout.addWidget(label)
                     check = QLabel("OK" if isinstance(value, int) else "", row_widget)
+                    check.setProperty("initiative_row_label", True)
                     check.setStyleSheet("color: #22c55e; font-weight: bold;")
+                    check.setCursor(Qt.CursorShape.OpenHandCursor)
                     row_layout.addWidget(check)
                     row_layout.addStretch(1)
                     edit = QLineEdit(row_widget)
@@ -9579,6 +11213,26 @@ class DungeonAppletWidget(QWidget):
                         editable=True,
                     )
                     row_layout.addWidget(edit)
+                    row_layout.addWidget(
+                        _build_initiative_nat_button(
+                            row_widget,
+                            edit=edit,
+                            editable=True,
+                            nat_value=1,
+                            kind="entity",
+                            row_id=entity_id,
+                        )
+                    )
+                    row_layout.addWidget(
+                        _build_initiative_nat_button(
+                            row_widget,
+                            edit=edit,
+                            editable=True,
+                            nat_value=20,
+                            kind="entity",
+                            row_id=entity_id,
+                        )
+                    )
                     row_layout.addWidget(
                         _build_initiative_commit_button(
                             row_widget,
@@ -9812,13 +11466,28 @@ class DungeonAppletWidget(QWidget):
         request_id: str | None = None,
     ) -> str | None:
         if self._online_mode != ONLINE_MODE_PLAYER or self._client_controller is None:
+            self._online_log_event(
+                "player_command_dropped",
+                action=str(action or ""),
+                reason="not_in_player_mode",
+            )
             return None
         if not self._player_network_actions_available():
+            self._online_log_event(
+                "player_command_dropped",
+                reason="network_unavailable",
+                **self._online_command_log_fields(action, payload),
+            )
             if (not silent) and unavailable_title and unavailable_message:
                 QMessageBox.warning(self, unavailable_title, unavailable_message)
             return None
         send_command = getattr(self._client_controller, "send_command", None)
         if not callable(send_command):
+            self._online_log_event(
+                "player_command_dropped",
+                reason="missing_send_command",
+                **self._online_command_log_fields(action, payload),
+            )
             return None
         outgoing_request_id = str(request_id or uuid.uuid4().hex)
         sent = send_command(
@@ -9827,7 +11496,17 @@ class DungeonAppletWidget(QWidget):
             request_id=outgoing_request_id,
         )
         if sent is False:
+            self._online_log_event(
+                "player_command_send_failed",
+                request_id=outgoing_request_id,
+                **self._online_command_log_fields(action, payload),
+            )
             return None
+        self._online_log_event(
+            "player_command_sent",
+            request_id=outgoing_request_id,
+            **self._online_command_log_fields(action, payload),
+        )
         return outgoing_request_id
 
     def _dispatch_player_command(
@@ -10483,6 +12162,13 @@ class DungeonAppletWidget(QWidget):
         x = float(scene_pos.x())
         y = float(scene_pos.y())
         dungeon_id = str(self._active_dungeon_id or "")
+        self._online_log_event(
+            "local_ping_placed",
+            x=x,
+            y=y,
+            dungeon_id=dungeon_id,
+            mode=str(self._online_mode or ""),
+        )
         if self._online_mode == ONLINE_MODE_DM_HOST and self._host_controller is not None:
             self._host_controller.broadcast_ping(x=x, y=y, dungeon_id=dungeon_id)
             return
@@ -10493,12 +12179,19 @@ class DungeonAppletWidget(QWidget):
         )
 
     def _on_network_ping_received(self, x: float, y: float, dungeon_id: str) -> None:
+        self._online_log_event(
+            "network_ping_received",
+            x=float(x),
+            y=float(y),
+            dungeon_id=str(dungeon_id or ""),
+        )
         self._show_network_ping(x, y, dungeon_id)
 
     def _append_chat_message(self, actor_name: str, text: str, system: bool = False) -> None:
         self._chat_panel.append_message(actor_name, text, system)
 
     def _append_server_log(self, line: str) -> None:
+        self._online_log_server_line(line)
         self._server_log_panel.append_log(line)
 
     def _update_connected_players(self, players: dict[str, str]) -> None:
@@ -10509,6 +12202,11 @@ class DungeonAppletWidget(QWidget):
             for player_id in removed_players:
                 self._release_loot_claim_reservations_for_player(player_id)
         self._connected_players = dict(players)
+        self._online_log_event(
+            "connected_players_updated",
+            player_count=int(len(self._connected_players)),
+            player_ids=sorted(str(player_id) for player_id in self._connected_players.keys()),
+        )
         registry_changed = False
         for player_id, player_name in self._connected_players.items():
             if self._remember_known_player(str(player_id or ""), str(player_name or "")):
@@ -10637,8 +12335,18 @@ class DungeonAppletWidget(QWidget):
             self._append_server_log("[WARN] Manual reconnect retry is not available right now.")
 
     def _on_client_reconnect_state_changed(self, state: dict) -> None:
+        if not self._is_active_client_signal_source():
+            return
         if self._online_mode != ONLINE_MODE_PLAYER:
             return
+        self._online_log_event(
+            "reconnect_state_changed",
+            status=str((state or {}).get("status") or ""),
+            attempt=max(0, int((state or {}).get("attempt") or 0)),
+            max_attempts=max(1, int((state or {}).get("max_attempts") or 1)),
+            next_delay_ms=max(0, int((state or {}).get("next_delay_ms") or 0)),
+            manual_retry_available=bool((state or {}).get("manual_retry_available")),
+        )
         status = str((state or {}).get("status") or "").strip().lower()
         attempt = max(0, int((state or {}).get("attempt") or 0))
         max_attempts = max(1, int((state or {}).get("max_attempts") or 1))
@@ -10696,8 +12404,11 @@ class DungeonAppletWidget(QWidget):
             self._suppress_network_sync = previous_suppress
 
     def _on_client_connected(self) -> None:
+        if not self._is_active_client_signal_source():
+            return
         self._suppress_client_disconnect_handler = False
         if self._online_mode == ONLINE_MODE_PLAYER:
+            self._online_log_event("client_transport_connected")
             self._hide_reconnect_status_dialog()
             self._append_server_log("[INFO] Connected to host")
             self._refresh_participant_presence_panel()
@@ -10803,12 +12514,19 @@ class DungeonAppletWidget(QWidget):
         return False
 
     def _on_client_disconnected(self) -> None:
+        if not self._is_active_client_signal_source():
+            return
         if self._suppress_client_disconnect_handler:
             self._suppress_client_disconnect_handler = False
             return
         was_ready = bool(self._player_connection_ready)
         was_waiting_for_snapshot = bool(self._awaiting_player_snapshot)
         self._debug_log(
+            "client_disconnected",
+            was_ready=bool(was_ready),
+            was_waiting_for_snapshot=bool(was_waiting_for_snapshot),
+        )
+        self._online_log_event(
             "client_disconnected",
             was_ready=bool(was_ready),
             was_waiting_for_snapshot=bool(was_waiting_for_snapshot),
@@ -10828,6 +12546,10 @@ class DungeonAppletWidget(QWidget):
             )
         self._player_connection_ready = False
         self._awaiting_player_snapshot = False
+        self._deferred_client_sync_events.clear()
+        self._deferred_client_sync_timer.stop()
+        self._last_local_player_scene_change_monotonic = 0.0
+        self._local_player_authoritative_state = None
         if isinstance(self._pending_player_state_update, dict):
             self._pending_player_state_update = None
             self._pending_player_state_update_request_id = ""
@@ -10912,6 +12634,8 @@ class DungeonAppletWidget(QWidget):
         self._apply_online_permissions()
 
     def _on_client_hello_ack(self, player_id: str, resumed: bool = False) -> None:
+        if not self._is_active_client_signal_source():
+            return
         if self._online_mode != ONLINE_MODE_PLAYER:
             if self._client_controller is not None:
                 self._client_controller.disconnect()
@@ -10924,7 +12648,16 @@ class DungeonAppletWidget(QWidget):
         self._local_player_id = player_id
         self._player_connection_ready = False
         self._awaiting_player_snapshot = True
+        self._deferred_client_sync_events.clear()
+        self._deferred_client_sync_timer.stop()
+        self._last_local_player_scene_change_monotonic = 0.0
+        self._local_player_authoritative_state = None
         self._debug_log("client_hello_ack", player_id=str(player_id or ""), resumed=bool(resumed))
+        self._online_log_event(
+            "client_hello_ack",
+            player_id=str(player_id or ""),
+            resumed=bool(resumed),
+        )
         self._append_chat_message(
             "System",
             (
@@ -10954,6 +12687,16 @@ class DungeonAppletWidget(QWidget):
             return False
         client = getattr(self._client_controller, "client", None)
         return bool(client is not None and client.is_connected())
+
+    def _is_active_client_signal_source(self) -> bool:
+        source = self.sender()
+        if source is None:
+            return True
+        controller = self._client_controller
+        if controller is None:
+            return False
+        client = getattr(controller, "client", None)
+        return bool(source is controller or (client is not None and source is client))
 
     def _participant_presence_entries(self) -> list[dict[str, object]]:
         if self._online_mode == ONLINE_MODE_DM_HOST:
@@ -11214,6 +12957,7 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode != ONLINE_MODE_DM_HOST:
             return
         self._normalize_all_dungeon_icons_for_online()
+        self._normalize_all_dungeon_images_for_online()
         if self._host_controller is None:
             return
         canonical_scene_signature = self._current_players_scene_signature()
@@ -11232,9 +12976,17 @@ class DungeonAppletWidget(QWidget):
                     linked_character_payload=False,
                     **self._debug_snapshot_summary(snapshot),
                 )
+                self._online_log_event(
+                    "host_snapshot_sent",
+                    target_player_id=str(player_id),
+                    transport="direct",
+                    linked_character_payload=False,
+                    **self._debug_snapshot_summary(snapshot),
+                )
                 try:
                     send_snapshot_to(str(player_id), snapshot)
                     self._send_snapshot_icon_assets_to_player(str(player_id), snapshot)
+                    self._send_snapshot_image_assets_to_player(str(player_id), snapshot)
                 except Exception as exc:
                     self._append_server_log(
                         f"[WARN] Failed to send snapshot to {player_id}: {exc}"
@@ -11254,6 +13006,13 @@ class DungeonAppletWidget(QWidget):
             linked_character_payload=True,
             **self._debug_snapshot_summary(snapshot),
         )
+        self._online_log_event(
+            "host_snapshot_sent",
+            target_player_id="*",
+            transport="broadcast",
+            linked_character_payload=True,
+            **self._debug_snapshot_summary(snapshot),
+        )
         try:
             broadcast_snapshot(snapshot)
         except Exception as exc:
@@ -11263,8 +13022,15 @@ class DungeonAppletWidget(QWidget):
         if self._host_controller is None:
             return
         self._normalize_all_dungeon_icons_for_online()
+        self._normalize_all_dungeon_images_for_online()
         snapshot = self._build_online_snapshot(for_player_id=player_id)
         self._debug_log(
+            "host_snapshot_requested",
+            target_player_id=str(player_id),
+            linked_character_payload=True,
+            **self._debug_snapshot_summary(snapshot),
+        )
+        self._online_log_event(
             "host_snapshot_requested",
             target_player_id=str(player_id),
             linked_character_payload=True,
@@ -11273,6 +13039,7 @@ class DungeonAppletWidget(QWidget):
         try:
             self._host_controller.send_snapshot_to(player_id, snapshot)
             self._send_snapshot_icon_assets_to_player(player_id, snapshot)
+            self._send_snapshot_image_assets_to_player(player_id, snapshot)
         except Exception as exc:
             self._append_server_log(f"[WARN] Failed to serve snapshot request: {exc}")
 
@@ -11306,6 +13073,36 @@ class DungeonAppletWidget(QWidget):
                 assets.append((entity_id, safe_cache_name))
         return assets
 
+    def _iter_snapshot_image_assets(self, snapshot: dict) -> list[tuple[str, str]]:
+        assets: list[tuple[str, str]] = []
+        dungeons_payload = snapshot.get("dungeons")
+        if not isinstance(dungeons_payload, list):
+            dungeons_payload = []
+        for dungeon_entry in dungeons_payload:
+            if not isinstance(dungeon_entry, dict):
+                continue
+            dungeon_state = dungeon_entry.get("state")
+            if not isinstance(dungeon_state, dict):
+                continue
+            items = dungeon_state.get("items")
+            if not isinstance(items, list):
+                continue
+            for item_data in items:
+                if not isinstance(item_data, dict):
+                    continue
+                if item_data.get("type") != "image":
+                    continue
+                image_id = str(item_data.get("image_id") or "")
+                image_ref = str(item_data.get("source_path") or "")
+                if not image_id or not image_ref.startswith(SESSION_IMAGE_PREFIX):
+                    continue
+                cache_name = image_ref[len(SESSION_IMAGE_PREFIX) :]
+                safe_cache_name = _sanitize_filename(Path(cache_name).name, "")
+                if not safe_cache_name:
+                    continue
+                assets.append((image_id, safe_cache_name))
+        return assets
+
     def _send_snapshot_icon_assets_to_player(self, player_id: str, snapshot: dict) -> None:
         if self._host_controller is None:
             return
@@ -11331,6 +13128,35 @@ class DungeonAppletWidget(QWidget):
                 content_b64=base64.b64encode(raw).decode("ascii"),
             )
 
+    def _send_snapshot_image_assets_to_player(self, player_id: str, snapshot: dict) -> None:
+        if self._host_controller is None:
+            return
+        send_image_asset = getattr(self._host_controller, "send_image_asset", None)
+        if not callable(send_image_asset):
+            return
+        sent_keys: set[tuple[str, str]] = set()
+        for image_id, cache_name in self._iter_snapshot_image_assets(snapshot):
+            dedupe_key = (image_id, cache_name)
+            if dedupe_key in sent_keys:
+                continue
+            sent_keys.add(dedupe_key)
+            cache_path = online_image_cache_dir(self._active_online_runtime_cache_id()) / cache_name
+            if not cache_path.exists():
+                continue
+            try:
+                raw = cache_path.read_bytes()
+            except Exception:
+                continue
+            payload_ok, _payload_error = _validate_online_scene_image_payload(raw)
+            if not payload_ok:
+                continue
+            send_image_asset(
+                player_id,
+                image_id=image_id,
+                filename=cache_name,
+                content_b64=base64.b64encode(raw).decode("ascii"),
+            )
+
     def _on_host_command_received(self, player_id: str, message: dict) -> None:
         if self._host_controller is None:
             return
@@ -11339,6 +13165,12 @@ class DungeonAppletWidget(QWidget):
         payload = message.get("payload")
         if not isinstance(payload, dict):
             payload = {}
+        self._online_log_event(
+            "host_command_received",
+            source_player_id=str(player_id or ""),
+            request_id=str(request_id or ""),
+            **self._online_command_log_fields(action, payload),
+        )
         if action == "upload_icon":
             self._handle_uploaded_icon(player_id, payload, request_id=request_id)
             return
@@ -11348,6 +13180,13 @@ class DungeonAppletWidget(QWidget):
             actor_id=player_id,
         )
         if not decision.allowed:
+            self._online_log_event(
+                "host_command_rejected",
+                source_player_id=str(player_id or ""),
+                request_id=str(request_id or ""),
+                action=action,
+                reason=str(decision.reason or ""),
+            )
             self._host_controller.send_command_result(
                 player_id,
                 ok=False,
@@ -11447,6 +13286,14 @@ class DungeonAppletWidget(QWidget):
                 dungeon_id=str(target_dungeon.get("id") or ""),
                 **self._debug_state_summary(state),
             )
+            self._online_log_event(
+                "host_state_update_received",
+                source_player_id=str(player_id),
+                request_id=str(request_id or ""),
+                changed=bool(changed),
+                dungeon_id=str(target_dungeon.get("id") or ""),
+                **self._debug_state_summary(state),
+            )
             if changed:
                 self._broadcast_player_state_patch_if_host(
                     player_id=player_id,
@@ -11491,6 +13338,13 @@ class DungeonAppletWidget(QWidget):
             ok=False,
             message=f"Unknown action: {action}",
             request_id=request_id,
+        )
+        self._online_log_event(
+            "host_command_rejected",
+            source_player_id=str(player_id or ""),
+            request_id=str(request_id or ""),
+            action=action,
+            reason="unknown_action",
         )
 
     def _merge_player_owned_entity_state(self, current: dict, incoming: dict) -> dict:
@@ -11818,6 +13672,7 @@ class DungeonAppletWidget(QWidget):
         self._refresh_scene_item_references()
         self._refresh_entity_duplicate_badges()
         self._apply_online_permissions()
+        self._on_selection_changed()
         return True
 
     def _extract_player_owned_state(self, state: dict, *, player_id: str) -> dict:
@@ -11895,7 +13750,9 @@ class DungeonAppletWidget(QWidget):
                 continue
             replacement_item = replacement_map.pop(key, None)
             if replacement_item is not None:
-                result_items.append(dict(replacement_item))
+                merged_item = dict(item_data)
+                merged_item.update(dict(replacement_item))
+                result_items.append(merged_item)
 
         remaining_items = [dict(item) for key, item in replacement_entries if key in replacement_map]
         if remaining_items:
@@ -11905,6 +13762,68 @@ class DungeonAppletWidget(QWidget):
         copied_state["items"] = result_items
         return copied_state
 
+    def _normalize_player_owned_state_for_authoritative_compare(self, state: dict) -> dict:
+        if not isinstance(state, dict):
+            return {"items": [], "fog": {"path": []}}
+        items = state.get("items")
+        if not isinstance(items, list):
+            return {"items": [], "fog": {"path": []}}
+        normalized_items: list[dict] = []
+        entity_keys = (
+            "type",
+            "entity_id",
+            "owner_player_id",
+            "pos",
+            "color",
+            "hp",
+            "max_hp",
+            "ac",
+            "strength",
+            "dexterity",
+            "constitution",
+            "intelligence",
+            "wisdom",
+            "charisma",
+            "actions",
+            "description",
+            "label",
+            "layer",
+            "z",
+            "size_w_cells",
+            "size_h_cells",
+            "lock_square",
+        )
+        stroke_keys = (
+            "type",
+            "stroke_id",
+            "entity_id",
+            "owner_player_id",
+            "pos",
+            "path",
+            "pen_color",
+            "pen_width",
+            "layer",
+            "z",
+        )
+        for item_data in items:
+            if not isinstance(item_data, dict):
+                continue
+            item_type = str(item_data.get("type") or "").strip()
+            if item_type == "entity":
+                normalized_entity = {key: item_data.get(key) for key in entity_keys if key in item_data}
+                color_value = normalized_entity.get("color")
+                if color_value is not None:
+                    normalized_entity["color"] = str(color_value).strip().lower()
+                normalized_items.append(normalized_entity)
+                continue
+            if item_type == "stroke":
+                normalized_stroke = {key: item_data.get(key) for key in stroke_keys if key in item_data}
+                pen_color = normalized_stroke.get("pen_color")
+                if pen_color is not None:
+                    normalized_stroke["pen_color"] = str(pen_color).strip().lower()
+                normalized_items.append(normalized_stroke)
+        return {"items": normalized_items, "fog": {"path": []}}
+
     def _overlay_local_player_authoritative_state(self, state: dict) -> dict:
         authoritative = self._local_player_authoritative_state
         local_player_id = str(self._local_player_id or "").strip()
@@ -11912,8 +13831,11 @@ class DungeonAppletWidget(QWidget):
             return state
         if not isinstance(state, dict) or not isinstance(authoritative, dict) or not local_player_id:
             return state
-        incoming_owned = self._extract_player_owned_state(state, player_id=local_player_id)
-        if self._scene_signature(incoming_owned) == self._scene_signature(authoritative):
+        incoming_owned = self._normalize_player_owned_state_for_authoritative_compare(
+            self._extract_player_owned_state(state, player_id=local_player_id)
+        )
+        authoritative_owned = self._normalize_player_owned_state_for_authoritative_compare(authoritative)
+        if self._scene_signature(incoming_owned) == self._scene_signature(authoritative_owned):
             self._local_player_authoritative_state = None
             return state
         return self._replace_player_owned_state_slice(
@@ -11936,6 +13858,12 @@ class DungeonAppletWidget(QWidget):
         self._last_host_scene_signature = ""
         self._debug_log(
             "host_player_state_patch_send",
+            target_player_id=str(player_id or ""),
+            dungeon_id=str(dungeon_id or ""),
+            **self._debug_state_summary(state),
+        )
+        self._online_log_event(
+            "host_player_state_patch_sent",
             target_player_id=str(player_id or ""),
             dungeon_id=str(dungeon_id or ""),
             **self._debug_state_summary(state),
@@ -12106,6 +14034,18 @@ class DungeonAppletWidget(QWidget):
         inventory_payload = payload.get("inventory")
         stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
         self._debug_log(
+            "host_character_sync_received",
+            source_player_id=str(player_id),
+            request_id=str(request_id or ""),
+            character_id=character_id,
+            sheet_id=sheet_id,
+            claim_id=claim_id,
+            inventory_bytes=self._debug_json_size_bytes(inventory_payload),
+            archive_supplied=bool(archive_supplied),
+            archive_bytes=len(str(payload.get("archive_b64") or "")),
+            stats_keys=",".join(sorted(str(key) for key in stats_payload.keys())),
+        )
+        self._online_log_event(
             "host_character_sync_received",
             source_player_id=str(player_id),
             request_id=str(request_id or ""),
@@ -12313,6 +14253,16 @@ class DungeonAppletWidget(QWidget):
             data=dict(claim_result_data) if isinstance(claim_result_data, dict) else None,
         )
         self._debug_log(
+            "host_character_sync_applied",
+            source_player_id=str(player_id),
+            request_id=str(request_id or ""),
+            character_id=character_id,
+            sheet_id=sheet_id,
+            updated_entities=int(updated),
+            inventory_bytes=self._debug_json_size_bytes(authoritative_payload),
+            archive_bytes=len(str(archive_b64 or "")),
+        )
+        self._online_log_event(
             "host_character_sync_applied",
             source_player_id=str(player_id),
             request_id=str(request_id or ""),
@@ -14368,12 +16318,39 @@ class DungeonAppletWidget(QWidget):
                 return dungeon, item_data
         return dungeon, None
 
+    def _find_image_state_entry(self, image_id: str, dungeon_id: str = "") -> tuple[dict | None, dict | None]:
+        target_dungeon_id = str(dungeon_id or self._active_dungeon_id or "")
+        dungeon = self._find_dungeon(target_dungeon_id)
+        if dungeon is None:
+            return None, None
+        state = dungeon.get("state")
+        if not isinstance(state, dict):
+            return dungeon, None
+        items = state.get("items")
+        if not isinstance(items, list):
+            return dungeon, None
+        for item_data in items:
+            if not isinstance(item_data, dict):
+                continue
+            if item_data.get("type") != "image":
+                continue
+            if str(item_data.get("image_id") or "") == image_id:
+                return dungeon, item_data
+        return dungeon, None
+
     def _collection_working_icon_dir(self, target_collection_path: Path | None = None) -> Path:
         if target_collection_path is not None:
             return collection_icon_assets_dir(target_collection_path)
         if self._collection_path is not None:
             return collection_icon_assets_dir(self._collection_path)
         return working_collection_icon_assets_dir(self._collection_name)
+
+    def _collection_working_image_dir(self, target_collection_path: Path | None = None) -> Path:
+        if target_collection_path is not None:
+            return collection_image_assets_dir(target_collection_path)
+        if self._collection_path is not None:
+            return collection_image_assets_dir(self._collection_path)
+        return working_collection_image_assets_dir(self._collection_name)
 
     def _normalize_icon_to_session_asset(
         self,
@@ -14402,6 +16379,34 @@ class DungeonAppletWidget(QWidget):
             except Exception:
                 pass
         return cache_name, f"{SESSION_ICON_PREFIX}{cache_name}", cache_path
+
+    def _normalize_image_to_session_asset(
+        self,
+        filename: str,
+        raw: bytes,
+        *,
+        persist_collection_copy: bool = False,
+    ) -> tuple[str, str, Path]:
+        ext = Path(filename).suffix.lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}:
+            ext = ".png"
+        digest = hashlib.sha256(raw).hexdigest()
+        cache_name = f"{digest}{ext}"
+        cache_dir = online_image_cache_dir(self._active_online_runtime_cache_id())
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / cache_name
+        if not cache_path.exists():
+            cache_path.write_bytes(raw)
+        if persist_collection_copy:
+            try:
+                working_dir = self._collection_working_image_dir()
+                working_dir.mkdir(parents=True, exist_ok=True)
+                working_path = working_dir / cache_name
+                if not working_path.exists():
+                    working_path.write_bytes(raw)
+            except Exception:
+                pass
+        return cache_name, f"{SESSION_IMAGE_PREFIX}{cache_name}", cache_path
 
     def _normalize_all_dungeon_icons_for_online(self) -> None:
         if self._online_mode != ONLINE_MODE_DM_HOST:
@@ -14492,6 +16497,107 @@ class DungeonAppletWidget(QWidget):
                 target_entity_state["icon_path"] = session_icon_ref
             self._host_controller.broadcast_icon_asset(
                 entity_id=entity_id,
+                filename=cache_name,
+                content_b64=base64.b64encode(raw).decode("ascii"),
+            )
+
+    def _normalize_all_dungeon_images_for_online(self) -> None:
+        if self._online_mode != ONLINE_MODE_DM_HOST:
+            return
+        for dungeon in self._dungeons:
+            state = dungeon.get("state")
+            if not isinstance(state, dict):
+                continue
+            items = state.get("items")
+            if not isinstance(items, list):
+                continue
+            for item_data in items:
+                if not isinstance(item_data, dict):
+                    continue
+                if item_data.get("type") != "image":
+                    continue
+                source_ref = str(item_data.get("source_path") or "")
+                if not source_ref or source_ref.startswith(SESSION_IMAGE_PREFIX):
+                    continue
+                source_path = Path(source_ref)
+                if not source_path.exists():
+                    continue
+                try:
+                    raw = source_path.read_bytes()
+                except Exception:
+                    continue
+                payload_ok, _payload_error = _validate_online_scene_image_payload(raw)
+                if not payload_ok:
+                    continue
+                cache_name, session_image_ref, cache_path = self._normalize_image_to_session_asset(
+                    source_path.name,
+                    raw,
+                    persist_collection_copy=True,
+                )
+                image_id = str(item_data.get("image_id") or "").strip()
+                if not image_id:
+                    image_id = uuid.uuid4().hex
+                    item_data["image_id"] = image_id
+                item_data["source_path"] = session_image_ref
+                active_id = str(self._active_dungeon_id or "")
+                if active_id and active_id == str(dungeon.get("id") or ""):
+                    target_image = self._find_scene_image_by_id(image_id)
+                    if target_image is not None:
+                        target_image.setData(ROLE_ENTITY_ID, image_id)
+                        target_image.source_path = str(cache_path)
+                        target_image.update()
+                broadcast_image_asset = (
+                    getattr(self._host_controller, "broadcast_image_asset", None)
+                    if self._host_controller is not None
+                    else None
+                )
+                if callable(broadcast_image_asset):
+                    broadcast_image_asset(
+                        image_id=image_id,
+                        filename=cache_name,
+                        content_b64=base64.b64encode(raw).decode("ascii"),
+                    )
+
+    def _sync_host_scene_images_for_online(self) -> None:
+        if self._online_mode != ONLINE_MODE_DM_HOST or self._host_controller is None:
+            return
+        for item in self.canvas.scene().items():
+            if not isinstance(item, DungeonImageItem):
+                continue
+            source_ref = str(item.source_path or "")
+            if not source_ref or source_ref.startswith(SESSION_IMAGE_PREFIX):
+                continue
+            source_path = Path(source_ref)
+            if not source_path.exists():
+                continue
+            try:
+                raw = source_path.read_bytes()
+            except Exception:
+                continue
+            payload_ok, _payload_error = _validate_online_scene_image_payload(raw)
+            if not payload_ok:
+                continue
+            cache_name, session_image_ref, cache_path = self._normalize_image_to_session_asset(
+                source_path.name,
+                raw,
+                persist_collection_copy=True,
+            )
+            image_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
+            if not image_id:
+                image_id = uuid.uuid4().hex
+                item.setData(ROLE_ENTITY_ID, image_id)
+            item.source_path = str(cache_path)
+            target_dungeon, target_image_state = self._find_image_state_entry(
+                image_id,
+                str(self._active_dungeon_id or ""),
+            )
+            if target_dungeon is not None and isinstance(target_image_state, dict):
+                target_image_state["source_path"] = session_image_ref
+            broadcast_image_asset = getattr(self._host_controller, "broadcast_image_asset", None)
+            if not callable(broadcast_image_asset):
+                continue
+            broadcast_image_asset(
+                image_id=image_id,
                 filename=cache_name,
                 content_b64=base64.b64encode(raw).decode("ascii"),
             )
@@ -16638,6 +18744,8 @@ class DungeonAppletWidget(QWidget):
                 return
 
     def _on_client_player_state_patch_received(self, payload: dict) -> None:
+        if not self._is_active_client_signal_source():
+            return
         if self._player_scene_interaction_active():
             self._debug_log("client_player_state_patch_deferred")
             self._queue_deferred_client_sync_event("patch", payload if isinstance(payload, dict) else {})
@@ -16645,6 +18753,8 @@ class DungeonAppletWidget(QWidget):
         self._process_client_player_state_patch_received(payload)
 
     def _on_client_snapshot_received(self, snapshot: dict) -> None:
+        if not self._is_active_client_signal_source():
+            return
         if self._player_scene_interaction_active():
             self._debug_log("client_snapshot_deferred")
             self._queue_deferred_client_sync_event("snapshot", snapshot if isinstance(snapshot, dict) else {})
@@ -16671,6 +18781,12 @@ class DungeonAppletWidget(QWidget):
         if target_dungeon is None:
             return
         self._debug_log(
+            "client_player_state_patch_received",
+            source_player_id=player_id,
+            dungeon_id=dungeon_id,
+            **self._debug_state_summary(state),
+        )
+        self._online_log_event(
             "client_player_state_patch_received",
             source_player_id=player_id,
             dungeon_id=dungeon_id,
@@ -16788,18 +18904,6 @@ class DungeonAppletWidget(QWidget):
                     == resolution_signature
                 ):
                     continue
-                if local_player_is_authority and isinstance(local_payload, dict):
-                    ok, message = self._request_push_local_character_link(
-                        character_id=character_id,
-                        entity_id=entity_id,
-                        dungeon_id=dungeon_id,
-                        fallback_sheet_id=sheet_id,
-                        fallback_sheet_name=sheet_name,
-                    )
-                    if message:
-                        level = "[INFO]" if ok else "[WARN]"
-                        self._append_server_log(f"{level} {message}")
-                    continue
                 if _in_test_env():
                     resolution_action = self._prompt_owned_linked_character_resolution(
                         sheet_id=sheet_id,
@@ -16887,6 +18991,21 @@ class DungeonAppletWidget(QWidget):
             initiative_active = bool(initiative_state_raw.get("active", False))
             initiative_collapsed = bool(initiative_state_raw.get("collapsed", False))
         self._debug_log(
+            "client_snapshot_received",
+            keys=",".join(sorted(str(k) for k in snapshot.keys())),
+            player_count=int(len(snapshot.get("players", {})))
+            if isinstance(snapshot.get("players"), dict)
+            else 0,
+            loot_pool_count=int(len(snapshot.get("loot_pool", [])))
+            if isinstance(snapshot.get("loot_pool"), list)
+            else 0,
+            initiative_active=initiative_active,
+            initiative_collapsed=initiative_collapsed,
+            initiative_player_rows=int(player_entry_count),
+            initiative_entity_rows=int(entity_entry_count),
+            **self._debug_snapshot_summary(snapshot),
+        )
+        self._online_log_event(
             "client_snapshot_received",
             keys=",".join(sorted(str(k) for k in snapshot.keys())),
             player_count=int(len(snapshot.get("players", {})))
@@ -17013,6 +19132,7 @@ class DungeonAppletWidget(QWidget):
                 self._update_active_dungeon_label()
                 self._apply_online_permissions()
                 self._restore_entity_selection(preserved_entity_id)
+                self._on_selection_changed()
                 self._update_loot_pool_badge()
                 if (
                     self._initiative_state.get("active")
@@ -17039,6 +19159,7 @@ class DungeonAppletWidget(QWidget):
             self._suppress_network_sync = False
         self._apply_online_permissions()
         self._restore_entity_selection(preserved_entity_id)
+        self._on_selection_changed()
         self._update_loot_pool_badge()
         if (
             self._initiative_state.get("active")
@@ -17055,6 +19176,8 @@ class DungeonAppletWidget(QWidget):
         self._flush_pending_player_state_update()
 
     def _on_client_command_result(self, result: dict) -> None:
+        if not self._is_active_client_signal_source():
+            return
         request_id = str(result.get("request_id") or "").strip()
         data = result.get("data")
         action = str(data.get("action") or "").strip() if isinstance(data, dict) else ""
@@ -17067,6 +19190,14 @@ class DungeonAppletWidget(QWidget):
             ok=bool(result.get("ok")),
             message=str(result.get("message") or ""),
         )
+        self._online_log_event(
+            "client_command_result",
+            request_id=request_id,
+            action=action,
+            ok=bool(result.get("ok")),
+            message=str(result.get("message") or ""),
+            claim_id=str(data.get("claim_id") or "").strip() if isinstance(data, dict) else "",
+        )
         conflict = data.get("conflict") if isinstance(data, dict) else None
         conflict_key = str(conflict.get("conflict_key") or "").strip() if isinstance(conflict, dict) else ""
         correlated_claim_id = ""
@@ -17078,6 +19209,14 @@ class DungeonAppletWidget(QWidget):
             claim_id = str(data.get("claim_id") or "").strip()
             if claim_id:
                 self._pending_loot_claim_finalizations.pop(claim_id, None)
+        if action == "link_character_entity" and request_id:
+            if request_id not in self._pending_link_entity_requests:
+                self._append_server_log("[WARN] Ignored stale link-character result from an inactive request.")
+                return
+        if action == "unlink_character_entity" and request_id:
+            if request_id not in self._pending_unlink_entity_requests:
+                self._append_server_log("[WARN] Ignored stale unlink-character result from an inactive request.")
+                return
         if action == "state_update" and request_id:
             if request_id == self._pending_player_state_update_request_id:
                 self._pending_player_state_update_request_id = ""
@@ -17281,6 +19420,14 @@ class DungeonAppletWidget(QWidget):
         self._append_server_log(f"[WARN] {message}")
 
     def _on_client_icon_asset(self, entity_id: str, filename: str, content_b64: str) -> None:
+        if not self._is_active_client_signal_source():
+            return
+        self._online_log_event(
+            "client_icon_asset_received",
+            entity_id=str(entity_id or ""),
+            filename=str(filename or ""),
+            content_b64_bytes=len(str(content_b64 or "")),
+        )
         try:
             raw = base64.b64decode(content_b64.encode("ascii"), validate=True)
         except Exception:
@@ -17297,9 +19444,48 @@ class DungeonAppletWidget(QWidget):
         target_entity = self._find_entity_by_id(entity_id)
         if target_entity is None:
             return
-        target_entity.setData(ROLE_ICON, f"{SESSION_ICON_PREFIX}{safe_filename}")
+        expected_icon_ref = f"{SESSION_ICON_PREFIX}{safe_filename}"
+        if str(target_entity.data(ROLE_ICON) or "").strip() != expected_icon_ref:
+            return
+        target_entity.setData(ROLE_ICON, expected_icon_ref)
         target_entity.icon_path = str(cache_path)
         target_entity.update()
+
+    def _on_client_image_asset(self, image_id: str, filename: str, content_b64: str) -> None:
+        if not self._is_active_client_signal_source():
+            return
+        self._online_log_event(
+            "client_image_asset_received",
+            image_id=str(image_id or ""),
+            filename=str(filename or ""),
+            content_b64_bytes=len(str(content_b64 or "")),
+        )
+        try:
+            raw = base64.b64decode(content_b64.encode("ascii"), validate=True)
+        except Exception:
+            return
+        payload_ok, _payload_error = _validate_online_scene_image_payload(raw)
+        if not payload_ok:
+            return
+        cache_dir = online_image_cache_dir(self._active_online_runtime_cache_id())
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        safe_filename = _sanitize_filename(Path(filename).name, "image.png")
+        cache_path = cache_dir / safe_filename
+        if not cache_path.exists():
+            cache_path.write_bytes(raw)
+        target_image = self._find_scene_image_by_id(image_id)
+        if target_image is None:
+            return
+        expected_image_ref = f"{SESSION_IMAGE_PREFIX}{safe_filename}"
+        if str(target_image.source_path or "").strip() != expected_image_ref:
+            return
+        pixmap = QPixmap(str(cache_path))
+        if pixmap.isNull():
+            return
+        target_image.setData(ROLE_ENTITY_ID, image_id)
+        target_image.source_path = expected_image_ref
+        target_image._pixmap = pixmap
+        target_image.update()
 
     def _find_entity_by_id(self, entity_id: str) -> EntityItem | None:
         if not entity_id:
@@ -17308,6 +19494,17 @@ class DungeonAppletWidget(QWidget):
             if not isinstance(item, EntityItem):
                 continue
             if (item.data(ROLE_ENTITY_ID) or "") == entity_id:
+                return item
+        return None
+
+    def _find_scene_image_by_id(self, image_id: str) -> DungeonImageItem | None:
+        clean_image_id = str(image_id or "").strip()
+        if not clean_image_id:
+            return None
+        for item in self.canvas.scene().items():
+            if not isinstance(item, DungeonImageItem):
+                continue
+            if str(item.data(ROLE_ENTITY_ID) or "").strip() == clean_image_id:
                 return item
         return None
 
@@ -17340,6 +19537,17 @@ class DungeonAppletWidget(QWidget):
                 return ""
             return str(online_icon_cache_dir(self._active_online_runtime_cache_id()) / safe_cache_name)
         return icon_ref_or_path
+
+    def _resolve_runtime_image_path(self, image_ref_or_path: str) -> str:
+        if not image_ref_or_path:
+            return ""
+        if image_ref_or_path.startswith(SESSION_IMAGE_PREFIX):
+            cache_name = image_ref_or_path[len(SESSION_IMAGE_PREFIX) :]
+            safe_cache_name = _sanitize_filename(Path(cache_name).name, "")
+            if not safe_cache_name:
+                return ""
+            return str(online_image_cache_dir(self._active_online_runtime_cache_id()) / safe_cache_name)
+        return image_ref_or_path
 
     def _on_deferred_icon_selected(self, filename: str) -> None:
         if self._online_mode != ONLINE_MODE_PLAYER or self._client_controller is None:
@@ -17411,6 +19619,7 @@ class DungeonAppletWidget(QWidget):
             self._host_controller.stop()
         if self._client_controller is not None:
             self._client_controller.disconnect()
+        self._close_online_session_log(reason="widget_closed")
         self._clear_online_runtime_cache(current_runtime_cache_id)
         self._preview_timer.stop()
         self._host_scene_sync_timer.stop()
@@ -17437,6 +19646,8 @@ class DungeonAppletWidget(QWidget):
             "known_players": {},
             "last_player_name": "",
             "last_dm_name": "",
+            "last_join_host_ip": "",
+            "last_host_collection_path": "",
             "autosave_enabled": False,
         }
         path = self._local_profile_path()
@@ -17502,6 +19713,8 @@ class DungeonAppletWidget(QWidget):
             payload["last_dm_name"] = str(
                 getattr(self, "_local_dm_name", "") or payload.get("last_dm_name") or ""
             )
+            payload["last_join_host_ip"] = str(payload.get("last_join_host_ip") or "")
+            payload["last_host_collection_path"] = str(payload.get("last_host_collection_path") or "")
             payload["autosave_enabled"] = bool(getattr(self, "_autosave_enabled", False))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -17670,6 +19883,8 @@ class DungeonAppletWidget(QWidget):
 
     def _debug_log(self, event: str, **fields: object) -> None:
         if not getattr(self, "_debug_log_enabled", False):
+            return
+        if not getattr(self, "_runtime_logging_enabled", True):
             return
         payload: dict[str, object] = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
@@ -17845,6 +20060,53 @@ class DungeonAppletWidget(QWidget):
                         "initiative_input_mouse_focus",
                         target=self._debug_widget_ref(watched),
                     )
+        if watched_in_tree and isinstance(event, QMouseEvent):
+            watched_widget = watched if isinstance(watched, QWidget) else None
+            row_widget = self._find_initiative_row_widget(watched_widget)
+            if (
+                self._online_mode == ONLINE_MODE_DM_HOST
+                and row_widget is not None
+                and not isinstance(watched_widget, (QLineEdit, QAbstractButton, QToolButton))
+            ):
+                row_kind = str(row_widget.property("initiative_kind") or "").strip()
+                row_id = str(row_widget.property("initiative_id") or "").strip()
+                if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                    if row_kind and row_id:
+                        self._initiative_drag_source = (row_kind, row_id)
+                        self._initiative_drag_started = False
+                        self._initiative_drag_origin = event.globalPosition().toPoint()
+                elif (
+                    event_type == QEvent.Type.MouseMove
+                    and self._initiative_drag_source is not None
+                    and event.buttons() & Qt.MouseButton.LeftButton
+                ):
+                    if (
+                        event.globalPosition().toPoint() - self._initiative_drag_origin
+                    ).manhattanLength() >= QApplication.startDragDistance():
+                        self._initiative_drag_started = True
+                elif event_type == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                    drag_source = self._initiative_drag_source
+                    drag_started = bool(self._initiative_drag_started)
+                    self._initiative_drag_source = None
+                    self._initiative_drag_started = False
+                    if drag_source is not None and drag_started:
+                        target_row = self._find_initiative_row_widget(
+                            QApplication.widgetAt(event.globalPosition().toPoint())
+                        )
+                        if target_row is not None:
+                            target_kind = str(target_row.property("initiative_kind") or "").strip()
+                            target_id = str(target_row.property("initiative_id") or "").strip()
+                            source_kind, source_id = drag_source
+                            if (
+                                source_kind
+                                and source_id
+                                and target_kind == source_kind
+                                and target_id
+                                and target_id != source_id
+                                and self._move_initiative_row(source_kind, source_id, target_id)
+                            ):
+                                event.accept()
+                                return True
         loot_pool_list = getattr(self, "_loot_pool_list", None)
         loot_pool_viewport = getattr(self, "_loot_pool_viewport", None)
         if loot_pool_list is not None and loot_pool_viewport is None:
@@ -18015,6 +20277,15 @@ class DungeonAppletWidget(QWidget):
         self.selection_widget.refresh_overlay_positions()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        if (
+            event.key() == Qt.Key.Key_L
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self._set_runtime_logging_enabled(
+                not bool(getattr(self, "_runtime_logging_enabled", True))
+            )
+            event.accept()
+            return
         focus_widget = QApplication.focusWidget()
         if (
             isinstance(focus_widget, QLineEdit)
@@ -18056,6 +20327,14 @@ class DungeonAppletWidget(QWidget):
                 )
                 event.accept()
                 return
+        if (
+            event.key() == Qt.Key.Key_R
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and self._online_mode == ONLINE_MODE_PLAYER
+        ):
+            self._reload_online_player_session()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_L:
             if self._online_mode == ONLINE_MODE_PLAYER:
                 event.accept()
@@ -18064,6 +20343,31 @@ class DungeonAppletWidget(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def _reload_online_player_session(self) -> None:
+        if self._online_mode != ONLINE_MODE_PLAYER:
+            return
+        host_ip = str(self._host_ip or "").strip()
+        player_name = str(self._local_player_name or "").strip()
+        try:
+            host_port = int(self._host_port or 0)
+        except (TypeError, ValueError):
+            host_port = 0
+        if not host_ip or host_port <= 0 or not player_name:
+            self._append_server_log("[WARN] Reload unavailable: join details are incomplete.")
+            return
+        controller_persistent_id = ""
+        if self._client_controller is not None:
+            controller_persistent_id = str(
+                getattr(self._client_controller, "_connect_persistent_player_id", "") or ""
+            ).strip()
+        self._append_server_log("[INFO] Reloading player session via fresh rejoin request.")
+        self.join_online_session(
+            host_ip,
+            host_port,
+            player_name,
+            persistent_player_id=controller_persistent_id or str(self._persistent_local_player_id or ""),
+        )
 
     def _toggle_collection_panel(self) -> None:
         if self._collection_shell is None or self._collection_anim is None:
@@ -18531,8 +20835,6 @@ class DungeonAppletWidget(QWidget):
         label, hp_max, hp, ac, abilities = self._normalized_linked_stats(stats, fallback_name=sheet_name)
         if label:
             entity.setData(ROLE_LABEL, label)
-            if hasattr(self.inspector, "name_edit") and self.inspector.name_edit is not None:
-                self.inspector.name_edit.setText(label)
         if hp_max is not None and hp_max > 0:
             entity._max_hp = hp_max
             entity.hp = hp if hp is not None else hp_max
@@ -19398,9 +21700,14 @@ class DungeonAppletWidget(QWidget):
                 )
                 continue
             if isinstance(item, DungeonImageItem):
+                image_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
+                if not image_id:
+                    image_id = uuid.uuid4().hex
+                    item.setData(ROLE_ENTITY_ID, image_id)
                 items_data.append(
                     {
                         "type": "image",
+                        "image_id": image_id,
                         "source_path": item.source_path,
                         "pos": [float(item.pos().x()), float(item.pos().y())],
                         "width": float(item._rect.width()),
@@ -19517,14 +21824,15 @@ class DungeonAppletWidget(QWidget):
                 pos = item_data.get("pos", [0.0, 0.0])
                 width = max(20, int(float(item_data.get("width", 120))))
                 height = max(20, int(float(item_data.get("height", 90))))
-                source_path = str(item_data.get("source_path", "") or "")
-                pixmap = QPixmap(source_path) if source_path else QPixmap()
+                source_ref = str(item_data.get("source_path", "") or "")
+                runtime_source_path = self._resolve_runtime_image_path(source_ref)
+                pixmap = QPixmap(runtime_source_path) if runtime_source_path else QPixmap()
                 if pixmap.isNull():
                     pixmap = DungeonImageItem._placeholder_pixmap(width, height)
                 image_item = DungeonImageItem(
                     pixmap,
                     QPointF(float(pos[0]), float(pos[1])),
-                    source_path=source_path,
+                    source_path=source_ref or runtime_source_path,
                 )
                 image_item.set_rect_size(width, height)
                 image_item.keep_aspect = bool(item_data.get("keep_aspect", False))
@@ -19533,6 +21841,7 @@ class DungeonAppletWidget(QWidget):
                     image_item._aspect_ratio = aspect_ratio
                 image_item.setData(ROLE_KIND, "image")
                 image_item.setData(ROLE_LAYER, layer)
+                image_item.setData(ROLE_ENTITY_ID, item_data.get("image_id") or uuid.uuid4().hex)
                 image_item.setZValue(float(item_data.get("z", _default_item_z("image", layer))))
                 self._bind_image_resize_undo(scene, image_item)
                 scene.addItem(image_item)
@@ -19782,6 +22091,7 @@ class DungeonAppletWidget(QWidget):
         self._refresh_entity_duplicate_badges()
         if self._online_mode == ONLINE_MODE_DM_HOST:
             self._sync_host_scene_icons_for_online()
+            self._sync_host_scene_images_for_online()
             self._seed_initiative_state()
             self._render_initiative_overlay()
         self._mark_active_dungeon_dirty()
@@ -19913,6 +22223,45 @@ class DungeonAppletWidget(QWidget):
             item_data["icon_path"] = asset_name
         return state
 
+    def _materialize_state_images_for_archive(self, state: dict, assets: dict[str, bytes]) -> dict:
+        if not isinstance(state, dict):
+            return state
+        items = state.get("items")
+        if not isinstance(items, list):
+            return state
+        for item_data in items:
+            if not isinstance(item_data, dict):
+                continue
+            if item_data.get("type") != "image":
+                continue
+            source_ref = str(item_data.get("source_path") or "")
+            if not source_ref:
+                continue
+            runtime_path = (
+                self._resolve_runtime_image_path(source_ref)
+                if source_ref.startswith(SESSION_IMAGE_PREFIX)
+                else source_ref
+            )
+            image_file = Path(runtime_path)
+            if not image_file.exists():
+                continue
+            try:
+                raw = image_file.read_bytes()
+            except Exception:
+                continue
+            payload_ok, _payload_error = _validate_online_scene_image_payload(raw)
+            if not payload_ok:
+                continue
+            ext = image_file.suffix.lower()
+            if ext not in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}:
+                ext = ".png"
+            digest = hashlib.sha256(raw).hexdigest()
+            filename = f"{digest}{ext}"
+            asset_name = f"assets/images/{filename}"
+            assets.setdefault(asset_name, raw)
+            item_data["source_path"] = asset_name
+        return state
+
     def _sync_collection_icon_assets_dir(self, icon_dir: Path, assets: dict[str, bytes]) -> None:
         expected_assets: dict[str, bytes] = {}
         for asset_name, raw in assets.items():
@@ -19958,6 +22307,51 @@ class DungeonAppletWidget(QWidget):
             except Exception:
                 return
 
+    def _sync_collection_image_assets_dir(self, image_dir: Path, assets: dict[str, bytes]) -> None:
+        expected_assets: dict[str, bytes] = {}
+        for asset_name, raw in assets.items():
+            if not str(asset_name).startswith("assets/images/"):
+                continue
+            image_name = _sanitize_filename(Path(asset_name).name, "")
+            if not image_name:
+                continue
+            if not isinstance(raw, bytes) or not raw:
+                continue
+            expected_assets[image_name] = raw
+
+        if expected_assets:
+            image_dir.mkdir(parents=True, exist_ok=True)
+            for image_name, raw in expected_assets.items():
+                target_path = image_dir / image_name
+                if target_path.exists():
+                    try:
+                        if target_path.read_bytes() == raw:
+                            continue
+                    except Exception:
+                        pass
+                target_path.write_bytes(raw)
+
+        expected_names = set(expected_assets.keys())
+        if image_dir.exists():
+            for stale_path in list(image_dir.iterdir()):
+                if stale_path.is_dir():
+                    shutil.rmtree(stale_path, ignore_errors=True)
+                    continue
+                if stale_path.name in expected_names:
+                    continue
+                try:
+                    stale_path.unlink()
+                except Exception:
+                    continue
+            try:
+                if not any(image_dir.iterdir()):
+                    image_dir.rmdir()
+                    parent = image_dir.parent
+                    if parent.exists() and not any(parent.iterdir()):
+                        parent.rmdir()
+            except Exception:
+                return
+
     def _build_collection_payload(self) -> tuple[dict, dict[str, bytes]]:
         self._save_active_dungeon_state()
         assets: dict[str, bytes] = {}
@@ -19966,6 +22360,7 @@ class DungeonAppletWidget(QWidget):
             dungeon_state = dungeon.get("state") or self._blank_dungeon_state()
             state_for_save = json.loads(json.dumps(dungeon_state))
             state_for_save = self._materialize_state_icons_for_archive(state_for_save, assets)
+            state_for_save = self._materialize_state_images_for_archive(state_for_save, assets)
             dungeons_payload.append(
                 {
                     "id": dungeon["id"],
@@ -20031,6 +22426,10 @@ class DungeonAppletWidget(QWidget):
             self._sync_collection_icon_assets_dir(self._collection_working_icon_dir(path), assets)
         except Exception as exc:
             print(f"[WARN] Failed to synchronize collection icon assets for {path}: {exc}", file=sys.stderr)
+        try:
+            self._sync_collection_image_assets_dir(self._collection_working_image_dir(path), assets)
+        except Exception as exc:
+            print(f"[WARN] Failed to synchronize collection image assets for {path}: {exc}", file=sys.stderr)
         if commit_as_primary:
             self._collection_path = path
             for dungeon in self._dungeons:
@@ -20088,8 +22487,14 @@ class DungeonAppletWidget(QWidget):
         except Exception:
             icon_assets = []
         icon_bytes_by_asset: dict[str, bytes] = {}
+        image_bytes_by_asset: dict[str, bytes] = {}
         for asset_name in icon_assets:
             if not str(asset_name).startswith("assets/icons/"):
+                if not str(asset_name).startswith("assets/images/"):
+                    continue
+                raw = read_dmt_package_asset(path, asset_name)
+                if raw:
+                    image_bytes_by_asset[str(asset_name)] = raw
                 continue
             raw = read_dmt_package_asset(path, asset_name)
             if raw:
@@ -20097,6 +22502,8 @@ class DungeonAppletWidget(QWidget):
         try:
             icons_dir = self._collection_working_icon_dir(path)
             self._sync_collection_icon_assets_dir(icons_dir, icon_bytes_by_asset)
+            images_dir = self._collection_working_image_dir(path)
+            self._sync_collection_image_assets_dir(images_dir, image_bytes_by_asset)
         except Exception as exc:
             QMessageBox.critical(self, "Load Failed", str(exc))
             return False
@@ -20117,15 +22524,25 @@ class DungeonAppletWidget(QWidget):
                     for item_data in items:
                         if not isinstance(item_data, dict):
                             continue
-                        if item_data.get("type") != "entity":
+                        item_type = str(item_data.get("type") or "")
+                        if item_type == "entity":
+                            icon_ref = str(item_data.get("icon_path") or "")
+                            if not icon_ref.startswith("assets/icons/"):
+                                continue
+                            icon_name = Path(icon_ref).name
+                            runtime_icon = self._collection_working_icon_dir(path) / icon_name
+                            if runtime_icon.exists():
+                                item_data["icon_path"] = str(runtime_icon)
                             continue
-                        icon_ref = str(item_data.get("icon_path") or "")
-                        if not icon_ref.startswith("assets/icons/"):
+                        if item_type != "image":
                             continue
-                        icon_name = Path(icon_ref).name
-                        runtime_icon = self._collection_working_icon_dir(path) / icon_name
-                        if runtime_icon.exists():
-                            item_data["icon_path"] = str(runtime_icon)
+                        image_ref = str(item_data.get("source_path") or "")
+                        if not image_ref.startswith("assets/images/"):
+                            continue
+                        image_name = Path(image_ref).name
+                        runtime_image = self._collection_working_image_dir(path) / image_name
+                        if runtime_image.exists():
+                            item_data["source_path"] = str(runtime_image)
             dungeons.append(
                 {
                     "id": dungeon_id,

@@ -13,6 +13,7 @@ import traceback
 from typing import Callable, Iterable, List, Optional, Sequence
 import logging
 
+from bundled_data import data_path
 from save_paths import default_dnd_save_dir, items_dir
 from item_file_format import (
     ITEM_FILE_EXTENSION,
@@ -622,17 +623,9 @@ def _equipment_silhouette_pixmap() -> QPixmap:
 
 
 def default_sheet_pdf_path() -> Optional[str]:
-    assets_dir = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", *DEFAULT_PDF_DIR_PARTS)
-    )
-    if not os.path.isdir(assets_dir):
-        return None
-    preferred = os.path.join(assets_dir, DEFAULT_PDF_NAME)
-    if os.path.exists(preferred):
-        return preferred
-    for filename in sorted(os.listdir(assets_dir)):
-        if filename.lower().endswith(".pdf"):
-            return os.path.join(assets_dir, filename)
+    preferred = data_path(DEFAULT_PDF_NAME)
+    if preferred.exists():
+        return str(preferred)
     return None
 
 

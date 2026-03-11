@@ -1408,6 +1408,7 @@ class ImagePlacingState(CanvasState):
         if event.button() == Qt.MouseButton.LeftButton and self.pixmap:
             pos = _snap_point(scene_pos, self.canvas.grid_size)
             img_item = DungeonImageItem(self.pixmap, pos, source_path=self.file_path or "")
+            img_item.setData(ROLE_ENTITY_ID, uuid.uuid4().hex)
             
             # Layer assignment
             current_layer = getattr(self.canvas, "_current_layer", LAYER_FG)

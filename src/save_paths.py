@@ -169,6 +169,10 @@ def online_icon_cache_dir(session_id: str) -> Path:
     return online_session_dir(session_id) / "cache" / "icons"
 
 
+def online_image_cache_dir(session_id: str) -> Path:
+    return online_session_dir(session_id) / "cache" / "images"
+
+
 def online_media_cache_dir(session_id: str) -> Path:
     return online_session_dir(session_id) / "cache" / "media"
 
@@ -222,9 +226,20 @@ def collection_icon_assets_dir(collection_path: Path) -> Path:
     return path.parent / f"{stem}_assets" / "icons"
 
 
+def collection_image_assets_dir(collection_path: Path) -> Path:
+    path = Path(collection_path)
+    stem = _safe_component(path.stem, "collection")
+    return path.parent / f"{stem}_assets" / "images"
+
+
 def working_collection_icon_assets_dir(collection_name: str) -> Path:
     safe_name = _safe_component(collection_name, "collection")
     return dungeon_collections_dir() / "_working_assets" / safe_name / "icons"
+
+
+def working_collection_image_assets_dir(collection_name: str) -> Path:
+    safe_name = _safe_component(collection_name, "collection")
+    return dungeon_collections_dir() / "_working_assets" / safe_name / "images"
 
 
 def clear_online_icon_cache(session_id: str) -> None:
