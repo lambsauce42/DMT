@@ -5,10 +5,11 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor, QKeyEvent
 from PySide6.QtWidgets import QLabel, QTextEdit, QVBoxLayout, QWidget
 
+from save_paths import debug_logs_dir
 from terminal_logic import TerminalSession
 
 
-_DEBUG_LOG_PATH = Path(__file__).resolve().parents[3] / "debug" / "terminal_widget.log"
+_DEBUG_LOG_PATH = debug_logs_dir() / "terminal_widget.log"
 
 
 class TerminalWidget(QWidget):

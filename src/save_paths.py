@@ -189,6 +189,10 @@ def runtime_cache_root() -> Path:
     return dnd_saves_dir() / "cache"
 
 
+def debug_logs_dir() -> Path:
+    return dnd_saves_dir() / "debug"
+
+
 def character_cache_dir() -> Path:
     return runtime_cache_root() / "characters"
 

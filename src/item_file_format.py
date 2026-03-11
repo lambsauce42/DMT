@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from asset_paths import item_icon_dirs
 from dmt_package import (
     read_dmt_package_asset,
     read_dmt_package_info,
@@ -22,10 +23,7 @@ ITEM_FILE_FORMAT = "dmtitem.v2"
 ITEM_FILE_PATTERNS = ("*.dmtitem",)
 ITEM_ICON_ASSET_NAME = "assets/icon"
 
-_ITEM_ICON_DIRS = (
-    Path(__file__).resolve().parent.parent / "assets" / "itemicons",
-    Path(__file__).resolve().parent.parent / "assets" / "iconitems",
-)
+_ITEM_ICON_DIRS = item_icon_dirs()
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ import math
 import numpy as np
 import os
 
+from asset_paths import item_icon_dirs
 
 def _resolve_font_path(candidates: list[str]) -> Optional[str]:
     for path in candidates:
@@ -79,10 +80,7 @@ RARITY_COLORS: Dict[str, tuple[int, int, int]] = {
     "artifact": (70, 235, 220),
 }
 
-_ITEM_ICON_DIRS = [
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "itemicons")),
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "iconitems")),
-]
+_ITEM_ICON_DIRS = [str(path) for path in item_icon_dirs()]
 _ICON_BG_CACHE: Dict[tuple[tuple[int, int, int], int, float], Image.Image] = {}
 
 

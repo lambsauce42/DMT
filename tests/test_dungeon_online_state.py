@@ -9,9 +9,9 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QGraphicsScene, QLabel, QLineEdit, QListWidget, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QGraphicsScene, QLabel, QLineEdit, QListWidget, QPushButton
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -6413,12 +6413,18 @@ def test_dm_initiative_nat_buttons_apply_literal_values_without_sorting(dungeon_
 
     assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 20
     assert list(dungeon_widget._initiative_state["player_entries"].keys()) == initial_order
+    refreshed_edit = dungeon_widget._find_initiative_input("player", "player-1:e1")
+    assert refreshed_edit is not None
+    assert refreshed_edit.text() == "nat 20"
 
     qtbot.mouseClick(nat1_button, Qt.MouseButton.LeftButton)
     QApplication.processEvents()
 
     assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 1
     assert list(dungeon_widget._initiative_state["player_entries"].keys()) == initial_order
+    refreshed_edit = dungeon_widget._find_initiative_input("player", "player-1:e1")
+    assert refreshed_edit is not None
+    assert refreshed_edit.text() == "nat 1"
 
 
 def test_dm_initiative_value_edit_does_not_auto_sort_until_requested(dungeon_widget):
@@ -6479,6 +6485,85 @@ def test_dm_initiative_drag_reorders_rows_within_same_group(dungeon_widget):
         "player-2:e2",
         "player-1:e1",
     ]
+
+
+def test_dm_initiative_entity_rows_use_duplicate_token_badge_names(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    for entity_id in ("dragon-a", "dragon-b"):
+        entity = EntityItem(QPointF(0, 0))
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_LABEL, "Dragon")
+        entity.setData(ROLE_OWNER_PLAYER_ID, "")
+        dungeon_widget.canvas.scene().addItem(entity)
+
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._render_initiative_overlay()
+
+    labels = {
+        label.text()
+        for label in dungeon_widget._initiative_rows_root.findChildren(QLabel)
+        if label.text().startswith("Entity:")
+    }
+    assert "Entity: Dragon 1" in labels
+    assert "Entity: Dragon 2" in labels
+
+
+def test_dm_can_request_initiative_multiple_times_and_clears_previous_values(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice"}
+    entity = EntityItem(QPointF(0, 0))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_LABEL, "Wolf")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._broadcast_snapshot_if_host = lambda: None
+
+    dungeon_widget._request_initiative_round(clear_existing=True, source="test-first")
+    dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] = 18
+    dungeon_widget._collapse_initiative_overlay(force=True)
+
+    dungeon_widget._request_initiative_round(clear_existing=True, source="test-second")
+
+    assert dungeon_widget._initiative_state["active"] is True
+    assert dungeon_widget._initiative_state["collapsed"] is False
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] is None
+    assert not dungeon_widget._initiative_overlay.isHidden()
+
+
+def test_initiative_drag_ghost_shows_and_hides_for_dm_rows(dungeon_widget):
+    dungeon_widget.show()
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice", "player-2": "Bob"}
+    for entity_id, owner_id, label in (("e1", "player-1", "Wolf"), ("e2", "player-2", "Bear")):
+        entity = EntityItem(QPointF(0, 0))
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_LABEL, label)
+        entity.setData(ROLE_OWNER_PLAYER_ID, owner_id)
+        dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._render_initiative_overlay()
+    QApplication.processEvents()
+
+    row_widget = next(
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QFrame)
+        if bool(candidate.property("initiative_row"))
+        and str(candidate.property("initiative_kind") or "") == "player"
+        and str(candidate.property("initiative_id") or "") == "player-1:e1"
+    )
+    global_center = row_widget.mapToGlobal(row_widget.rect().center())
+
+    dungeon_widget._start_initiative_drag_ghost(row_widget, global_center)
+
+    assert dungeon_widget._initiative_drag_ghost is not None
+    assert not dungeon_widget._initiative_drag_ghost.isHidden()
+    assert dungeon_widget._initiative_drag_source_widget is row_widget
+
+    dungeon_widget._update_initiative_drag_ghost(global_center + QPoint(18, 14))
+    dungeon_widget._hide_initiative_drag_ghost()
+
+    assert dungeon_widget._initiative_drag_ghost.isHidden()
+    assert dungeon_widget._initiative_drag_source_widget is None
 
 
 def test_player_mode_shows_initiative_reopen_button_only_with_visible_rows(dungeon_widget):

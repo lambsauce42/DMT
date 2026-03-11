@@ -48,13 +48,14 @@ from PySide6.QtWidgets import (
     QInputDialog,
 )
 
+from asset_paths import icons_dir
 from ui.widgets import PlusMinusSpinBox
 from dmt_package import read_dmt_package_info, write_dmt_package
 from item_file_format import item_id_from_payload, list_item_file_paths, load_item_payload
 from save_paths import default_dnd_save_dir, items_dir
 from unique_ids import generate_named_object_id
 
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
 
 try:

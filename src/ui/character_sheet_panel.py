@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from asset_paths import icons_dir
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal, QSize
 from PySide6.QtGui import QKeySequence, QShortcut, QIcon
 from PySide6.QtWidgets import (
@@ -23,7 +24,7 @@ from ui.widgets import PlusMinusSpinBox
 from viewer.pdfium_viewer_widget import PdfiumViewerWidget
 
 
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 
 
 class PageSpinBox(QSpinBox):

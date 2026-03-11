@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QGraphicsRectItem,
 )
 
+from asset_paths import icon_path
 from dungeon_constants import *
 from dungeon_commands import (
     CreateItemCommand,
@@ -1187,12 +1188,10 @@ class EraserState(CanvasState):
 
     def on_enter(self):
         # Use eraser icon as cursor
-        import os
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(base_dir, "..", "assets", "icons", "eraser.svg")
-        if os.path.exists(icon_path):
+        eraser_icon_path = icon_path("eraser.svg")
+        if eraser_icon_path.exists():
             from PySide6.QtGui import QCursor, QPixmap
-            pixmap = QPixmap(icon_path).scaled(24, 24)
+            pixmap = QPixmap(str(eraser_icon_path)).scaled(24, 24)
             self.canvas.setCursor(QCursor(pixmap, 0, 24))  # Hotspot at bottom-left
         else:
             self.canvas.setCursor(Qt.CursorShape.CrossCursor)

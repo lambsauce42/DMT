@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 
+from asset_paths import icons_dir, item_icon_dirs
 import save_paths
 from item_file_format import (
     ITEM_FILE_EXTENSION,
@@ -65,12 +66,9 @@ EXPORT_DPI = 480
 ICON_GRID_ICON_SIZE = 48
 ICON_GRID_BUTTON_SIZE = 88
 ICON_GRID_COLUMNS = 4  # Minimum columns; expand based on available width
-ITEM_ICON_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "assets", "itemicons")
-)
-ITEM_ICON_DIR_FALLBACK = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "assets", "iconitems")
-)
+ITEM_ICON_DIR = str(item_icon_dirs()[0])
+ITEM_ICON_DIR_FALLBACK = str(item_icon_dirs()[1])
+ICON_DIR = str(icons_dir())
 ITEM_ICON_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 ITEM_LIBRARY_CATEGORY_ORDER = [
     "equipment",
@@ -287,7 +285,7 @@ class _ItemLibraryDialog(QDialog):
         search_layout.addWidget(self._search_input, 1)
 
         self._search_clear_button = QToolButton(self._search_container)
-        self._search_clear_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "close.svg")))
+        self._search_clear_button.setIcon(QIcon(os.path.join(ICON_DIR, "close.svg")))
         self._search_clear_button.setToolTip("Clear")
         self._search_clear_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._search_clear_button.setFixedSize(18, 18)
@@ -622,32 +620,32 @@ class ItemCreatorWidget(QWidget):
         action_row = QHBoxLayout()
         self.load_button = QToolButton(self)
         self.load_button.setObjectName("SecondaryButton")
-        self.load_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "folder_open.svg")))
+        self.load_button.setIcon(QIcon(os.path.join(ICON_DIR, "folder_open.svg")))
         self.load_button.setToolTip("Load Item")
         
         self.save_button = QToolButton(self)
         self.save_button.setObjectName("SecondaryButton")
-        self.save_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "save.svg")))
+        self.save_button.setIcon(QIcon(os.path.join(ICON_DIR, "save.svg")))
         self.save_button.setToolTip("Save Item")
         
         self.save_to_button = QToolButton(self)
         self.save_to_button.setObjectName("SecondaryButton")
-        self.save_to_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "save_as.svg")))
+        self.save_to_button.setIcon(QIcon(os.path.join(ICON_DIR, "save_as.svg")))
         self.save_to_button.setToolTip("Save Item As")
         
         self.export_button = QToolButton(self)
         self.export_button.setObjectName("SecondaryButton")
-        self.export_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "file_pdf.svg")))
+        self.export_button.setIcon(QIcon(os.path.join(ICON_DIR, "file_pdf.svg")))
         self.export_button.setToolTip("Export PDF")
 
         self.export_png_button = QToolButton(self)
         self.export_png_button.setObjectName("SecondaryButton")
-        self.export_png_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "image.svg")))
+        self.export_png_button.setIcon(QIcon(os.path.join(ICON_DIR, "image.svg")))
         self.export_png_button.setToolTip("Export PNG")
 
         self.show_library_button = QToolButton(self)
         self.show_library_button.setObjectName("SecondaryButton")
-        self.show_library_button.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "list.svg")))
+        self.show_library_button.setIcon(QIcon(os.path.join(ICON_DIR, "list.svg")))
         self.show_library_button.setToolTip("Show Item Library")
 
         top_action_button_style = (
@@ -893,7 +891,7 @@ class ItemCreatorWidget(QWidget):
         stats_buttons = QHBoxLayout()
         self.add_stat_btn = QToolButton(stats_group)
         self.add_stat_btn.setObjectName("PrimaryButton")
-        self.add_stat_btn.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "plus.svg")))
+        self.add_stat_btn.setIcon(QIcon(os.path.join(ICON_DIR, "plus.svg")))
         self.add_stat_btn.setIconSize(QSize(16, 16))
         self.add_stat_btn.setToolTip("Add Stat")
         self.add_stat_btn.setFixedSize(32, 32)
@@ -1284,7 +1282,7 @@ class ItemCreatorWidget(QWidget):
         remove_btn = QToolButton(container)
         remove_btn.setObjectName("SecondaryButton")
         remove_btn.setProperty("compact", "true")
-        remove_btn.setIcon(QIcon(os.path.join(ITEM_ICON_DIR, "..", "icons", "trash.svg")))
+        remove_btn.setIcon(QIcon(os.path.join(ICON_DIR, "trash.svg")))
         remove_btn.setIconSize(QSize(14, 14))
         remove_btn.setFixedSize(30, 30)
         remove_btn.setStyleSheet("QToolButton { padding: 0px; border-radius: 4px; border: 1px solid #3b424b; background-color: #1c2128; min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px; }")

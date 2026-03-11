@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime
 from typing import List
 
+from save_paths import debug_logs_dir
 
 @dataclass(frozen=True)
 class TerminalLine:
@@ -16,7 +17,7 @@ class TerminalLine:
     is_error: bool = False
 
 
-_DEBUG_LOG_PATH = Path(__file__).resolve().parents[1] / "debug" / "terminal_session.log"
+_DEBUG_LOG_PATH = debug_logs_dir() / "terminal_session.log"
 
 
 class TerminalSession:

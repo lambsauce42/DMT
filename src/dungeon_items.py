@@ -509,6 +509,13 @@ class EntityItem(QGraphicsItem):
         self._duplicate_badge_cache_type_key = current_type_key
         self._duplicate_badge_cache_entity_id = current_entity_id
         return badge_text
+
+    def initiative_display_name(self) -> str:
+        label = str(self.data(ROLE_LABEL) or "").strip() or "Entity"
+        badge = self._duplicate_instance_badge_text()
+        if badge:
+            return f"{label} {badge}"
+        return label
     
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)

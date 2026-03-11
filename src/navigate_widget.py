@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from asset_paths import icons_dir
 try:
     import shiboken6
 except Exception:  # pragma: no cover - optional runtime guard
@@ -40,7 +41,7 @@ try:
 except Exception:
     SVG_AVAILABLE = False
 
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 ROW_ICON_SIZE = 22
 LARGE_ROW_ICON_SIZE = int(ROW_ICON_SIZE * 1.5)
 LARGE_ROW_PADDING_X = 15

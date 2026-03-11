@@ -63,6 +63,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 
+from asset_paths import icons_dir
 from dmt_package import read_dmt_package_asset, read_dmt_package_info, write_dmt_package
 from models import Session, SessionAttachment, SessionLogEntry
 from save_paths import default_dnd_save_dir
@@ -101,7 +102,7 @@ SESSION_FILE_FORMAT = "dmtsession.v2"
 MAX_ATTACHMENT_FILE_BYTES = 25 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 150 * 1024 * 1024
 FILES_COLLAPSED_STRIP_WIDTH = 0
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 ANCHOR_WITH_HREF_TAG_RE = re.compile(r"<a\b(?=[^>]*\bhref\s*=)(?P<attrs>[^>]*)>", re.IGNORECASE)
 STYLE_ATTR_RE = re.compile(
     r"(?P<prefix>\sstyle\s*=\s*)(?P<quote>[\"'])(?P<value>.*?)(?P=quote)",

@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 
 import re
 
+from asset_paths import asset_path, icon_path, icons_dir, is_frozen_app, resource_path
 from item_creator import ItemCreatorWidget
 from bundled_data import cleanup_current_bundled_runtime_data, cleanup_stale_bundled_runtime_data
 from dungeon_applet import DungeonAppletWidget
@@ -105,11 +106,11 @@ except Exception:  # pragma: no cover - optional SVG support
     SVG_AVAILABLE = False
 
 # Calculate icon paths for the stylesheet
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-_ICON_DIR = os.path.join(_BASE_DIR, "..", "assets", "icons")
-CARET_UP_PATH = os.path.join(_ICON_DIR, "caret_up_white.svg").replace("\\", "/")
-CARET_DOWN_PATH = os.path.join(_ICON_DIR, "caret_down_white.svg").replace("\\", "/")
-CLOSE_ICON_PATH = os.path.join(_ICON_DIR, "close.svg").replace("\\", "/")
+_ICON_DIR = str(icons_dir())
+CARET_UP_PATH = str(icon_path("caret_up_white.svg")).replace("\\", "/")
+CARET_DOWN_PATH = str(icon_path("caret_down_white.svg")).replace("\\", "/")
+CLOSE_ICON_PATH = str(icon_path("close.svg")).replace("\\", "/")
+APP_ICON_PATH = asset_path("DMT.png")
 
 DARK_STYLESHEET = f"""
 * {{
@@ -1058,7 +1059,7 @@ APPLET_DEFINITIONS: List[Dict[str, object]] = [
     },
 ]
 
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 ICON_SIZE = 101
 ICON_FRAME = 8
 CARD_MIN_HEIGHT = ICON_SIZE + ICON_FRAME + 24
@@ -1389,6 +1390,8 @@ def _async_applet_loading_enabled() -> bool:
 
 
 def _external_loading_indicator_enabled() -> bool:
+    if is_frozen_app():
+        return False
     if os.environ.get("DMT_DISABLE_EXTERNAL_LOADING_INDICATOR") == "1":
         return False
     if os.environ.get("DMT_TEST_EXTERNAL_LOADING_INDICATOR") == "1":
@@ -1405,7 +1408,7 @@ class ExternalLoadingIndicatorController:
     def show(self, host: QWidget, message: str) -> bool:
         if not _external_loading_indicator_enabled():
             return False
-        helper_path = Path(__file__).resolve().with_name("loading_indicator_process.py")
+        helper_path = resource_path("loading_indicator_process.py")
         if not helper_path.exists():
             print(f"[WARN] Loading indicator helper missing: {helper_path}", file=sys.stderr)
             return False
@@ -1971,6 +1974,8 @@ class _WorkspaceTabWindow(QMainWindow):
         self._workspace_primary = bool(primary)
         self.setWindowTitle(title)
         self.setMinimumSize(1200, 700)
+        if APP_ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
         self.tabs = WorkspaceTabsHost(self)
         self.setCentralWidget(self.tabs)
@@ -2800,6 +2805,8 @@ def main() -> int:
     try:
         app = QApplication(sys.argv)
         app.setApplicationName("DMT")
+        if APP_ICON_PATH.exists():
+            app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
         app.setStyleSheet(DARK_STYLESHEET)
         window = MainLauncherWindow()
         window.show()

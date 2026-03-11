@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from asset_paths import icon_path, icons_dir
 try:
     from PySide6.QtSvg import QSvgRenderer
 
@@ -44,7 +45,7 @@ try:
 except Exception:
     SVG_AVAILABLE = False
 
-from save_paths import session_transcript_dir
+from save_paths import dnd_saves_dir, session_transcript_dir
 from user_settings import load_app_settings, save_app_settings
 
 
@@ -97,9 +98,8 @@ RECAP_ALLOWED_BLOCK_MODES = (
     "aftermath",
     "other",
 )
-ICON_DIR = Path(__file__).resolve().parent.parent / "assets" / "icons"
-REPO_ROOT = Path(__file__).resolve().parent.parent
-VENDOR_DIR = REPO_ROOT / "vendor"
+ICON_DIR = icons_dir()
+VENDOR_DIR = dnd_saves_dir() / "vendor"
 FIELD_HEIGHT = 34
 ACTION_BUTTON_SIZE = 34
 ACTION_ICON_SIZE = 16
@@ -121,7 +121,7 @@ def _now_timestamp() -> str:
 
 
 def _icon_path(icon_name: str) -> str:
-    return str((ICON_DIR / icon_name).resolve())
+    return str(icon_path(icon_name))
 
 
 def _is_svg_icon(path: Path) -> bool:

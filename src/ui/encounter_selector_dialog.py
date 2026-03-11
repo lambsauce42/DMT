@@ -25,11 +25,12 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
 )
 
+from asset_paths import icons_dir
 from dmt_package import read_dmt_package_info
 from save_paths import dnd_saves_dir
 
 
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 ENCOUNTER_FILE_EXTENSION = ".dmtencounter"
 ENCOUNTER_FILE_FORMAT = "dmtencounter.v1"
 

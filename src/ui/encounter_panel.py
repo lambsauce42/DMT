@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from asset_paths import icons_dir
 from encounter_engine import (
     EncounterDataError,
     EncounterEntry,
@@ -62,7 +63,7 @@ from ui.widgets.encounter_progress import EncounterProgressBar
 from ui.widgets.monster_card import MonsterCard
 from ui.widgets import PlusMinusSpinBox, SliderSpinBox
 
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 ENCOUNTER_FILE_EXTENSION = ".dmtencounter"
 ENCOUNTER_FILE_FORMAT = "dmtencounter.v1"
 

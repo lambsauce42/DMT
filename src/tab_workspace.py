@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, Si
 from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QImage, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QStackedWidget, QVBoxLayout, QWidget
 
+from save_paths import debug_logs_dir
 
 TAB_STRIP_HEIGHT = 36
 TAB_MIN_WIDTH = 88
@@ -1043,7 +1044,7 @@ class TabWorkspaceController(QObject):
         self._drag_cursor_poll_timer: Optional[QTimer] = None
         self._drag_cursor_poll_last_pos: Optional[QPoint] = None
 
-        self._debug_log_path = Path(__file__).resolve().parents[1] / "debug" / "tab_workspace.log"
+        self._debug_log_path = debug_logs_dir() / "tab_workspace.log"
 
     def set_detached_window_factory(self, factory: Callable[[], WorkspaceWindow]) -> None:
         self._detached_window_factory = factory

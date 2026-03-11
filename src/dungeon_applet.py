@@ -97,6 +97,7 @@ from PySide6.QtGui import (
     QPolygonF,
 )
 
+from asset_paths import icon_path, icons_dir
 from dungeon_constants import (
     GRID_SIZE,
     TOOL_ROOM,
@@ -177,6 +178,8 @@ from item_file_format import (
 from user_settings import get_or_create_local_player_id
 from unique_ids import generate_named_object_id, generate_probabilistic_unique_id, machine_entropy_string
 from session_media import SessionMediaHttpServer, SessionMediaPlaybackEngine, validate_media_source_path
+
+ICON_DIR = str(icons_dir())
 
 class ToolType(Enum):
     SELECT = auto()
@@ -279,9 +282,8 @@ def _default_media_library() -> dict[str, list[dict]]:
 
 
 def _default_media_icon_path(kind: str) -> str:
-    icon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
     filename = "lightning.svg" if str(kind or "").strip() == "effects" else "play.svg"
-    return os.path.join(icon_dir, filename)
+    return str(icon_path(filename))
 
 
 def _default_audio_preferences() -> dict[str, object]:
@@ -2020,8 +2022,7 @@ class FloatingToolPanel(QWidget):
 
     def _init_tools(self):
         # Use local DMT icons (white versions for dark background)
-        base_dir = os.path.dirname(__file__)
-        icon_dir = os.path.abspath(os.path.join(base_dir, "..", "assets", "icons"))
+        icon_dir = ICON_DIR
 
         # Column 0: Creation & General Tools
         tools_col0 = [
@@ -2733,7 +2734,7 @@ class EntityInspectorPanel(QWidget):
         token_label.setStyleSheet("color: #a1a1aa; font-size: 12px;")
         token_header.addWidget(token_label)
         token_header.addStretch()
-        icon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+        icon_dir = ICON_DIR
         self.btn_set_icon = QToolButton(self.token_controls_panel)
         self.btn_set_icon.setObjectName("TokenIconSetButton")
         self.btn_set_icon.setFixedSize(36, 36)
@@ -4075,7 +4076,7 @@ class DungeonSelectionWidget(QWidget):
         actions_layout.setSpacing(8)
         actions_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        icon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+        icon_dir = ICON_DIR
         save_icon = os.path.join(icon_dir, "save.svg")
         save_as_icon = os.path.join(icon_dir, "save_as.svg")
         load_icon = os.path.join(icon_dir, "folder_open.svg")
@@ -4862,6 +4863,8 @@ class DungeonAppletWidget(QWidget):
         self._initiative_drag_source: tuple[str, str] | None = None
         self._initiative_drag_started = False
         self._initiative_drag_origin = QPoint()
+        self._initiative_drag_source_widget: QWidget | None = None
+        self._initiative_drag_ghost: QLabel | None = None
         self._suppress_initiative_sync = False
         self._host_scene_sync_pending = False
         self._last_host_scene_signature = ""
@@ -4929,7 +4932,7 @@ class DungeonAppletWidget(QWidget):
 
 
         # Icon Paths
-        icon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+        icon_dir = ICON_DIR
         
         icon_origin = os.path.join(icon_dir, "origin.svg")
         icon_plus = os.path.join(icon_dir, "plus_white.svg")
@@ -7809,7 +7812,7 @@ class DungeonAppletWidget(QWidget):
         selected = self._selected_media_library_entry("effects")
         if selected is None:
             return
-        icon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+        icon_dir = ICON_DIR
         filename, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "Choose Soundboard Icon",
@@ -10586,7 +10589,7 @@ class DungeonAppletWidget(QWidget):
         self._initiative_reopen_btn = QToolButton(self)
         self._initiative_reopen_btn.setObjectName("")
         self._initiative_reopen_btn.setToolTip("Initiative")
-        light_icon = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "lightning.svg"))
+        light_icon = str(icon_path("lightning.svg"))
         self._initiative_reopen_btn.setIcon(QIcon(light_icon))
         self._initiative_reopen_btn.setIconSize(QSize(20, 20))
         self._initiative_reopen_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -10655,7 +10658,7 @@ class DungeonAppletWidget(QWidget):
             entity_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
             if not entity_id:
                 continue
-            label = str(item.data(ROLE_LABEL) or "Entity").strip() or "Entity"
+            label = item.initiative_display_name()
             owner_player_id = str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip()
             if not owner_player_id or owner_player_id not in self._connected_players:
                 current_entity_entries[entity_id] = label
@@ -10813,6 +10816,20 @@ class DungeonAppletWidget(QWidget):
         self._on_initiative_value_changed(kind, key, edit.text())
         return True
 
+    def _parse_initiative_value(self, raw_value: str) -> tuple[bool, int | None, str]:
+        value_text = str(raw_value or "").strip()
+        if not value_text:
+            return True, None, ""
+        normalized = " ".join(value_text.casefold().split())
+        if normalized in {"nat1", "nat 1"}:
+            return True, 1, "nat 1"
+        if normalized in {"nat20", "nat 20"}:
+            return True, 20, "nat 20"
+        try:
+            return True, int(value_text), ""
+        except (TypeError, ValueError):
+            return False, None, ""
+
     def _on_initiative_text_edited(self, kind: str, key: str, raw_value: str) -> None:
         cache_key = self._initiative_cache_key(kind, key)
         self._initiative_draft_values[cache_key] = str(raw_value or "")
@@ -10878,14 +10895,8 @@ class DungeonAppletWidget(QWidget):
 
     def _on_initiative_value_changed(self, kind: str, key: str, raw_value: str) -> None:
         cache_key = self._initiative_cache_key(kind, key)
-        self._initiative_draft_values.pop(cache_key, None)
         value_text = str(raw_value or "").strip()
-        value: int | None = None
-        if value_text:
-            try:
-                value = int(value_text)
-            except (TypeError, ValueError):
-                value = None
+        valid_value, value, display_text = self._parse_initiative_value(value_text)
         target = self._initiative_state.get("player_entries" if kind == "player" else "entity_entries", {})
         if not isinstance(target, dict):
             return
@@ -10893,7 +10904,8 @@ class DungeonAppletWidget(QWidget):
         previous_value = row.get("initiative")
         if not isinstance(previous_value, int):
             previous_value = None
-        if value_text and value is None:
+        if value_text and not valid_value:
+            self._initiative_draft_values[cache_key] = value_text
             self._initiative_value_warning = "Use numbers only for initiative."
             self._debug_log(
                 "initiative_value_invalid_rejected",
@@ -10904,6 +10916,10 @@ class DungeonAppletWidget(QWidget):
             self._append_server_log("[WARN] Initiative accepts numbers only.")
             self._render_initiative_overlay()
             return
+        if display_text:
+            self._initiative_draft_values[cache_key] = display_text
+        else:
+            self._initiative_draft_values.pop(cache_key, None)
         self._initiative_value_warning = ""
         row["initiative"] = value
         self._debug_log(
@@ -10940,9 +10956,57 @@ class DungeonAppletWidget(QWidget):
 
     def _set_initiative_value_quick(self, kind: str, key: str, value: int) -> None:
         target_edit = self._find_initiative_input(kind, key)
+        display_text = f"nat {int(value)}"
         if target_edit is not None:
-            target_edit.setText(str(int(value)))
-        self._on_initiative_value_changed(kind, key, str(int(value)))
+            target_edit.setText(display_text)
+        self._initiative_draft_values[self._initiative_cache_key(kind, key)] = display_text
+        self._on_initiative_value_changed(kind, key, display_text)
+
+    def _ensure_initiative_drag_ghost(self) -> QLabel:
+        ghost = self._initiative_drag_ghost
+        if ghost is None:
+            ghost = QLabel(self)
+            ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            ghost.setWindowFlag(Qt.WindowType.SubWindow, True)
+            ghost.setStyleSheet("background: transparent;")
+            ghost.hide()
+            self._initiative_drag_ghost = ghost
+        return ghost
+
+    def _hide_initiative_drag_ghost(self) -> None:
+        ghost = self._initiative_drag_ghost
+        if ghost is not None:
+            ghost.hide()
+            ghost.clear()
+        self._initiative_drag_source_widget = None
+
+    def _start_initiative_drag_ghost(self, row_widget: QWidget, global_pos: QPoint) -> None:
+        try:
+            pixmap = row_widget.grab()
+        except RuntimeError:
+            self._hide_initiative_drag_ghost()
+            return
+        if pixmap.isNull():
+            self._hide_initiative_drag_ghost()
+            return
+        ghost = self._ensure_initiative_drag_ghost()
+        ghost.setPixmap(pixmap)
+        ghost.resize(pixmap.deviceIndependentSize().toSize())
+        ghost.setWindowOpacity(0.72)
+        self._initiative_drag_source_widget = row_widget
+        self._update_initiative_drag_ghost(global_pos)
+        ghost.show()
+        ghost.raise_()
+
+    def _update_initiative_drag_ghost(self, global_pos: QPoint) -> None:
+        ghost = self._initiative_drag_ghost
+        if ghost is None or ghost.pixmap() is None or ghost.isHidden():
+            return
+        local_pos = self.mapFromGlobal(global_pos)
+        x = int(local_pos.x() - (ghost.width() // 2))
+        y = int(local_pos.y() - (ghost.height() // 2))
+        ghost.move(x, y)
+        ghost.raise_()
 
     def _render_initiative_overlay(self) -> None:
         if not hasattr(self, "_initiative_rows_layout"):
@@ -10970,6 +11034,7 @@ class DungeonAppletWidget(QWidget):
             focus_kind, focus_key = self._initiative_last_target
         if not active and not inactive_preview:
             self._debug_log("initiative_render_inactive")
+            self._hide_initiative_drag_ghost()
             self._initiative_draft_values.clear()
             while self._initiative_rows_layout.count():
                 child = self._initiative_rows_layout.takeAt(0)
@@ -10985,6 +11050,7 @@ class DungeonAppletWidget(QWidget):
             self._initiative_hint.setText("Initiative is inactive. DM can start it with /initiative.")
             return
         self._seed_initiative_state()
+        self._hide_initiative_drag_ghost()
         while self._initiative_rows_layout.count():
             child = self._initiative_rows_layout.takeAt(0)
             widget = child.widget()
@@ -20075,20 +20141,32 @@ class DungeonAppletWidget(QWidget):
                         self._initiative_drag_source = (row_kind, row_id)
                         self._initiative_drag_started = False
                         self._initiative_drag_origin = event.globalPosition().toPoint()
+                        self._initiative_drag_source_widget = row_widget
                 elif (
                     event_type == QEvent.Type.MouseMove
                     and self._initiative_drag_source is not None
                     and event.buttons() & Qt.MouseButton.LeftButton
                 ):
-                    if (
+                    move_distance = (
                         event.globalPosition().toPoint() - self._initiative_drag_origin
-                    ).manhattanLength() >= QApplication.startDragDistance():
+                    ).manhattanLength()
+                    if move_distance >= QApplication.startDragDistance():
                         self._initiative_drag_started = True
+                        if self._initiative_drag_ghost is None or self._initiative_drag_ghost.isHidden():
+                            source_widget = self._initiative_drag_source_widget
+                            if source_widget is not None:
+                                self._start_initiative_drag_ghost(
+                                    source_widget,
+                                    event.globalPosition().toPoint(),
+                                )
+                        else:
+                            self._update_initiative_drag_ghost(event.globalPosition().toPoint())
                 elif event_type == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                     drag_source = self._initiative_drag_source
                     drag_started = bool(self._initiative_drag_started)
                     self._initiative_drag_source = None
                     self._initiative_drag_started = False
+                    self._hide_initiative_drag_ghost()
                     if drag_source is not None and drag_started:
                         target_row = self._find_initiative_row_widget(
                             QApplication.widgetAt(event.globalPosition().toPoint())

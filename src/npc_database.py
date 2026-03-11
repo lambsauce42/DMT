@@ -50,12 +50,13 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 
+from asset_paths import icons_dir
 from dmt_package import read_dmt_package_info, write_dmt_package
 from navigation_repository import load_navigation_data
 from ui.widgets.rich_text_editor import RichTextDescriptionEditor
 from unique_ids import generate_named_object_id
 
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
 from player_sheets import (
     HeaderLinkStrip,

@@ -13,6 +13,7 @@ import traceback
 from typing import Callable, Iterable, List, Optional, Sequence
 import logging
 
+from asset_paths import equipment_backgrounds_dir, icons_dir
 from bundled_data import data_path
 from save_paths import default_dnd_save_dir, items_dir
 from item_file_format import (
@@ -463,13 +464,13 @@ def _unlink_npc_links_for_sheet(sheet_id: str) -> int:
         logger.warning("Unable to unlink NPC links for sheet '%s': %s", sheet_id, exc)
         return 0
 
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
 LINK_INDICATOR_ICON = os.path.join(ICON_DIR, "link_indicator.svg")
 LINK_INDICATOR_ICON_14 = os.path.join(ICON_DIR, "link_indicator_14.png")
 LINK_INDICATOR_ICON_20 = os.path.join(ICON_DIR, "link_indicator_20.png")
 _SUPERSAMPLED_ICON_CACHE: dict[tuple[str, int], QPixmap] = {}
-EQUIPMENT_BACKGROUNDS_DIR = Path(__file__).resolve().parent.parent / "assets" / "equipment backgrounds"
+EQUIPMENT_BACKGROUNDS_DIR = equipment_backgrounds_dir()
 EQUIPMENT_DEFAULT_BACKGROUND_NAME = "ring_simple.png"
 EQUIPMENT_SILHOUETTE_CANDIDATES: tuple[Path, ...] = (
     EQUIPMENT_BACKGROUNDS_DIR / "siluhette.png",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from asset_paths import icons_dir
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import (
     QIcon,
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 # .../apps/DMT/src/ui/widgets/rich_text_editor.py -> .../apps/DMT/assets/icons
-ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "icons"))
+ICON_DIR = str(icons_dir())
 
 
 class FloatingFormattingToolbar(QWidget):
