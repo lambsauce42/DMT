@@ -13,7 +13,12 @@ from PySide6.QtWidgets import QApplication, QGraphicsScene
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from dungeon_items import RoomGroup, EntityItem, WallItem, DungeonEllipseItem, PingItem
-from dungeon_constants import GRID_SIZE, ROLE_LABEL, ROLE_ENTITY_ID
+from dungeon_constants import (
+    GRID_SIZE,
+    ROLE_LABEL,
+    ROLE_ENTITY_ID,
+    ROLE_DUPLICATE_INSTANCE_SLOT,
+)
 
 
 @pytest.fixture(scope="module")
@@ -122,13 +127,13 @@ class TestEntityItem:
         entity.hp = 50
         assert entity.hp == 50
     
-    def test_entity_hp_clamped(self, scene):
-        """EntityItem HP is clamped between 0 and max_hp."""
+    def test_entity_hp_allows_negative_and_over_max_values(self, scene):
+        """EntityItem HP can go negative or exceed max_hp."""
         entity = EntityItem(QPointF(0, 0))
         entity.hp = -10
-        assert entity.hp == 0
+        assert entity.hp == -10
         entity.hp = 200
-        assert entity.hp == 100  # Clamped to max
+        assert entity.hp == 200
     
     def test_entity_snap_on_release(self, scene):
         """EntityItem snaps to cell center on mouse release."""
@@ -227,6 +232,7 @@ class TestEntityItem:
 
         alive_image = _render_scene_with_hp(50)
         dead_image = _render_scene_with_hp(0)
+        negative_dead_image = _render_scene_with_hp(-12)
 
         def _count_red_pixels(image: QImage) -> int:
             count = 0
@@ -237,9 +243,22 @@ class TestEntityItem:
                         count += 1
             return count
 
+        def _count_black_pixels(image: QImage) -> int:
+            count = 0
+            for y in range(28, 92):
+                for x in range(28, 92):
+                    c = image.pixelColor(x, y)
+                    if c.red() <= 70 and c.green() <= 70 and c.blue() <= 70 and c.alpha() >= 180:
+                        count += 1
+            return count
+
         alive_red_pixels = _count_red_pixels(alive_image)
         dead_red_pixels = _count_red_pixels(dead_image)
+        negative_dead_red_pixels = _count_red_pixels(negative_dead_image)
+        dead_black_pixels = _count_black_pixels(dead_image)
         assert dead_red_pixels > alive_red_pixels + 30
+        assert negative_dead_red_pixels > alive_red_pixels + 30
+        assert dead_black_pixels > 20
 
     def test_entity_duplicate_badge_hidden_for_single_instance(self, scene):
         """Duplicate badge should stay hidden when no same-type duplicate exists."""
@@ -254,10 +273,12 @@ class TestEntityItem:
         first = EntityItem(QPointF(0, 0))
         first.setData(ROLE_LABEL, "Goblin")
         first.setData(ROLE_ENTITY_ID, "goblin-1")
+        first.setData(ROLE_DUPLICATE_INSTANCE_SLOT, 1)
 
         second = EntityItem(QPointF(40, 0))
         second.setData(ROLE_LABEL, "goblin")
         second.setData(ROLE_ENTITY_ID, "goblin-2")
+        second.setData(ROLE_DUPLICATE_INSTANCE_SLOT, 2)
 
         other = EntityItem(QPointF(80, 0))
         other.setData(ROLE_LABEL, "Orc")
@@ -270,6 +291,29 @@ class TestEntityItem:
         assert first._duplicate_instance_badge_text() == "1"
         assert second._duplicate_instance_badge_text() == "2"
         assert other._duplicate_instance_badge_text() == ""
+
+    def test_entity_duplicate_badge_uses_persisted_slot_instead_of_position(self, scene):
+        first = EntityItem(QPointF(0, 0))
+        first.setData(ROLE_LABEL, "Dragon")
+        first.setData(ROLE_ENTITY_ID, "dragon-1")
+        first.setData(ROLE_DUPLICATE_INSTANCE_SLOT, 3)
+
+        second = EntityItem(QPointF(40, 0))
+        second.setData(ROLE_LABEL, "Dragon")
+        second.setData(ROLE_ENTITY_ID, "dragon-2")
+        second.setData(ROLE_DUPLICATE_INSTANCE_SLOT, 4)
+
+        scene.addItem(first)
+        scene.addItem(second)
+
+        first.setPos(QPointF(500, 500))
+        second.setPos(QPointF(-500, -500))
+
+        assert first._duplicate_instance_badge_text() == "3"
+        assert second._duplicate_instance_badge_text() == "4"
+
+        scene.removeItem(second)
+        assert first._duplicate_instance_badge_text() == ""
 
 
 class TestWallItem:

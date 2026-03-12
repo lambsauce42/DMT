@@ -119,6 +119,8 @@ from dungeon_constants import (
     ROLE_LINKED_SHEET_ID,
     ROLE_LINKED_SHEET_NAME,
     ROLE_LINKED_CHARACTER_ID,
+    ROLE_ENTITY_PLACEMENT_ORDER,
+    ROLE_DUPLICATE_INSTANCE_SLOT,
     WALL_COLOR,
 )
 from character_sheet_stats import extract_character_stats_from_pdf
@@ -1366,6 +1368,21 @@ class DungeonCanvas(QGraphicsView):
         if self._current_state:
             self._current_state.mouseDoubleClickEvent(event)
         super().mouseDoubleClickEvent(event)
+
+    def _next_scene_entity_placement_order(self, scene: QGraphicsScene | None = None) -> int:
+        target_scene = scene or self.scene()
+        next_order = 1
+        if target_scene is None:
+            return next_order
+        for item in target_scene.items():
+            if not isinstance(item, EntityItem):
+                continue
+            try:
+                placement_order = int(item.data(ROLE_ENTITY_PLACEMENT_ORDER) or 0)
+            except (TypeError, ValueError):
+                placement_order = 0
+            next_order = max(next_order, placement_order + 1)
+        return next_order
     
     def _place_entity(self, scene_pos: QPointF):
         """Place an entity at the given position, snapped to cell CENTER."""
@@ -1394,6 +1411,11 @@ class DungeonCanvas(QGraphicsView):
         entity.setData(ROLE_LINKED_SHEET_ID, "")
         entity.setData(ROLE_LINKED_SHEET_NAME, "")
         entity.setData(ROLE_LINKED_CHARACTER_ID, "")
+        entity.setData(
+            ROLE_ENTITY_PLACEMENT_ORDER,
+            self._next_scene_entity_placement_order(self.scene()),
+        )
+        entity.setData(ROLE_DUPLICATE_INSTANCE_SLOT, 0)
         entity.linked_inventory = {}
         entity.setData(ROLE_ICON, "")
         cmd = CreateItemCommand(self.scene(), entity, "Place Entity")
@@ -1505,6 +1527,11 @@ class DungeonCanvas(QGraphicsView):
             entity.setData(ROLE_LINKED_SHEET_ID, "")
             entity.setData(ROLE_LINKED_SHEET_NAME, "")
             entity.setData(ROLE_LINKED_CHARACTER_ID, "")
+            entity.setData(
+                ROLE_ENTITY_PLACEMENT_ORDER,
+                self._next_scene_entity_placement_order(self.scene()),
+            )
+            entity.setData(ROLE_DUPLICATE_INSTANCE_SLOT, 0)
             entity.linked_inventory = {}
             entity.setData(ROLE_ICON, icon_path or "")
             
@@ -2406,9 +2433,9 @@ class BarStat(QWidget):
         # Editable Current
         self.curr_edit = QSpinBox()
         self.curr_edit.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-        self.curr_edit.setRange(0, 9999)
+        self.curr_edit.setRange(-9999, 9999)
         self.curr_edit.setValue(current)
-        self.curr_edit.setFixedWidth(50) # Increased width
+        self.curr_edit.setFixedWidth(58)
         self.curr_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.curr_edit.setStyleSheet("background: transparent; color: #fafafa; border: none; font-family: monospace; font-size: 11px;")
         
@@ -2435,7 +2462,7 @@ class BarStat(QWidget):
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(6)
         self.bar.setRange(0, max_val)
-        self.bar.setValue(current)
+        self.bar.setValue(max(0, min(current, max_val)))
         self.bar.setStyleSheet(f"""
             QProgressBar {{
                 background-color: #27272a;
@@ -2456,7 +2483,7 @@ class BarStat(QWidget):
         curr = self.curr_edit.value()
         mx = self.max_edit.value()
         self.bar.setRange(0, mx)
-        self.bar.setValue(curr)
+        self.bar.setValue(max(0, min(curr, mx)))
 
     def set_data(self, current: int, max_val: int):
         self.curr_edit.blockSignals(True)
@@ -11247,6 +11274,28 @@ class DungeonAppletWidget(QWidget):
             return candidate
         return None
 
+    def _widget_is_in_initiative_overlay(self, widget: QWidget | None) -> bool:
+        current = widget
+        while current is not None:
+            if current is self._initiative_overlay:
+                return True
+            current = current.parentWidget()
+        return False
+
+    def _widget_prefers_direct_text_input(self, widget: QWidget | None) -> bool:
+        current = widget
+        while current is not None:
+            if isinstance(current, QLineEdit):
+                return not bool(current.property("initiative_input")) and not current.isReadOnly()
+            if isinstance(current, QTextEdit):
+                return not current.isReadOnly()
+            if isinstance(current, QAbstractSpinBox):
+                return not current.isReadOnly()
+            if isinstance(current, QComboBox):
+                return current.isEditable()
+            current = current.parentWidget()
+        return False
+
     def _commit_initiative_input(self, edit: QLineEdit | None) -> bool:
         if edit is None or not edit.isEnabled():
             return False
@@ -11519,6 +11568,7 @@ class DungeonAppletWidget(QWidget):
         active = bool(self._initiative_state.get("active", False))
         inactive_preview = bool(self._initiative_inactive_preview_visible) and not active
         effective_collapsed = self._initiative_overlay_collapsed_for_ui()
+        allow_focus_restore = not effective_collapsed
         self._update_initiative_reopen_button_visibility()
         focus_kind = ""
         focus_key = ""
@@ -11855,7 +11905,9 @@ class DungeonAppletWidget(QWidget):
         if warning_text:
             hint_text = f"{hint_text}\n{warning_text}"
         self._initiative_hint.setText(hint_text)
-        if focus_target_edit is not None and focus_target_edit.isEnabled():
+        if not allow_focus_restore:
+            self._initiative_last_target = None
+        elif focus_target_edit is not None and focus_target_edit.isEnabled():
             focus_target_edit.setFocus(Qt.FocusReason.OtherFocusReason)
             self._initiative_last_target = (focus_kind, focus_key)
             current_text_len = len(focus_target_edit.text() or "")
@@ -11905,9 +11957,11 @@ class DungeonAppletWidget(QWidget):
         else:
             self._initiative_inactive_preview_visible = False
         if not bool(self._initiative_state.get("active", False)) and not allow_inactive:
+            self._initiative_last_target = None
             self._debug_log("initiative_overlay_show_skipped_inactive")
             return
         if self._online_mode == ONLINE_MODE_PLAYER and not self._player_has_visible_initiative_rows():
+            self._initiative_last_target = None
             self._debug_log("initiative_overlay_show_skipped_no_player_rows")
             self._initiative_overlay.hide()
             self._update_initiative_reopen_button_visibility()
@@ -11953,6 +12007,7 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode == ONLINE_MODE_PLAYER:
             self._player_initiative_overlay_collapsed = True
             self._initiative_inactive_preview_visible = False
+            self._initiative_last_target = None
             existing = getattr(self, "_initiative_panel_anim", None)
             if isinstance(existing, QPropertyAnimation):
                 existing.stop()
@@ -12619,6 +12674,7 @@ class DungeonAppletWidget(QWidget):
             self._loot_claim_btn.setVisible(False)
             for item in self.canvas.scene().items():
                 if isinstance(item, EntityItem):
+                    self._set_entity_player_fog_visibility(item, False)
                     item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
                     item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
                     item.set_player_stats_visible(False)
@@ -12659,6 +12715,7 @@ class DungeonAppletWidget(QWidget):
             for item in self.canvas.scene().items():
                 if isinstance(item, EntityItem):
                     owned = player_can_edit and self._is_entity_owned_by_local_player(item)
+                    self._set_entity_player_fog_visibility(item, owned)
                     item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, owned)
                     item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, owned)
                     item.set_player_stats_visible(owned)
@@ -12689,6 +12746,7 @@ class DungeonAppletWidget(QWidget):
         self._loot_claim_btn.setVisible(False)
         for item in reversed(self.canvas.scene().items()):
             if isinstance(item, EntityItem):
+                self._set_entity_player_fog_visibility(item, False)
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
                 item.set_player_stats_visible(False)
@@ -13951,6 +14009,8 @@ class DungeonAppletWidget(QWidget):
             "charisma",
             "size_w_cells",
             "size_h_cells",
+            "placement_order",
+            "duplicate_instance_slot",
         }
         # Player state updates must not overwrite host-side icon file paths.
         str_fields = {"color", "actions", "description", "label", "layer"}
@@ -14091,7 +14151,10 @@ class DungeonAppletWidget(QWidget):
                 pass
         if "z" in item_data:
             try:
-                entity.setZValue(float(item_data.get("z")))
+                next_z = float(item_data.get("z"))
+                if hasattr(entity, "_player_fog_visibility_base_z"):
+                    entity._player_fog_visibility_base_z = next_z
+                entity.setZValue(next_z)
             except (TypeError, ValueError):
                 pass
         if "color" in item_data:
@@ -14136,6 +14199,20 @@ class DungeonAppletWidget(QWidget):
             entity.setData(ROLE_LAYER, item_data.get("layer") or LAYER_FG)
         if "label" in item_data:
             entity.setData(ROLE_LABEL, str(item_data.get("label") or ""))
+        if "placement_order" in item_data:
+            placement_order = self._coerce_positive_int(item_data.get("placement_order"))
+            if placement_order > 0:
+                entity.setData(ROLE_ENTITY_PLACEMENT_ORDER, placement_order)
+        elif self._coerce_positive_int(entity.data(ROLE_ENTITY_PLACEMENT_ORDER)) <= 0:
+            entity.setData(
+                ROLE_ENTITY_PLACEMENT_ORDER,
+                self._next_scene_entity_placement_order(entity.scene()),
+            )
+        if "duplicate_instance_slot" in item_data:
+            entity.setData(
+                ROLE_DUPLICATE_INSTANCE_SLOT,
+                self._coerce_positive_int(item_data.get("duplicate_instance_slot")),
+            )
         if "lock_square" in item_data or "size_w_cells" in item_data or "size_h_cells" in item_data:
             next_lock_square = bool(item_data.get("lock_square", entity.lock_square))
             next_size_w = int(item_data.get("size_w_cells", entity.size_w_cells) or entity.size_w_cells)
@@ -14414,6 +14491,8 @@ class DungeonAppletWidget(QWidget):
             "size_w_cells",
             "size_h_cells",
             "lock_square",
+            "placement_order",
+            "duplicate_instance_slot",
         )
         stroke_keys = (
             "type",
@@ -20730,8 +20809,36 @@ class DungeonAppletWidget(QWidget):
                 and bool(focus_widget.property("initiative_input"))
                 and focus_widget.isEnabled()
             )
-            initiative_key_context_active = bool(self._initiative_state.get("active", False)) and (
-                focus_is_initiative_input or self._initiative_last_target is not None
+            watched_widget = watched if isinstance(watched, QWidget) else None
+            focus_is_overlay_owned = self._widget_is_in_initiative_overlay(
+                focus_widget if isinstance(focus_widget, QWidget) else None
+            )
+            watched_is_overlay_owned = self._widget_is_in_initiative_overlay(watched_widget)
+            focus_prefers_direct_text_input = self._widget_prefers_direct_text_input(
+                focus_widget if isinstance(focus_widget, QWidget) else None
+            )
+            canvas_viewport = self.canvas.viewport()
+            fallback_route_target = watched in (self, self.canvas, canvas_viewport) or focus_widget in (
+                None,
+                self,
+                self.canvas,
+                canvas_viewport,
+            )
+            initiative_key_context_active = (
+                bool(self._initiative_state.get("active", False))
+                and self._initiative_overlay.isVisible()
+                and (
+                    focus_is_initiative_input
+                    or (
+                        self._initiative_last_target is not None
+                        and not focus_prefers_direct_text_input
+                        and (
+                            focus_is_overlay_owned
+                            or watched_is_overlay_owned
+                            or fallback_route_target
+                        )
+                    )
+                )
             )
             if not initiative_key_context_active:
                 return False
@@ -21492,6 +21599,39 @@ class DungeonAppletWidget(QWidget):
         if not local_id:
             return False
         return (entity.data(ROLE_OWNER_PLAYER_ID) or "") == local_id
+
+    def _entity_serializable_z(self, entity: EntityItem) -> float:
+        try:
+            base_z = float(getattr(entity, "_player_fog_visibility_base_z"))
+        except (AttributeError, TypeError, ValueError):
+            base_z = float(entity.zValue())
+        return base_z
+
+    def _set_entity_player_fog_visibility(self, entity: EntityItem, visible_above_fog: bool) -> None:
+        if not isinstance(entity, EntityItem):
+            return
+        base_attr = "_player_fog_visibility_base_z"
+        if not visible_above_fog:
+            if hasattr(entity, base_attr):
+                try:
+                    entity.setZValue(float(getattr(entity, base_attr)))
+                except (TypeError, ValueError):
+                    pass
+                delattr(entity, base_attr)
+            return
+        fog_item = getattr(self.canvas, "fog_item", None)
+        if fog_item is None or fog_item.scene() is not self.canvas.scene():
+            return
+        if not hasattr(entity, base_attr):
+            setattr(entity, base_attr, float(entity.zValue()))
+        try:
+            base_z = float(getattr(entity, base_attr))
+        except (TypeError, ValueError):
+            base_z = float(entity.zValue())
+            setattr(entity, base_attr, base_z)
+        lifted_z = max(base_z, float(fog_item.zValue()) + 1.0)
+        if float(entity.zValue()) != lifted_z:
+            entity.setZValue(lifted_z)
 
     def _on_entity_owner_changed(self, _new_owner: str) -> None:
         self._mark_active_dungeon_dirty()
@@ -22478,6 +22618,8 @@ class DungeonAppletWidget(QWidget):
                         "label": item.data(ROLE_LABEL) or "",
                         "owner_player_id": item.data(ROLE_OWNER_PLAYER_ID) or "",
                         "entity_id": item.data(ROLE_ENTITY_ID) or uuid.uuid4().hex,
+                        "placement_order": self._entity_placement_order(item),
+                        "duplicate_instance_slot": self._entity_duplicate_slot(item),
                         "linked_sheet_id": item.data(ROLE_LINKED_SHEET_ID) or "",
                         "linked_sheet_name": item.data(ROLE_LINKED_SHEET_NAME) or "",
                         "linked_character_id": item.data(ROLE_LINKED_CHARACTER_ID) or "",
@@ -22492,7 +22634,7 @@ class DungeonAppletWidget(QWidget):
                         "linked_sheet_archive_b64": str(getattr(item, "linked_sheet_archive_b64", "") or ""),
                         "linked_inventory": normalize_inventory_payload(linked_inventory if isinstance(linked_inventory, dict) else {}),
                         "layer": item.data(ROLE_LAYER) or LAYER_FG,
-                        "z": float(item.zValue()),
+                        "z": self._entity_serializable_z(item),
                     }
                 )
                 continue
@@ -22597,6 +22739,15 @@ class DungeonAppletWidget(QWidget):
                 entity.setData(ROLE_ICON, icon_ref)
                 entity.setData(ROLE_OWNER_PLAYER_ID, item_data.get("owner_player_id", "") or "")
                 entity.setData(ROLE_ENTITY_ID, item_data.get("entity_id") or uuid.uuid4().hex)
+                entity.setData(
+                    ROLE_ENTITY_PLACEMENT_ORDER,
+                    self._coerce_positive_int(item_data.get("placement_order"))
+                    or self._next_scene_entity_placement_order(scene),
+                )
+                entity.setData(
+                    ROLE_DUPLICATE_INSTANCE_SLOT,
+                    self._coerce_positive_int(item_data.get("duplicate_instance_slot")),
+                )
                 entity.setData(ROLE_LINKED_SHEET_ID, item_data.get("linked_sheet_id", "") or "")
                 entity.setData(ROLE_LINKED_SHEET_NAME, item_data.get("linked_sheet_name", "") or "")
                 entity.setData(ROLE_LINKED_CHARACTER_ID, item_data.get("linked_character_id", "") or "")
@@ -22858,8 +23009,10 @@ class DungeonAppletWidget(QWidget):
                         "actions": str(getattr(item, "actions", "") or ""),
                         "description": str(getattr(item, "description", "") or ""),
                         "label": str(item.data(ROLE_LABEL) or ""),
+                        "placement_order": self._entity_placement_order(item),
+                        "duplicate_instance_slot": self._entity_duplicate_slot(item),
                         "layer": item.data(ROLE_LAYER) or LAYER_FG,
-                        "z": float(item.zValue()),
+                        "z": self._entity_serializable_z(item),
                         "size_w_cells": int(getattr(item, "size_w_cells", 1) or 1),
                         "size_h_cells": int(getattr(item, "size_h_cells", 1) or 1),
                         "lock_square": bool(getattr(item, "lock_square", True)),
@@ -22925,6 +23078,45 @@ class DungeonAppletWidget(QWidget):
         if self._online_mode != ONLINE_MODE_PLAYER:
             self._cleanup_unlinked_managed_character_artifacts()
 
+    @staticmethod
+    def _coerce_positive_int(value: object) -> int:
+        try:
+            parsed = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        return parsed if parsed > 0 else 0
+
+    def _next_scene_entity_placement_order(self, scene: QGraphicsScene | None = None) -> int:
+        target_scene = scene or self.canvas.scene()
+        next_order = 1
+        if target_scene is None:
+            return next_order
+        for item in target_scene.items():
+            if not isinstance(item, EntityItem):
+                continue
+            next_order = max(
+                next_order,
+                self._coerce_positive_int(item.data(ROLE_ENTITY_PLACEMENT_ORDER)) + 1,
+            )
+        return next_order
+
+    def _entity_placement_order(self, entity: EntityItem) -> int:
+        placement_order = self._coerce_positive_int(entity.data(ROLE_ENTITY_PLACEMENT_ORDER))
+        if placement_order > 0:
+            return placement_order
+        placement_order = self._next_scene_entity_placement_order(entity.scene())
+        entity.setData(ROLE_ENTITY_PLACEMENT_ORDER, placement_order)
+        return placement_order
+
+    def _entity_duplicate_slot(self, entity: EntityItem) -> int:
+        return self._coerce_positive_int(entity.data(ROLE_DUPLICATE_INSTANCE_SLOT))
+
+    def _set_entity_duplicate_slot(self, entity: EntityItem, slot: int) -> None:
+        normalized = self._coerce_positive_int(slot)
+        if self._entity_duplicate_slot(entity) == normalized:
+            return
+        entity.setData(ROLE_DUPLICATE_INSTANCE_SLOT, normalized)
+
     def _refresh_entity_duplicate_badges(self) -> None:
         scene = self.canvas.scene()
         entities: list[EntityItem] = [
@@ -22937,22 +23129,46 @@ class DungeonAppletWidget(QWidget):
         for same_type_entities in grouped.values():
             if len(same_type_entities) < 2:
                 for entity in same_type_entities:
+                    self._set_entity_duplicate_slot(entity, 0)
                     entity._set_duplicate_instance_badge_text("")
                 continue
 
-            def _sort_key(item: EntityItem) -> tuple[int, str, float, float, int]:
+            assigned_slots: set[int] = set()
+            unassigned_entities: list[EntityItem] = []
+            for entity in same_type_entities:
+                slot = self._entity_duplicate_slot(entity)
+                if slot <= 0 or slot in assigned_slots:
+                    self._set_entity_duplicate_slot(entity, 0)
+                    unassigned_entities.append(entity)
+                    continue
+                assigned_slots.add(slot)
+
+            def _assignment_sort_key(item: EntityItem) -> tuple[int, str, int]:
                 entity_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
                 return (
-                    0 if entity_id else 1,
+                    self._entity_placement_order(item),
                     entity_id.casefold(),
-                    round(item.pos().y(), 3),
-                    round(item.pos().x(), 3),
                     id(item),
                 )
 
-            same_type_entities.sort(key=_sort_key)
-            for index, entity in enumerate(same_type_entities, start=1):
-                entity._set_duplicate_instance_badge_text(str(index) if index <= 99 else "99+")
+            unassigned_entities.sort(key=_assignment_sort_key)
+            next_slot = max(assigned_slots, default=0) + 1
+            for entity in unassigned_entities:
+                self._set_entity_duplicate_slot(entity, next_slot)
+                assigned_slots.add(next_slot)
+                next_slot += 1
+
+            same_type_entities.sort(
+                key=lambda item: (
+                    self._entity_duplicate_slot(item),
+                    self._entity_placement_order(item),
+                    str(item.data(ROLE_ENTITY_ID) or "").strip().casefold(),
+                    id(item),
+                )
+            )
+            for entity in same_type_entities:
+                slot = self._entity_duplicate_slot(entity)
+                entity._set_duplicate_instance_badge_text(str(slot) if slot <= 99 else "99+")
 
     def _mark_active_dungeon_dirty(self) -> None:
         dungeon = self._current_dungeon()

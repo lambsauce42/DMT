@@ -35,6 +35,7 @@ from dungeon_constants import (
     LAYER_FG,
     LAYER_MID,
     ROLE_ENTITY_ID,
+    ROLE_ENTITY_PLACEMENT_ORDER,
     ROLE_ICON,
     ROLE_LINKED_CHARACTER_ID,
     ROLE_LAYER,
@@ -42,6 +43,7 @@ from dungeon_constants import (
     ROLE_LINKED_SHEET_ID,
     ROLE_LINKED_SHEET_NAME,
     ROLE_OWNER_PLAYER_ID,
+    ROLE_DUPLICATE_INSTANCE_SLOT,
 )
 from dungeon_items import DungeonImageItem, EntityItem
 from dmt_package import read_dmt_package_info
@@ -109,6 +111,89 @@ def _dungeon_record(*items, dungeon_id: str = "d1", name: str = "Dungeon 1", dir
         "preview_signature": None,
         "dirty": dirty,
     }
+
+
+def test_duplicate_entity_numbers_stay_stable_until_only_one_remains(dungeon_widget):
+    scene = dungeon_widget.canvas.scene()
+
+    def _make_entity(label: str, entity_id: str, placement_order: int) -> EntityItem:
+        entity = EntityItem(QPointF(float(placement_order) * 40.0, 0.0))
+        entity.setData(ROLE_LABEL, label)
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_ENTITY_PLACEMENT_ORDER, placement_order)
+        entity.setData(ROLE_DUPLICATE_INSTANCE_SLOT, 0)
+        scene.addItem(entity)
+        return entity
+
+    first = _make_entity("Dragon", "dragon-1", 1)
+    second = _make_entity("Dragon", "dragon-2", 2)
+    third = _make_entity("Dragon", "dragon-3", 3)
+
+    dungeon_widget._refresh_entity_duplicate_badges()
+    assert first._duplicate_instance_badge_text() == "1"
+    assert second._duplicate_instance_badge_text() == "2"
+    assert third._duplicate_instance_badge_text() == "3"
+
+    scene.removeItem(second)
+    dungeon_widget._refresh_entity_duplicate_badges()
+    assert first._duplicate_instance_badge_text() == "1"
+    assert third._duplicate_instance_badge_text() == "3"
+
+    fourth = _make_entity("Dragon", "dragon-4", 4)
+    dungeon_widget._refresh_entity_duplicate_badges()
+    assert first._duplicate_instance_badge_text() == "1"
+    assert third._duplicate_instance_badge_text() == "3"
+    assert fourth._duplicate_instance_badge_text() == "4"
+
+    scene.removeItem(third)
+    scene.removeItem(fourth)
+    dungeon_widget._refresh_entity_duplicate_badges()
+    assert first._duplicate_instance_badge_text() == ""
+    assert int(first.data(ROLE_DUPLICATE_INSTANCE_SLOT) or 0) == 0
+
+    fifth = _make_entity("Dragon", "dragon-5", 5)
+    dungeon_widget._refresh_entity_duplicate_badges()
+    assert first._duplicate_instance_badge_text() == "1"
+    assert fifth._duplicate_instance_badge_text() == "2"
+
+
+def test_player_owned_entities_render_above_fog_without_serializing_lifted_z(dungeon_widget):
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+
+    scene = dungeon_widget.canvas.scene()
+    owned = EntityItem(QPointF(64.0, 64.0))
+    owned.setData(ROLE_ENTITY_ID, "owned-1")
+    owned.setData(ROLE_OWNER_PLAYER_ID, "player-local")
+    scene.addItem(owned)
+
+    other = EntityItem(QPointF(128.0, 64.0))
+    other.setData(ROLE_ENTITY_ID, "other-1")
+    other.setData(ROLE_OWNER_PLAYER_ID, "player-other")
+    scene.addItem(other)
+
+    base_owned_z = float(owned.zValue())
+    base_other_z = float(other.zValue())
+    dungeon_widget.canvas.init_fog()
+    fog_item = dungeon_widget.canvas.fog_item
+    assert fog_item is not None
+
+    dungeon_widget._apply_online_permissions()
+
+    assert owned.zValue() > fog_item.zValue()
+    assert other.zValue() == base_other_z
+
+    serialized = dungeon_widget._serialize_scene_for_player_state_update()
+    owned_payload = next(
+        item
+        for item in serialized["items"]
+        if isinstance(item, dict) and item.get("entity_id") == "owned-1"
+    )
+    assert float(owned_payload["z"]) == base_owned_z
+
+    dungeon_widget._online_mode = ONLINE_MODE_LOCAL_DM
+    dungeon_widget._apply_online_permissions()
+    assert owned.zValue() == base_owned_z
 
 
 def _entity_state(entity_id: str, owner_player_id: str, *, pos=(0.0, 0.0), linked_inventory=None, **extra) -> dict:
@@ -6201,6 +6286,84 @@ def test_player_can_collapse_initiative_overlay_locally(dungeon_widget, qtbot):
     assert dungeon_widget._initiative_state["collapsed"] is False
     assert dungeon_widget._player_initiative_overlay_collapsed is True
     assert not dungeon_widget._initiative_reopen_btn.isHidden()
+
+
+def test_player_collapsed_initiative_does_not_steal_inspector_keypresses(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._on_client_snapshot_received(
+        {
+            "players": {"player-1": "Alice"},
+            "scene": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "pos": [12.0, 18.0],
+                        "entity_id": "e1",
+                        "label": "Wolf",
+                        "owner_player_id": "player-1",
+                        "hp": 17,
+                        "max_hp": 22,
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "initiative_state": {
+                "active": True,
+                "collapsed": False,
+                "player_entries": {
+                    "player-1:e1": {
+                        "player_id": "player-1",
+                        "entity_id": "e1",
+                        "name": "Alice - Wolf",
+                        "initiative": None,
+                    }
+                },
+                "entity_entries": {},
+            },
+        }
+    )
+    QApplication.processEvents()
+
+    edits = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QLineEdit)
+        if str(candidate.property("initiative_kind") or "") == "player"
+        and str(candidate.property("initiative_id") or "") == "player-1:e1"
+    ]
+    assert edits
+    initiative_edit = edits[-1]
+    initiative_edit.setFocus(Qt.FocusReason.MouseFocusReason)
+    QApplication.processEvents()
+    qtbot.keyClicks(dungeon_widget.canvas, "23")
+    QApplication.processEvents()
+    assert initiative_edit.text() == "23"
+
+    dungeon_widget._initiative_collapse_btn.click()
+    qtbot.wait(220)
+
+    assert dungeon_widget._initiative_overlay.isHidden()
+    assert dungeon_widget._initiative_last_target is None
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 23
+
+    entities = [item for item in dungeon_widget.canvas.scene().items() if isinstance(item, EntityItem)]
+    assert entities
+    entity = entities[0]
+    entity.setSelected(True)
+    QApplication.processEvents()
+    assert dungeon_widget.inspector.isVisible()
+
+    hp_edit = dungeon_widget.inspector.hp_stat.curr_edit
+    hp_edit.selectAll()
+    hp_edit.setFocus(Qt.FocusReason.MouseFocusReason)
+    QApplication.processEvents()
+    qtbot.keyClicks(hp_edit, "-7")
+    QApplication.processEvents()
+
+    assert hp_edit.value() == -7
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:e1"]["initiative"] == 23
 
 
 def test_initiative_can_collapse_when_no_player_entity_rows_exist(dungeon_widget):

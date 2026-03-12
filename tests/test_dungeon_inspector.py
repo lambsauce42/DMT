@@ -65,3 +65,33 @@ def test_inspector_pending_changes_clear_safely_on_state_reload(qtbot):
 
     assert widget.inspector._entity is None
     assert widget.inspector.isHidden()
+
+
+def test_inspector_hp_current_allows_negative_values(qtbot):
+    widget = DungeonAppletWidget()
+    qtbot.addWidget(widget)
+
+    entity = EntityItem(QPointF(0, 0))
+    widget.canvas.scene().addItem(entity)
+    widget.inspector.set_entity(entity)
+
+    widget.inspector.hp_stat.curr_edit.setValue(-7)
+
+    assert widget.inspector.hp_stat.curr_edit.minimum() < 0
+    assert widget.inspector.hp_stat.curr_edit.value() == -7
+    assert widget.inspector.hp_stat.bar.value() == 0
+
+
+def test_inspector_hp_current_allows_values_above_max(qtbot):
+    widget = DungeonAppletWidget()
+    qtbot.addWidget(widget)
+
+    entity = EntityItem(QPointF(0, 0), hp=120, max_hp=100)
+    widget.canvas.scene().addItem(entity)
+    widget.inspector.set_entity(entity)
+
+    widget.inspector.hp_stat.curr_edit.setValue(135)
+
+    assert widget.inspector.hp_stat.curr_edit.value() == 135
+    assert widget.inspector.hp_stat.max_edit.value() == 100
+    assert widget.inspector.hp_stat.bar.value() == 100

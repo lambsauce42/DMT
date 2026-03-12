@@ -19,7 +19,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPen, QColor, QPainter, QPainterPath, QPolygonF, QBrush, QPainterPathStroker, QPixmap
 from PySide6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
-from dungeon_constants import GRID_SIZE, FLOOR_COLOR, WALL_COLOR, WALL_WIDTH, ROLE_LABEL, ROLE_ENTITY_ID
+from dungeon_constants import (
+    GRID_SIZE,
+    FLOOR_COLOR,
+    WALL_COLOR,
+    WALL_WIDTH,
+    ROLE_LABEL,
+    ROLE_ENTITY_ID,
+    ROLE_DUPLICATE_INSTANCE_SLOT,
+)
 
 try:
     import shiboken6
@@ -476,23 +484,13 @@ class EntityItem(QGraphicsItem):
                 same_type_entities.append(item)
         if len(same_type_entities) < 2:
             return ""
-
-        def _sort_key(item: EntityItem) -> tuple[int, str, float, float, int]:
-            entity_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
-            return (
-                0 if entity_id else 1,
-                entity_id.casefold(),
-                round(item.pos().y(), 3),
-                round(item.pos().x(), 3),
-                id(item),
-            )
-
-        same_type_entities.sort(key=_sort_key)
         try:
-            index = same_type_entities.index(self) + 1
-        except ValueError:
+            slot = int(self.data(ROLE_DUPLICATE_INSTANCE_SLOT) or 0)
+        except (TypeError, ValueError):
+            slot = 0
+        if slot <= 0:
             return ""
-        return str(index) if index <= 99 else "99+"
+        return str(slot) if slot <= 99 else "99+"
 
     def _duplicate_instance_badge_text(self) -> str:
         current_type_key = self._entity_type_key()
@@ -502,6 +500,11 @@ class EntityItem(QGraphicsItem):
             and self._duplicate_badge_cache_type_key == current_type_key
             and self._duplicate_badge_cache_entity_id == current_entity_id
         ):
+            if self._duplicate_badge_text_cache:
+                badge_text = self._compute_duplicate_instance_badge_text()
+                if badge_text != self._duplicate_badge_text_cache:
+                    self._duplicate_badge_text_cache = badge_text
+                    return badge_text
             return self._duplicate_badge_text_cache
         badge_text = self._compute_duplicate_instance_badge_text()
         self._duplicate_badge_text_cache = badge_text
@@ -526,7 +529,7 @@ class EntityItem(QGraphicsItem):
     
     @hp.setter
     def hp(self, value: int):
-        self._hp = max(0, min(value, self._max_hp))
+        self._hp = int(value)
         self.update()
 
     @property
@@ -590,7 +593,7 @@ class EntityItem(QGraphicsItem):
             painter.drawEllipse(token_rect)
 
         if self._hp <= 0:
-            x_size = max(7.0, min(icon_rect.width(), icon_rect.height()) * 0.38)
+            x_size = max(9.0, min(icon_rect.width(), icon_rect.height()) * 0.46)
             x_half = x_size / 2.0
             x_center = icon_rect.center()
             x_p1 = QPointF(x_center.x() - x_half, x_center.y() - x_half)
@@ -598,9 +601,9 @@ class EntityItem(QGraphicsItem):
             x_p3 = QPointF(x_center.x() - x_half, x_center.y() + x_half)
             x_p4 = QPointF(x_center.x() + x_half, x_center.y() - x_half)
 
-            outline_width = max(2.0, ring_width * 0.38)
-            stroke_width = max(1.0, ring_width * 0.22)
-            painter.setPen(QPen(QColor(15, 23, 42, 210), outline_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            outline_width = max(5.0, ring_width * 1.02)
+            stroke_width = max(2.2, ring_width * 0.28)
+            painter.setPen(QPen(QColor("#000000"), outline_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.drawLine(x_p1, x_p2)
             painter.drawLine(x_p3, x_p4)
             painter.setPen(QPen(QColor("#ef4444"), stroke_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
@@ -608,7 +611,8 @@ class EntityItem(QGraphicsItem):
             painter.drawLine(x_p3, x_p4)
 
         if self.view_mode == "dm" or self.player_stats_visible:
-            hp_ratio = self._hp / self._max_hp if self._max_hp > 0 else 0
+            displayed_hp = max(0, self._hp)
+            hp_ratio = min(1.0, displayed_hp / self._max_hp) if self._max_hp > 0 else 0
             hp_color = self._hp_color(hp_ratio)
 
             ring_rect = token_rect.adjusted(
