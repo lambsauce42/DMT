@@ -9,7 +9,7 @@ if not exist "%PS1_PATH%" (
   exit /b 1
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS1_PATH%" -RepoPath "%SCRIPT_DIR%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS1_PATH%" -RepoPath "%SCRIPT_DIR%" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (

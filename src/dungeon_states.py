@@ -372,6 +372,10 @@ class SelectState(CanvasState):
         super().__init__(canvas)
         self.drag_start_positions: dict[QGraphicsItem, QPointF] = {}
         self.is_dragging = False
+        self._drag_press_scene_pos: QPointF | None = None
+        self._drag_started = False
+        self._drag_primary_item: QGraphicsItem | None = None
+        self._drag_move_logged = False
         self._merge_requested_during_drag = False
         self._resizing_room: RoomGroup | None = None
         self._resize_handle: str | None = None
@@ -508,8 +512,43 @@ class SelectState(CanvasState):
         self._resize_last_path_local = None
         self._resize_pointer_offset_scene = None
 
+    def _emit_drag_debug(self, event: str, **fields: object) -> None:
+        emitter = getattr(self.canvas, "_emit_online_debug_event", None)
+        if callable(emitter):
+            emitter(str(event or ""), **fields)
+
+    @staticmethod
+    def _entity_id_for_item(item: QGraphicsItem | None) -> str:
+        if item is None:
+            return ""
+        return str(item.data(ROLE_ENTITY_ID) or "").strip()
+
+    @staticmethod
+    def _owner_id_for_item(item: QGraphicsItem | None) -> str:
+        if item is None:
+            return ""
+        return str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip()
+
+    @staticmethod
+    def _point_text(point: QPointF | None) -> str:
+        if point is None:
+            return ""
+        return f"{float(point.x()):.1f},{float(point.y()):.1f}"
+
+    def _selected_entity_ids_csv(self) -> str:
+        entity_ids: list[str] = []
+        for item in self.canvas.scene().selectedItems():
+            entity_id = self._entity_id_for_item(item)
+            if entity_id:
+                entity_ids.append(entity_id)
+        return ",".join(entity_ids)
+
     def cancel_active_interaction(self) -> None:
         self.is_dragging = False
+        self._drag_press_scene_pos = None
+        self._drag_started = False
+        self._drag_primary_item = None
+        self._drag_move_logged = False
         self.drag_start_positions = {}
         self._merge_requested_during_drag = False
         self._clear_resize_state()
@@ -571,9 +610,50 @@ class SelectState(CanvasState):
                 if item._detect_resize_handle(local_pos) is not None:
                     # Let the item handle its own resize drag; do not arm move/snap.
                     self.is_dragging = False
+                    self._drag_press_scene_pos = None
+                    self._drag_started = False
+                    self._drag_primary_item = None
+                    self._drag_move_logged = False
                     self.drag_start_positions = {}
                     self._merge_requested_during_drag = False
                     return False
+
+            selection_modifiers = event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+            )
+            if item is not None and not selection_modifiers:
+                if not item.isSelected():
+                    self.canvas.scene().clearSelection()
+                    item.setSelected(True)
+
+                selected: list[QGraphicsItem] = []
+                seen: set[int] = set()
+                for candidate in self.canvas.scene().selectedItems():
+                    anchor = self._movable_anchor(candidate)
+                    if anchor is None:
+                        continue
+                    key = id(anchor)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    selected.append(anchor)
+                if id(item) not in seen:
+                    selected.append(item)
+                self.drag_start_positions = {i: QPointF(i.pos()) for i in selected}
+                self.is_dragging = True
+                self._drag_press_scene_pos = QPointF(scene_pos)
+                self._drag_started = False
+                self._drag_primary_item = item
+                self._drag_move_logged = False
+                self._merge_requested_during_drag = False
+                self._emit_drag_debug(
+                    "player_drag_press",
+                    entity_id=self._entity_id_for_item(item),
+                    owner_player_id=self._owner_id_for_item(item),
+                    press_scene_pos=self._point_text(scene_pos),
+                    selected_entity_ids=self._selected_entity_ids_csv(),
+                )
+                return True
             
             selected = []
             seen: set[int] = set()
@@ -596,12 +676,20 @@ class SelectState(CanvasState):
                  # If item is not selected yet, it will be selected by view event (if we propagate or handle?)
                  # QGraphicsView default implementation handles selection if we call super().mousePress (which we do if we return False)
                  self.is_dragging = True
+                 self._drag_press_scene_pos = QPointF(scene_pos)
+                 self._drag_started = False
+                 self._drag_primary_item = item
+                 self._drag_move_logged = False
                  self._merge_requested_during_drag = bool(
                      event.modifiers() & Qt.KeyboardModifier.ShiftModifier
                  )
             else:
                  # Rubberband drag potentially
                  self.is_dragging = False
+                 self._drag_press_scene_pos = None
+                 self._drag_started = False
+                 self._drag_primary_item = None
+                 self._drag_move_logged = False
                  self._merge_requested_during_drag = False
         return False
 
@@ -653,6 +741,37 @@ class SelectState(CanvasState):
 
         if self.is_dragging and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             self._merge_requested_during_drag = True
+        if self.is_dragging and self._drag_press_scene_pos is not None:
+            delta = scene_pos - self._drag_press_scene_pos
+            if not self._drag_started and delta.manhattanLength() < 1.0:
+                return True
+            self._drag_started = True
+            for item, start_pos in self.drag_start_positions.items():
+                if not _qt_object_is_valid(item):
+                    continue
+                if not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable):
+                    continue
+                item.setPos(
+                    QPointF(
+                        float(start_pos.x()) + float(delta.x()),
+                        float(start_pos.y()) + float(delta.y()),
+                    )
+                )
+            if not self._drag_move_logged:
+                primary_item = self._drag_primary_item
+                current_pos = primary_item.pos() if primary_item is not None else None
+                self._emit_drag_debug(
+                    "player_drag_move",
+                    entity_id=self._entity_id_for_item(primary_item),
+                    owner_player_id=self._owner_id_for_item(primary_item),
+                    press_scene_pos=self._point_text(self._drag_press_scene_pos),
+                    current_scene_pos=self._point_text(scene_pos),
+                    current_item_pos=self._point_text(current_pos),
+                    delta_x=round(float(delta.x()), 2),
+                    delta_y=round(float(delta.y()), 2),
+                )
+                self._drag_move_logged = True
+            return True
         self._update_resize_hover(scene_pos)
         return False
 
@@ -741,6 +860,22 @@ class SelectState(CanvasState):
                           moved_list.append(item)
                 
                 if moved_list:
+                    moved_entity_ids = ",".join(
+                        entity_id
+                        for entity_id in (self._entity_id_for_item(item) for item in moved_list)
+                        if entity_id
+                    )
+                    primary_item = self._drag_primary_item
+                    primary_pos = primary_item.pos() if primary_item is not None else None
+                    self._emit_drag_debug(
+                        "player_drag_release_commit",
+                        entity_id=self._entity_id_for_item(primary_item),
+                        owner_player_id=self._owner_id_for_item(primary_item),
+                        moved_count=int(len(moved_list)),
+                        moved_entity_ids=moved_entity_ids,
+                        current_item_pos=self._point_text(primary_pos),
+                        selected_entity_ids=self._selected_entity_ids_csv(),
+                    )
                     self.canvas.undo_stack.beginMacro("Move Items")
                     merge_requested = self._merge_requested_during_drag or bool(
                         event.modifiers() & Qt.KeyboardModifier.ShiftModifier
@@ -752,8 +887,19 @@ class SelectState(CanvasState):
                     cmd = MoveItemsCommand(moved_list, self.drag_start_positions)
                     self.canvas.undo_stack.push(cmd)
                     self.canvas.undo_stack.endMacro()
+                elif self._drag_primary_item is not None:
+                    self._emit_drag_debug(
+                        "player_drag_release_noop",
+                        entity_id=self._entity_id_for_item(self._drag_primary_item),
+                        owner_player_id=self._owner_id_for_item(self._drag_primary_item),
+                        selected_entity_ids=self._selected_entity_ids_csv(),
+                    )
 
             self.is_dragging = False
+            self._drag_press_scene_pos = None
+            self._drag_started = False
+            self._drag_primary_item = None
+            self._drag_move_logged = False
             self.drag_start_positions = {}
             self._merge_requested_during_drag = False
             self._update_resize_hover(scene_pos)

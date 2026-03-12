@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QGraphicsScene, QLabel, QLineEdit, QListWidget, QPushButton
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -884,6 +885,75 @@ def test_player_scene_changes_do_not_send_state_update_without_undo_push(
 
     assert dungeon_widget.canvas.undo_stack.index() == undo_index_before
     assert calls == []
+
+
+def test_player_owned_entity_drag_moves_before_release_and_syncs_on_commit(
+    dungeon_widget,
+    qtbot,
+    monkeypatch,
+):
+    dungeon_widget.resize(1000, 700)
+    dungeon_widget.show()
+    qtbot.waitExposed(dungeon_widget)
+
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._active_dungeon_id = "d1"
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_send_player_state_update",
+        lambda payload: calls.append(dict(payload)) or True,
+    )
+    movement_events: list[str] = []
+    original_movement_debug_log = dungeon_widget._movement_debug_log
+
+    def _capture_movement_event(event: str, **fields):
+        movement_events.append(str(event))
+        return original_movement_debug_log(event, **fields)
+
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_movement_debug_log",
+        _capture_movement_event,
+    )
+
+    entity = EntityItem(QPointF(0.0, 0.0))
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-local")
+    entity.setData(ROLE_ENTITY_ID, "owned-drag-1")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._apply_online_permissions()
+
+    viewport = dungeon_widget.canvas.viewport()
+    start = dungeon_widget.canvas.mapFromScene(QPointF(0.0, 0.0))
+    mid_drag = dungeon_widget.canvas.mapFromScene(QPointF(93.0, 101.0))
+
+    QTest.mousePress(
+        viewport,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        start,
+    )
+    QTest.mouseMove(viewport, mid_drag)
+    QApplication.processEvents()
+
+    assert entity.pos() == QPointF(93.0, 101.0)
+    assert calls == []
+    assert "player_drag_press" in movement_events
+    assert "player_drag_move" in movement_events
+
+    QTest.mouseRelease(
+        viewport,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        mid_drag,
+    )
+    QApplication.processEvents()
+
+    assert len(calls) == 1
+    assert "player_drag_release_commit" in movement_events
 
 
 def test_switching_back_to_local_mode_hides_online_panels(dungeon_widget):
@@ -7313,6 +7383,49 @@ def test_player_patch_live_refreshes_selected_inspector_without_reselect(dungeon
     assert dungeon_widget.inspector.hp_stat.curr_edit.value() == 21
     assert dungeon_widget.inspector.hp_stat.max_edit.value() == 24
     assert dungeon_widget.inspector.shield_widget.spin.value() == 18
+
+
+def test_player_patch_reload_fallback_preserves_selected_owned_entity(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._players_dungeon_id = "d1"
+    dungeon_widget._active_dungeon_id = "d1"
+    dungeon_widget._dungeons = [
+        _dungeon_record(
+            _entity_state("e1", "player-1", pos=(10.0, 10.0)),
+            _entity_state("e2", "player-2", pos=(60.0, 60.0)),
+        )
+    ]
+    dungeon_widget._load_dungeon_state(
+        {
+            "items": [_entity_state("e1", "player-1", pos=(10.0, 10.0))],
+            "fog": {"path": []},
+        }
+    )
+    dungeon_widget._apply_online_permissions()
+
+    selected = dungeon_widget._find_entity_by_id("e1")
+    assert selected is not None
+    selected.setSelected(True)
+
+    changed = dungeon_widget._apply_player_state_update(
+        player_id="player-2",
+        target_dungeon=dungeon_widget._dungeons[0],
+        incoming_state={
+            "items": [_entity_state("e2", "player-2", pos=(120.0, 140.0))],
+            "fog": {"path": []},
+        },
+        refresh_navigation=False,
+    )
+
+    assert changed is True
+    selected_ids = [
+        str(item.data(ROLE_ENTITY_ID) or "")
+        for item in dungeon_widget.canvas.scene().selectedItems()
+        if isinstance(item, EntityItem)
+    ]
+    assert selected_ids == ["e1"]
 
 
 def test_player_snapshot_defers_scene_reload_while_drag_active(dungeon_widget):

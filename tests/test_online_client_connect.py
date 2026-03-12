@@ -3,6 +3,7 @@ import socket
 import sys
 import time
 
+from PySide6.QtNetwork import QAbstractSocket
 from PySide6.QtWidgets import QApplication
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -11,6 +12,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from online_session.client import OnlineSessionClient
+from online_session.protocol import encode_message
 from online_session.controllers import (
     ClientSessionController,
     HostSessionController,
@@ -29,6 +31,28 @@ def _spin_for(milliseconds: int) -> None:
     deadline = time.monotonic() + (max(0, int(milliseconds)) / 1000.0)
     while time.monotonic() < deadline:
         QApplication.processEvents()
+
+
+class _SocketStub:
+    def __init__(self):
+        self.writes = []
+        self._state = QAbstractSocket.SocketState.ConnectedState
+        self._read_payload = b""
+
+    def state(self):
+        return self._state
+
+    def write(self, payload):
+        self.writes.append(payload)
+        return len(payload)
+
+    def readAll(self):
+        payload = self._read_payload
+        self._read_payload = b""
+        return payload
+
+    def set_read_payload(self, payload: bytes) -> None:
+        self._read_payload = payload
 
 
 def test_client_rewrites_wildcard_host_to_loopback_and_connects(qtbot):
@@ -256,6 +280,64 @@ def test_client_controller_send_command_returns_false_when_client_send_fails(mon
         )
         is False
     )
+
+
+def test_client_simulated_ping_delays_outbound_send(monkeypatch, qtbot):
+    monkeypatch.setenv("DMT_ONLINE_SIMULATED_PING_MS", "80")
+    monkeypatch.delenv("DMT_ONLINE_SIMULATED_PACKET_LOSS_PERCENT", raising=False)
+
+    client = OnlineSessionClient()
+    client._socket = _SocketStub()
+
+    payload = {"type": "chat", "text": "slow"}
+    assert client.send(payload) is True
+    assert client._socket.writes == []
+
+    qtbot.waitUntil(lambda: len(client._socket.writes) == 1, timeout=1000)
+    assert client._socket.writes == [encode_message(payload)]
+
+
+def test_client_simulated_packet_loss_drops_inbound_message(monkeypatch):
+    monkeypatch.delenv("DMT_ONLINE_SIMULATED_PING_MS", raising=False)
+    monkeypatch.setenv("DMT_ONLINE_SIMULATED_PACKET_LOSS_PERCENT", "100")
+
+    client = OnlineSessionClient()
+    client._socket = _SocketStub()
+    received = []
+    logs = []
+    client.message_received.connect(lambda _epoch, message: received.append(dict(message)))
+    client.log_line.connect(logs.append)
+
+    client._socket.set_read_payload(encode_message({"type": "chat", "text": "lost"}))
+    client._on_ready_read()
+    _spin_for(100)
+
+    assert received == []
+    assert any("Simulated inbound packet loss for 'chat'" in line for line in logs)
+
+
+def test_client_simulated_packet_loss_does_not_drop_hello_ack(monkeypatch):
+    monkeypatch.delenv("DMT_ONLINE_SIMULATED_PING_MS", raising=False)
+    monkeypatch.setenv("DMT_ONLINE_SIMULATED_PACKET_LOSS_PERCENT", "100")
+
+    client = OnlineSessionClient()
+    client._socket = _SocketStub()
+
+    client._socket.set_read_payload(
+        encode_message(
+            {
+                "type": "hello_ack",
+                "player_id": "player-lossless",
+                "session_token": "token-lossless",
+                "resumed": False,
+            }
+        )
+    )
+    client._on_ready_read()
+    _spin_for(100)
+
+    assert client.player_id == "player-lossless"
+    assert client.session_token == "token-lossless"
 
 
 def test_host_controller_kick_player_only_broadcasts_after_disconnect_starts(monkeypatch):

@@ -1,5 +1,11 @@
 param(
-    [string]$RepoPath = ""
+    [string]$RepoPath = "",
+    [int]$DefaultPingMs = 0,
+    [double]$DefaultPacketLossPercent = 0,
+    [int]$Debug1PingMs = 0,
+    [double]$Debug1PacketLossPercent = 0,
+    [int]$Debug2PingMs = 0,
+    [double]$Debug2PacketLossPercent = 0
 )
 
 Set-StrictMode -Version Latest
@@ -111,6 +117,36 @@ function Start-DmtInstance {
     return $process
 }
 
+function New-InstanceEnv {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [int]$PingMs = 0,
+        [double]$PacketLossPercent = 0
+    )
+
+    if ($PingMs -lt 0) {
+        throw "Ping must be >= 0 for $Label."
+    }
+    if ($PacketLossPercent -lt 0 -or $PacketLossPercent -gt 100) {
+        throw "Packet loss percent must be between 0 and 100 for $Label."
+    }
+
+    $env = @{
+        DMT_ONLINE_DEBUG_LOG = "1"
+        DMT_ONLINE_DEBUG_LABEL = $Label
+        DMT_ONLINE_DEBUG_RUN = $RunId
+        DMT_ONLINE_DEBUG_LOG_DIR = $onlineSyncLogDir
+    }
+    if ($PingMs -gt 0) {
+        $env["DMT_ONLINE_SIMULATED_PING_MS"] = [string]$PingMs
+    }
+    if ($PacketLossPercent -gt 0) {
+        $env["DMT_ONLINE_SIMULATED_PACKET_LOSS_PERCENT"] = [string]$PacketLossPercent
+    }
+    return $env
+}
+
 function Wait-ForMainWindow {
     param(
         [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
@@ -139,34 +175,19 @@ $runId = (Get-Date).ToString("yyyyMMdd_HHmmss")
 $defaultProcess = Start-DmtInstance `
     -Label "Default" `
     -LogDir $launcherLogDir `
-    -ExtraEnv @{
-        DMT_ONLINE_DEBUG_LOG = "1"
-        DMT_ONLINE_DEBUG_LABEL = "Default"
-        DMT_ONLINE_DEBUG_RUN = $runId
-        DMT_ONLINE_DEBUG_LOG_DIR = $onlineSyncLogDir
-    }
+    -ExtraEnv (New-InstanceEnv -Label "Default" -RunId $runId -PingMs $DefaultPingMs -PacketLossPercent $DefaultPacketLossPercent)
 Start-Sleep -Milliseconds 450
 $debugTopProcess = Start-DmtInstance `
     -Label "DebugTopLeft" `
     -Profile "DEBUG1" `
     -LogDir $launcherLogDir `
-    -ExtraEnv @{
-        DMT_ONLINE_DEBUG_LOG = "1"
-        DMT_ONLINE_DEBUG_LABEL = "DebugTopLeft"
-        DMT_ONLINE_DEBUG_RUN = $runId
-        DMT_ONLINE_DEBUG_LOG_DIR = $onlineSyncLogDir
-    }
+    -ExtraEnv (New-InstanceEnv -Label "DebugTopLeft" -RunId $runId -PingMs $Debug1PingMs -PacketLossPercent $Debug1PacketLossPercent)
 Start-Sleep -Milliseconds 450
 $debugBottomProcess = Start-DmtInstance `
     -Label "DebugBottomLeft" `
     -Profile "DEBUG2" `
     -LogDir $launcherLogDir `
-    -ExtraEnv @{
-        DMT_ONLINE_DEBUG_LOG = "1"
-        DMT_ONLINE_DEBUG_LABEL = "DebugBottomLeft"
-        DMT_ONLINE_DEBUG_RUN = $runId
-        DMT_ONLINE_DEBUG_LOG_DIR = $onlineSyncLogDir
-    }
+    -ExtraEnv (New-InstanceEnv -Label "DebugBottomLeft" -RunId $runId -PingMs $Debug2PingMs -PacketLossPercent $Debug2PacketLossPercent)
 
 $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $halfWidth = [int][Math]::Floor($workArea.Width / 2)
@@ -211,3 +232,7 @@ foreach ($layout in $layouts) {
 Write-Host "Done. Windows arranged: right=Default, left-top=DEBUG1, left-bottom=DEBUG2."
 Write-Host "Online sync logs: $onlineSyncLogDir"
 Write-Host "Run id: $runId"
+Write-Host "Transport debug params:"
+Write-Host "  Default: ping=${DefaultPingMs}ms loss=${DefaultPacketLossPercent}%"
+Write-Host "  DEBUG1:  ping=${Debug1PingMs}ms loss=${Debug1PacketLossPercent}%"
+Write-Host "  DEBUG2:  ping=${Debug2PingMs}ms loss=${Debug2PacketLossPercent}%"

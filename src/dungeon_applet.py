@@ -1218,7 +1218,17 @@ class DungeonCanvas(QGraphicsView):
             return True
         return False
 
+    def _emit_online_debug_event(self, event: str, **fields: object) -> None:
+        owner = self.parent()
+        logger = getattr(owner, "_movement_debug_log", None)
+        if callable(logger):
+            logger(str(event or ""), **fields)
+
     def prepare_for_scene_reload(self) -> None:
+        self._emit_online_debug_event(
+            "scene_reload_prepare",
+            selected_count=int(len(self.scene().selectedItems())),
+        )
         self._is_panning = False
         state = self._current_state
         if state is not None:
@@ -4868,6 +4878,10 @@ class DungeonAppletWidget(QWidget):
         self._suppress_initiative_sync = False
         self._host_scene_sync_pending = False
         self._last_host_scene_signature = ""
+        self._host_scene_sync_suppressed = False
+        self._host_scene_sync_suppression_depth = 0
+        self._host_scene_sync_suppression_token = 0
+        self._last_debug_selection_signature = ""
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(220)
@@ -12976,6 +12990,13 @@ class DungeonAppletWidget(QWidget):
             return
         if self._suppress_change_tracking or self._suppress_network_sync:
             return
+        if self._host_scene_sync_suppressed:
+            self._movement_debug_log(
+                "host_scene_sync_ignored",
+                reason="suppressed_remote_player_apply",
+                pending=bool(self._host_scene_sync_pending),
+            )
+            return
         self._host_scene_sync_pending = True
         self._host_scene_sync_timer.start()
 
@@ -13554,6 +13575,11 @@ class DungeonAppletWidget(QWidget):
         entity: EntityItem,
         item_data: dict,
     ) -> None:
+        entity_id = str(item_data.get("entity_id") or entity.data(ROLE_ENTITY_ID) or "").strip()
+        owner_player_id = str(
+            item_data.get("owner_player_id") or entity.data(ROLE_OWNER_PLAYER_ID) or ""
+        ).strip()
+        before_pos = QPointF(entity.pos())
         pos = item_data.get("pos")
         if isinstance(pos, (list, tuple)) and len(pos) >= 2:
             try:
@@ -13615,6 +13641,15 @@ class DungeonAppletWidget(QWidget):
             entity.size_w_cells = next_size_w
             entity.size_h_cells = next_size_h
             entity.lock_square = next_lock_square
+        after_pos = QPointF(entity.pos())
+        if before_pos != after_pos:
+            self._movement_debug_log(
+                "player_state_live_entity_applied",
+                entity_id=entity_id,
+                owner_player_id=owner_player_id,
+                pos_before=self._debug_point_text(before_pos),
+                pos_after=self._debug_point_text(after_pos),
+            )
 
     def _build_live_player_strokes_by_key(self, player_id: str) -> dict[str, QGraphicsPathItem]:
         player_strokes: dict[str, QGraphicsPathItem] = {}
@@ -13703,12 +13738,24 @@ class DungeonAppletWidget(QWidget):
                 continue
             expected_strokes[self._stroke_sync_key(item_data)] = item_data
 
+        self._movement_debug_log(
+            "player_state_live_apply_begin",
+            source_player_id=clean_player,
+            expected_entity_count=int(len(expected_entities)),
+            expected_stroke_count=int(len(expected_strokes)),
+        )
+
         was_suppressed = self._suppress_change_tracking
         self._suppress_change_tracking = True
         try:
             for entity_id, item_data in expected_entities.items():
                 target_entity = self._find_entity_by_id(entity_id)
                 if not isinstance(target_entity, EntityItem):
+                    self._movement_debug_log(
+                        "player_state_live_apply_missing_entity",
+                        source_player_id=clean_player,
+                        entity_id=entity_id,
+                    )
                     return False
                 self._apply_player_owned_entity_state_to_live_item(target_entity, item_data)
 
@@ -13739,6 +13786,12 @@ class DungeonAppletWidget(QWidget):
         self._refresh_entity_duplicate_badges()
         self._apply_online_permissions()
         self._on_selection_changed()
+        self._movement_debug_log(
+            "player_state_live_apply_ok",
+            source_player_id=clean_player,
+            expected_entity_count=int(len(expected_entities)),
+            expected_stroke_count=int(len(expected_strokes)),
+        )
         return True
 
     def _extract_player_owned_state(self, state: dict, *, player_id: str) -> dict:
@@ -13952,6 +14005,13 @@ class DungeonAppletWidget(QWidget):
         target_state = target_dungeon.get("state")
         if not isinstance(target_state, dict):
             target_state = self._blank_dungeon_state()
+        self._movement_debug_log(
+            "player_state_merge_begin",
+            source_player_id=str(player_id or ""),
+            dungeon_id=str(target_dungeon.get("id") or ""),
+            incoming_state_bytes=self._debug_json_size_bytes(incoming_state),
+            target_state_bytes=self._debug_json_size_bytes(target_state),
+        )
         source_items = target_state.get("items")
         incoming_items = incoming_state.get("items")
         if not isinstance(source_items, list) or not isinstance(incoming_items, list):
@@ -14026,6 +14086,11 @@ class DungeonAppletWidget(QWidget):
                 updated_items.append(incoming_player_strokes[stroke_key])
 
         if not changed:
+            self._movement_debug_log(
+                "player_state_merge_noop",
+                source_player_id=str(player_id or ""),
+                dungeon_id=str(target_dungeon.get("id") or ""),
+            )
             return False
 
         target_dungeon["state"] = {
@@ -14036,20 +14101,45 @@ class DungeonAppletWidget(QWidget):
             target_dungeon["dirty"] = True
         target_dungeon["preview"] = None
         target_dungeon["preview_signature"] = None
+        target_dungeon_is_active = str(target_dungeon.get("id") or "") == str(self._active_dungeon_id or "")
+        suppress_host_scene_sync = bool(
+            target_dungeon_is_active and self._online_mode == ONLINE_MODE_DM_HOST
+        )
+        if suppress_host_scene_sync:
+            self._begin_host_scene_sync_suppression(reason="remote_player_state_update")
         self._suppress_network_sync = True
         try:
-            if str(target_dungeon.get("id") or "") == str(self._active_dungeon_id or ""):
+            if target_dungeon_is_active:
+                preserved_entity_id = self._selected_entity_id()
                 applied_live = self._apply_player_state_update_to_active_scene(
                     player_id=player_id,
                     target_state=target_dungeon["state"],
                 )
                 if not applied_live:
+                    self._movement_debug_log(
+                        "player_state_reload_fallback",
+                        source_player_id=str(player_id or ""),
+                        dungeon_id=str(target_dungeon.get("id") or ""),
+                        preserved_entity_id=str(preserved_entity_id or ""),
+                    )
                     self._load_dungeon_state(target_dungeon["state"])
+                    self._restore_entity_selection(preserved_entity_id)
+                    self._on_selection_changed()
         finally:
             self._suppress_network_sync = False
+            if suppress_host_scene_sync:
+                self._end_host_scene_sync_suppression(reason="remote_player_state_update")
         if refresh_navigation:
             self._refresh_collection_dirty()
             self._refresh_dungeon_list(preserve_selection=True)
+        self._movement_debug_log(
+            "player_state_merge_applied",
+            source_player_id=str(player_id or ""),
+            dungeon_id=str(target_dungeon.get("id") or ""),
+            refresh_navigation=bool(refresh_navigation),
+            mark_dirty=bool(mark_dirty),
+            **self._debug_state_summary(incoming_state),
+        )
         return True
 
     def _remove_player_from_host_session(self, player_id: str, *, reason: str) -> None:
@@ -19586,12 +19676,26 @@ class DungeonAppletWidget(QWidget):
     def _restore_entity_selection(self, entity_id: str | None) -> None:
         target_id = str(entity_id or "").strip()
         if not target_id:
+            self._movement_debug_log(
+                "selection_restore_skipped",
+                reason="empty_entity_id",
+            )
             return
         entity = self._find_entity_by_id(target_id)
         if entity is None:
+            self._movement_debug_log(
+                "selection_restore_skipped",
+                reason="entity_not_found",
+                entity_id=target_id,
+            )
             return
         if entity.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable:
             entity.setSelected(True)
+            self._movement_debug_log(
+                "selection_restored",
+                entity_id=target_id,
+                pos=self._debug_point_text(entity.pos()),
+            )
 
     def _resolve_runtime_icon_path(self, icon_ref_or_path: str) -> str:
         if not icon_ref_or_path:
@@ -19933,6 +20037,100 @@ class DungeonAppletWidget(QWidget):
         summary.update(self._debug_state_summary(scene))
         return summary
 
+    @staticmethod
+    def _debug_point_text(point: object) -> str:
+        if not isinstance(point, QPointF):
+            return ""
+        return f"{float(point.x()):.1f},{float(point.y()):.1f}"
+
+    def _debug_entity_ref(self, item: object) -> dict[str, object]:
+        if not isinstance(item, EntityItem):
+            return {}
+        entity_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
+        owner_player_id = str(item.data(ROLE_OWNER_PLAYER_ID) or "").strip()
+        return {
+            "entity_id": entity_id,
+            "owner_player_id": owner_player_id,
+            "pos": self._debug_point_text(item.pos()),
+            "selected": bool(item.isSelected()),
+        }
+
+    def _selected_entity_ids_csv(self) -> str:
+        entity_ids: list[str] = []
+        for item in self.canvas.scene().selectedItems():
+            if not isinstance(item, EntityItem):
+                continue
+            entity_id = str(item.data(ROLE_ENTITY_ID) or "").strip()
+            if entity_id:
+                entity_ids.append(entity_id)
+        return ",".join(entity_ids)
+
+    def _movement_debug_log(self, event: str, **fields: object) -> None:
+        self._debug_log(event, **fields)
+        self._online_log_event(event, **fields)
+
+    def _record_selection_debug(self, *, reason: str) -> None:
+        selected = self.canvas.scene().selectedItems()
+        selected_entity_ids = self._selected_entity_ids_csv()
+        selected_count = len(selected)
+        selected_entity_count = len([item for item in selected if isinstance(item, EntityItem)])
+        inspector_entity = getattr(self.inspector, "_entity", None)
+        inspector_entity_id = ""
+        if isinstance(inspector_entity, EntityItem):
+            inspector_entity_id = str(inspector_entity.data(ROLE_ENTITY_ID) or "").strip()
+        signature = "|".join(
+            [
+                str(selected_count),
+                str(selected_entity_count),
+                selected_entity_ids,
+                inspector_entity_id,
+                "1" if bool(self.inspector.isVisible()) else "0",
+            ]
+        )
+        if signature == self._last_debug_selection_signature:
+            return
+        self._last_debug_selection_signature = signature
+        self._movement_debug_log(
+            "selection_changed",
+            reason=str(reason or ""),
+            selected_count=int(selected_count),
+            selected_entity_count=int(selected_entity_count),
+            selected_entity_ids=selected_entity_ids,
+            inspector_entity_id=inspector_entity_id,
+            inspector_visible=bool(self.inspector.isVisible()),
+        )
+
+    def _begin_host_scene_sync_suppression(self, *, reason: str) -> None:
+        self._host_scene_sync_suppressed = True
+        self._host_scene_sync_suppression_depth += 1
+        self._movement_debug_log(
+            "host_scene_sync_suppression_begin",
+            reason=str(reason or ""),
+            depth=int(self._host_scene_sync_suppression_depth),
+        )
+
+    def _end_host_scene_sync_suppression(self, *, reason: str) -> None:
+        if self._host_scene_sync_suppression_depth > 0:
+            self._host_scene_sync_suppression_depth -= 1
+        token = self._host_scene_sync_suppression_token + 1
+        self._host_scene_sync_suppression_token = token
+
+        def _release(expected_token: int = token, release_reason: str = str(reason or "")) -> None:
+            if expected_token != self._host_scene_sync_suppression_token:
+                return
+            if self._host_scene_sync_suppression_depth != 0:
+                return
+            if not self._host_scene_sync_suppressed:
+                return
+            self._host_scene_sync_suppressed = False
+            self._movement_debug_log(
+                "host_scene_sync_suppression_end",
+                reason=release_reason,
+                depth=int(self._host_scene_sync_suppression_depth),
+            )
+
+        QTimer.singleShot(0, _release)
+
     def _debug_widget_ref(self, widget: object) -> str:
         if widget is None:
             return "None"
@@ -20252,6 +20450,7 @@ class DungeonAppletWidget(QWidget):
         if len(selected) != 1 or not isinstance(selected[0], EntityItem):
             self.inspector.set_entity(None)
             self._position_floating_overlays()
+            self._record_selection_debug(reason="scene_signal")
             return
         entity = selected[0]
         if self._online_mode == ONLINE_MODE_PLAYER:
@@ -20260,12 +20459,14 @@ class DungeonAppletWidget(QWidget):
             else:
                 self.inspector.set_entity(None)
             self._position_floating_overlays()
+            self._record_selection_debug(reason="scene_signal")
             return
         if self._view_mode == "dm":
             self.inspector.set_entity(entity)
         else:
             self.inspector.set_entity(None)
         self._position_floating_overlays()
+        self._record_selection_debug(reason="scene_signal")
             
     def _on_view_mode_changed(self, mode: str):
         if self._online_mode not in (ONLINE_MODE_LOCAL_DM, ONLINE_MODE_DM_HOST):
@@ -21971,6 +22172,11 @@ class DungeonAppletWidget(QWidget):
         self._suppress_change_tracking = True
         try:
             scene = self.canvas.scene()
+            self._movement_debug_log(
+                "load_dungeon_state_begin",
+                selected_entity_ids=self._selected_entity_ids_csv(),
+                **self._debug_state_summary(state),
+            )
             self.inspector.set_entity(None)
             self.canvas.prepare_for_scene_reload()
             scene.clear()
@@ -21985,6 +22191,11 @@ class DungeonAppletWidget(QWidget):
             self._suppress_change_tracking = was_suppressed
         self._refresh_entity_duplicate_badges()
         self._apply_online_permissions()
+        self._movement_debug_log(
+            "load_dungeon_state_end",
+            selected_entity_ids=self._selected_entity_ids_csv(),
+            **self._debug_state_summary(state),
+        )
 
     def _render_scene_preview(self, size: QSize) -> QPixmap:
         square_size = min(size.width(), size.height())
