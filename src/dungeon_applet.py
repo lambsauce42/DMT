@@ -95,6 +95,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QCursor,
     QPolygonF,
+    QRegion,
 )
 
 from asset_paths import icon_path, icons_dir
@@ -1218,6 +1219,21 @@ class DungeonCanvas(QGraphicsView):
             return True
         return False
 
+    def _map_viewport_pos_to_scene(self, viewport_pos: QPointF | QPoint) -> QPointF:
+        if isinstance(viewport_pos, QPoint):
+            point = QPointF(viewport_pos)
+        else:
+            point = QPointF(viewport_pos)
+        try:
+            inverse, ok = self.viewportTransform().inverted()
+            if ok:
+                mapped = inverse.map(point)
+                if isinstance(mapped, QPointF):
+                    return mapped
+        except Exception:
+            pass
+        return self.mapToScene(point.toPoint())
+
     def _emit_online_debug_event(self, event: str, **fields: object) -> None:
         owner = self.parent()
         logger = getattr(owner, "_movement_debug_log", None)
@@ -1244,7 +1260,7 @@ class DungeonCanvas(QGraphicsView):
         self.scene().clearSelection()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        scene_pos = self.mapToScene(event.position().toPoint())
+        scene_pos = self._map_viewport_pos_to_scene(event.position())
         
         # Filter interaction to current layer
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1298,7 +1314,7 @@ class DungeonCanvas(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        scene_pos = self.mapToScene(event.position().toPoint())
+        scene_pos = self._map_viewport_pos_to_scene(event.position())
         
         # Don't snap coordinate display if Alt is held
         if event.modifiers() & Qt.KeyboardModifier.AltModifier:
@@ -1328,7 +1344,7 @@ class DungeonCanvas(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        scene_pos = self.mapToScene(event.position().toPoint())
+        scene_pos = self._map_viewport_pos_to_scene(event.position())
         # Let state handle the event
         handled = False
         if self._current_state:
@@ -2528,6 +2544,10 @@ class EntityInspectorPanel(QWidget):
         self._link_character_enabled = True
         self._defer_icon_apply = False
         self._pending_changes = {}
+        self._token_panel_compact_height_slack = 32
+        self._shell_spacing = 10
+        self._shell_right_margin = 16
+        self._shell_stable_width = 0
         self._change_timer = QTimer(self)
         self._change_timer.setInterval(400) # 400ms debounce
         self._change_timer.setSingleShot(True)
@@ -2726,9 +2746,22 @@ class EntityInspectorPanel(QWidget):
         
         layout.addStretch()
         
-        shell_layout = QHBoxLayout(self)
-        shell_layout.setContentsMargins(0, 0, 16, 0)
-        shell_layout.setSpacing(10)
+        self._shell_layout = None
+
+        self._container_column = QWidget(self)
+        self._container_column.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self._container_column.setFixedWidth(self.container.width())
+        self._container_column_layout = QVBoxLayout(self._container_column)
+        self._container_column_layout.setContentsMargins(0, 0, 0, 0)
+        self._container_column_layout.setSpacing(0)
+        self.container.setParent(self._container_column)
+        self._container_column_layout.addWidget(self.container, 0, Qt.AlignmentFlag.AlignTop)
+        self._container_bottom_pad = QWidget(self._container_column)
+        self._container_bottom_pad.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._container_bottom_pad.setFixedHeight(0)
+        self._container_bottom_pad.setFixedWidth(self.container.width())
+        self._container_bottom_pad.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._container_column_layout.addWidget(self._container_bottom_pad, 0, Qt.AlignmentFlag.AlignTop)
 
         self.token_controls_panel = QFrame(self)
         self.token_controls_panel.setObjectName("SubPanel")
@@ -2884,11 +2917,11 @@ class EntityInspectorPanel(QWidget):
         self._token_panel_width = max(300, self.token_controls_panel.sizeHint().width())
 
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-        shell_layout.addStretch(1)
-        shell_layout.addWidget(self.token_controls_panel, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         self.token_controls_panel.setMaximumWidth(0)
         self.token_controls_panel.setMinimumWidth(0)
         self.token_controls_panel.setVisible(False)
+        self.token_controls_panel.setEnabled(False)
+        self.token_controls_panel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._token_anim_group = QParallelAnimationGroup(self)
         self._token_anim_max = QPropertyAnimation(self.token_controls_panel, b"maximumWidth", self)
         self._token_anim_min = QPropertyAnimation(self.token_controls_panel, b"minimumWidth", self)
@@ -2896,19 +2929,18 @@ class EntityInspectorPanel(QWidget):
             anim.setDuration(220)
             anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
             self._token_anim_group.addAnimation(anim)
+        self._token_anim_max.valueChanged.connect(self._on_token_panel_width_changed)
         self._token_anim_group.finished.connect(self._on_token_anim_finished)
-
-        shell_layout.addWidget(self.container, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
-        shell_margins = shell_layout.contentsMargins()
-        stable_width = (
+        self._shell_stable_width = int(
             self.container.maximumWidth()
             + self._token_panel_width
-            + shell_layout.spacing()
-            + shell_margins.left()
-            + shell_margins.right()
+            + self._shell_spacing
+            + self._shell_right_margin
         )
-        self.setFixedWidth(stable_width)
+        self.setFixedWidth(self._shell_stable_width)
         self._set_token_controls_expanded(False)
+        self._update_bottom_height_reserve()
+        self._update_shell_width_contract(0)
         
         # Apply shadow
         from PySide6.QtWidgets import QGraphicsDropShadowEffect
@@ -3125,6 +3157,8 @@ class EntityInspectorPanel(QWidget):
             own_layout.activate()
         self.container.adjustSize()
         self.adjustSize()
+        self._update_bottom_height_reserve()
+        self._update_token_panel_height_contract()
         self.updateGeometry()
 
     def _update_entity_type_label(self) -> None:
@@ -3198,6 +3232,8 @@ class EntityInspectorPanel(QWidget):
         expanded_bool = bool(expanded)
         self.token_expand_btn.setIcon(self._make_token_toggle_icon(expanded=expanded_bool))
         self._token_anim_group.stop()
+        self._update_bottom_height_reserve()
+        self._update_token_panel_height_contract(expanded=expanded_bool)
         current_width = max(
             int(self.token_controls_panel.width()),
             int(self.token_controls_panel.maximumWidth()),
@@ -3205,11 +3241,14 @@ class EntityInspectorPanel(QWidget):
         )
         if expanded_bool:
             self.token_controls_panel.setVisible(True)
+            self.token_controls_panel.setEnabled(True)
+            self.token_controls_panel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             target_width = self._token_panel_width
             self._token_anim_max.setStartValue(current_width)
             self._token_anim_max.setEndValue(target_width)
             self._token_anim_min.setStartValue(current_width)
             self._token_anim_min.setEndValue(target_width)
+            self._update_shell_width_contract(target_width)
             self._token_anim_group.start()
         else:
             self._token_anim_max.setStartValue(current_width)
@@ -3218,9 +3257,162 @@ class EntityInspectorPanel(QWidget):
             self._token_anim_min.setEndValue(0)
             self._token_anim_group.start()
 
+    def _collapsed_shell_width(self) -> int:
+        return int(self.container.maximumWidth() + self._shell_right_margin)
+
+    def overlay_visible_height(self) -> int:
+        return max(
+            int(self.container.height()),
+            int(self.container.minimumSizeHint().height()),
+            int(self.container.sizeHint().height()),
+        )
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._layout_shell_children()
+
+    def _stable_token_panel_height_target(self) -> int:
+        token_hint = max(
+            int(self.token_controls_panel.minimumSizeHint().height()),
+            int(self.token_controls_panel.sizeHint().height()),
+        )
+        return max(token_hint + int(self._token_panel_compact_height_slack), token_hint)
+
+    def _update_bottom_height_reserve(self) -> None:
+        if not hasattr(self, "_container_bottom_pad"):
+            return
+        container_height = self.overlay_visible_height()
+        reserve_height = max(0, self._stable_token_panel_height_target() - container_height)
+        self._container_bottom_pad.setFixedHeight(reserve_height)
+        self._container_bottom_pad.setVisible(reserve_height > 0)
+        self._container_bottom_pad.updateGeometry()
+        if hasattr(self, "_container_column"):
+            self._container_column.updateGeometry()
+        self._layout_shell_children()
+
+    def _update_token_panel_height_contract(self, expanded: bool | None = None) -> None:
+        expanded_state = self.token_expand_btn.isChecked() if expanded is None else bool(expanded)
+        if not hasattr(self, "token_controls_panel") or not hasattr(self, "container"):
+            return
+        shell_layout = self.layout()
+        if shell_layout is not None:
+            shell_layout.invalidate()
+            shell_layout.activate()
+        container_layout = self.container.layout()
+        if container_layout is not None:
+            container_layout.invalidate()
+            container_layout.activate()
+        token_layout = self.token_controls_panel.layout()
+        if token_layout is not None:
+            token_layout.invalidate()
+            token_layout.activate()
+        container_height = max(
+            int(self.container.height()),
+            int(self.container.minimumSizeHint().height()),
+            int(self.container.sizeHint().height()),
+        )
+        token_height = max(
+            int(self.token_controls_panel.minimumSizeHint().height()),
+            int(self.token_controls_panel.sizeHint().height()),
+        )
+        if expanded_state:
+            target_height = max(container_height, token_height)
+            self.token_controls_panel.setMinimumHeight(target_height)
+            self.token_controls_panel.setMaximumHeight(target_height)
+        else:
+            self.token_controls_panel.setMinimumHeight(0)
+            self.token_controls_panel.setMaximumHeight(16777215)
+        self.token_controls_panel.updateGeometry()
+        self.updateGeometry()
+        self._layout_shell_children()
+        parent = self.parentWidget()
+        if parent is not None and hasattr(parent, "_position_floating_overlays"):
+            parent._position_floating_overlays()
+
+    def _layout_shell_children(self) -> None:
+        if not hasattr(self, "_container_column") or not hasattr(self, "token_controls_panel"):
+            return
+        column_width = int(self._container_column.width())
+        column_height = max(
+            int(self._container_column.minimumSizeHint().height()),
+            int(self._container_column.sizeHint().height()),
+            int(self.overlay_visible_height() + self._container_bottom_pad.height()),
+        )
+        token_width = max(
+            int(self.token_controls_panel.width()),
+            int(self.token_controls_panel.maximumWidth()),
+            int(self.token_controls_panel.minimumWidth()),
+        )
+        token_height = max(
+            int(self.token_controls_panel.height()),
+            int(self.token_controls_panel.minimumHeight()),
+            int(self.token_controls_panel.minimumSizeHint().height()),
+        )
+        shell_height = max(column_height, token_height if token_width > 0 else 0)
+        if self.height() != shell_height:
+            self.setFixedHeight(shell_height)
+        column_x = max(0, int(self._shell_stable_width - self._shell_right_margin - column_width))
+        self._container_column.setGeometry(column_x, 0, column_width, column_height)
+
+        if self.token_controls_panel.isVisible() or token_width > 0:
+            token_x = max(0, int(column_x - self._shell_spacing - token_width))
+            self.token_controls_panel.setGeometry(token_x, 0, token_width, token_height)
+        else:
+            self.token_controls_panel.setGeometry(column_x, 0, 0, max(0, token_height))
+        self._update_shell_mask()
+
+    def _update_shell_mask(self) -> None:
+        region = QRegion(self._container_column.geometry())
+        token_geometry = self.token_controls_panel.geometry()
+        if self.token_controls_panel.isVisible() and token_geometry.width() > 0 and token_geometry.height() > 0:
+            region = region.united(QRegion(token_geometry))
+        self.setMask(region)
+
+    def _shell_width_for_token_panel(self, token_panel_width: int) -> int:
+        shell_layout = getattr(self, "_shell_layout", None)
+        if shell_layout is None:
+            return int(self.container.maximumWidth() + max(0, int(token_panel_width)))
+        panel_width = max(0, int(token_panel_width))
+        margins = shell_layout.contentsMargins()
+        spacing = shell_layout.spacing() if panel_width > 0 else 0
+        return int(
+            self.container.maximumWidth()
+            + panel_width
+            + spacing
+            + margins.left()
+            + margins.right()
+        )
+
+    def _update_shell_width_contract(self, token_panel_width: int | None = None) -> None:
+        self.setFixedWidth(self._shell_stable_width)
+        self._layout_shell_children()
+        parent = self.parentWidget()
+        if parent is not None and hasattr(parent, "_position_floating_overlays"):
+            parent._position_floating_overlays()
+
+    def _on_token_panel_width_changed(self, value: object) -> None:
+        try:
+            panel_width = int(float(value))
+        except (TypeError, ValueError):
+            panel_width = max(
+                int(self.token_controls_panel.width()),
+                int(self.token_controls_panel.maximumWidth()),
+                int(self.token_controls_panel.minimumWidth()),
+            )
+        self._update_shell_width_contract(panel_width)
+
     def _on_token_anim_finished(self) -> None:
         if not self.token_expand_btn.isChecked():
             self.token_controls_panel.setVisible(False)
+            self.token_controls_panel.setEnabled(False)
+            self.token_controls_panel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._update_token_panel_height_contract(expanded=False)
+            self._update_shell_width_contract(0)
+            return
+        self.token_controls_panel.setEnabled(True)
+        self.token_controls_panel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self._update_token_panel_height_contract(expanded=True)
+        self._update_shell_width_contract(self._token_panel_width)
 
     def _make_token_toggle_icon(self, expanded: bool) -> QIcon:
         icon_size = 11
@@ -4875,6 +5067,8 @@ class DungeonAppletWidget(QWidget):
         self._initiative_drag_origin = QPoint()
         self._initiative_drag_source_widget: QWidget | None = None
         self._initiative_drag_ghost: QLabel | None = None
+        self._initiative_drag_hover_target: tuple[str, str, bool] | None = None
+        self._initiative_drag_drop_indicator: QFrame | None = None
         self._suppress_initiative_sync = False
         self._host_scene_sync_pending = False
         self._last_host_scene_signature = ""
@@ -5876,23 +6070,37 @@ class DungeonAppletWidget(QWidget):
             tool_bottom = tool_base_y + tool_height
             required = max(required, self._required_overlay_lift_for_bottom(tool_bottom))
         if hasattr(self, "inspector") and self.inspector.isVisible():
+            inspector_visible_height = (
+                int(self.inspector.overlay_visible_height())
+                if hasattr(self.inspector, "overlay_visible_height")
+                else max(
+                    1,
+                    int(self.inspector.minimumSizeHint().height()),
+                    int(self.inspector.sizeHint().height()),
+                )
+            )
             inspector_height = max(
                 1,
                 int(self.inspector.minimumSizeHint().height()),
                 int(self.inspector.sizeHint().height()),
             )
-            inspector_base_y = int((self.height() - inspector_height) / 2)
-            inspector_bottom = inspector_base_y + inspector_height
+            inspector_base_y = int((self.height() - inspector_visible_height) / 2)
+            inspector_bottom = inspector_base_y + inspector_visible_height
             required = max(required, self._required_overlay_lift_for_bottom(inspector_bottom))
         return max(0, int(required))
 
     def _position_floating_overlays(self) -> None:
-        def _current_overlay_size(widget: QWidget, *, prefer_size_hint_height: bool = False) -> tuple[int, int]:
+        def _current_overlay_size(
+            widget: QWidget,
+            *,
+            prefer_size_hint_height: bool = False,
+            prefer_current_width: bool = False,
+        ) -> tuple[int, int]:
             current_w = int(widget.width())
             current_h = int(widget.height())
             min_hint = widget.minimumSizeHint()
             hint = widget.sizeHint()
-            if min_hint is not None:
+            if min_hint is not None and not prefer_current_width:
                 current_w = max(current_w, int(min_hint.width()))
                 current_h = max(current_h, int(min_hint.height()))
             if current_w <= 0:
@@ -5929,13 +6137,21 @@ class DungeonAppletWidget(QWidget):
             inspector_w, inspector_h = _current_overlay_size(
                 self.inspector,
                 prefer_size_hint_height=True,
+                prefer_current_width=True,
+            )
+            inspector_visible_height = (
+                int(self.inspector.overlay_visible_height())
+                if hasattr(self.inspector, "overlay_visible_height")
+                else inspector_h
             )
             inspector_x = max(0, self.width() - 12 - inspector_w)
-            inspector_base_y = int((self.height() - inspector_h) / 2)
-            inspector_bottom = inspector_base_y + inspector_h
+            inspector_base_y = int((self.height() - inspector_visible_height) / 2)
+            inspector_bottom = inspector_base_y + inspector_visible_height
             required_lift = self._required_overlay_lift_for_bottom(inspector_bottom, padding=8)
             inspector_y = max(8, inspector_base_y - required_lift)
             self.inspector.setGeometry(inspector_x, inspector_y, inspector_w, inspector_h)
+            if hasattr(self.inspector, "_layout_shell_children"):
+                self.inspector._layout_shell_children()
             self.inspector.raise_()
         controls_right_edge = self.width() - 20
         initiative_btn = getattr(self, "_initiative_reopen_btn", None)
@@ -10778,16 +10994,28 @@ class DungeonAppletWidget(QWidget):
             return []
         return [(key, value) for key, value in group.items() if isinstance(value, dict)]
 
-    def _move_initiative_row(self, kind: str, source_id: str, target_id: str) -> bool:
+    def _move_initiative_row(
+        self,
+        kind: str,
+        source_id: str,
+        target_id: str,
+        *,
+        place_after: bool = False,
+    ) -> bool:
         group_key = "player_entries" if str(kind or "").strip() == "player" else "entity_entries"
         ordered_entries = self._ordered_initiative_entries(group_key)
         ordered_ids = [entry_id for entry_id, _entry in ordered_entries]
         if source_id not in ordered_ids or target_id not in ordered_ids or source_id == target_id:
             return False
         source_index = ordered_ids.index(source_id)
-        target_index = ordered_ids.index(target_id)
         moved_entry = ordered_entries.pop(source_index)
-        ordered_entries.insert(target_index, moved_entry)
+        reduced_ids = [entry_id for entry_id, _entry in ordered_entries]
+        try:
+            target_index = reduced_ids.index(target_id)
+        except ValueError:
+            return False
+        insert_index = target_index + (1 if place_after else 0)
+        ordered_entries.insert(insert_index, moved_entry)
         self._initiative_state[group_key] = {entry_id: entry for entry_id, entry in ordered_entries}
         self._render_initiative_overlay()
         if self._online_mode == ONLINE_MODE_DM_HOST:
@@ -10804,6 +11032,207 @@ class DungeonAppletWidget(QWidget):
                 return current
             current = current.parentWidget()
         return None
+
+    def _initiative_row_widgets_for_kind(self, kind: str) -> list[QFrame]:
+        if not hasattr(self, "_initiative_rows_root") or self._initiative_rows_root is None:
+            return []
+        rows: list[QFrame] = []
+        for candidate in self._initiative_rows_root.findChildren(QFrame):
+            if not bool(candidate.property("initiative_row")):
+                continue
+            if str(candidate.property("initiative_kind") or "").strip() != str(kind or "").strip():
+                continue
+            if candidate.parentWidget() is not self._initiative_rows_root:
+                continue
+            if candidate.isHidden():
+                continue
+            rows.append(candidate)
+        rows.sort(key=lambda row: row.geometry().top())
+        return rows
+
+    def _initiative_row_drag_label(self, row_widget: QWidget) -> str:
+        for label_widget in row_widget.findChildren(QLabel):
+            if bool(label_widget.property("initiative_primary_label")):
+                return str(label_widget.text() or "").strip()
+        return str(row_widget.property("initiative_id") or "").strip()
+
+    def _make_initiative_drag_grip_pixmap(
+        self,
+        color: QColor | str,
+        *,
+        width: int = 12,
+        height: int = 16,
+        dot_size: float = 2.4,
+        columns: int = 2,
+        rows: int = 3,
+    ) -> QPixmap:
+        grip_color = QColor(color)
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(grip_color)
+        left = 2.0
+        top = 2.0
+        col_gap = 4.0
+        row_gap = 4.0
+        for row in range(rows):
+            for column in range(columns):
+                x = left + column * col_gap
+                y = top + row * row_gap
+                painter.drawEllipse(QRectF(x, y, dot_size, dot_size))
+        painter.end()
+        return pixmap
+
+    def _build_initiative_drag_handle(self, parent: QWidget) -> QLabel:
+        handle = QLabel(parent)
+        handle.setProperty("initiative_drag_handle", True)
+        handle.setCursor(Qt.CursorShape.OpenHandCursor)
+        handle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        handle.setFixedSize(24, 28)
+        return handle
+
+    def _apply_initiative_row_visual_state(
+        self,
+        row_widget: QFrame,
+        *,
+        drag_source: bool = False,
+        drag_target: bool = False,
+    ) -> None:
+        border = "#2a3139"
+        background = "#12171d"
+        label_color = "#e5e7eb"
+        handle_bg = "#161d25"
+        handle_border = "#303842"
+        if drag_source:
+            border = "#d29922"
+            background = "#1a1711"
+            handle_bg = "#2a2010"
+            handle_border = "#d29922"
+        row_widget.setStyleSheet(
+            "QFrame {"
+            f"background: {background};"
+            f"border: 1px solid {border};"
+            "border-radius: 10px;"
+            "}"
+            "QLabel[initiative_row_label='true'] {"
+            f"color: {label_color};"
+            "background: transparent;"
+            "border: 0;"
+            "font-weight: 600;"
+            "}"
+            "QLabel[initiative_drag_handle='true'] {"
+            f"background: {handle_bg};"
+            f"border: 1px solid {handle_border};"
+            "border-radius: 6px;"
+            "padding: 0px;"
+            "}"
+        )
+        grip_color = "#f0c674" if drag_source else "#9fb4c9"
+        for handle_label in row_widget.findChildren(QLabel):
+            if bool(handle_label.property("initiative_drag_handle")):
+                handle_label.setPixmap(self._make_initiative_drag_grip_pixmap(grip_color))
+
+    def _refresh_initiative_drag_preview(self) -> None:
+        source = self._initiative_drag_source
+        hover_target = self._initiative_drag_hover_target
+        source_kind = str(source[0] if source else "").strip()
+        source_id = str(source[1] if source else "").strip()
+        target_kind = str(hover_target[0] if hover_target else "").strip()
+        target_id = str(hover_target[1] if hover_target else "").strip()
+        rows = self._initiative_row_widgets_for_kind(target_kind or source_kind)
+        for row_widget in rows:
+            row_kind = str(row_widget.property("initiative_kind") or "").strip()
+            row_id = str(row_widget.property("initiative_id") or "").strip()
+            self._apply_initiative_row_visual_state(
+                row_widget,
+                drag_source=bool(source_kind and row_kind == source_kind and row_id == source_id),
+                drag_target=False,
+            )
+        indicator = self._initiative_drag_drop_indicator
+        if indicator is None:
+            return
+        if hover_target is None:
+            indicator.hide()
+            return
+        rows = self._initiative_row_widgets_for_kind(target_kind)
+        target_row = next(
+            (
+                candidate
+                for candidate in rows
+                if str(candidate.property("initiative_id") or "").strip() == target_id
+            ),
+            None,
+        )
+        if target_row is None:
+            indicator.hide()
+            return
+        row_geometry = target_row.geometry()
+        line_y = row_geometry.bottom() - 1 if hover_target[2] else row_geometry.top() - 1
+        indicator.setParent(self._initiative_rows_root)
+        indicator.setGeometry(10, line_y, max(24, self._initiative_rows_root.width() - 20), 4)
+        indicator.show()
+        indicator.raise_()
+
+    def _ensure_initiative_drag_drop_indicator(self) -> QFrame:
+        indicator = self._initiative_drag_drop_indicator
+        if indicator is None:
+            indicator = QFrame(self._initiative_rows_root)
+            indicator.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            indicator.setFrameShape(QFrame.Shape.NoFrame)
+            indicator.setStyleSheet(
+                "QFrame {"
+                "background: #58a6ff;"
+                "border: 0;"
+                "border-radius: 2px;"
+                "}"
+            )
+            indicator.hide()
+            self._initiative_drag_drop_indicator = indicator
+        return indicator
+
+    def _clear_initiative_drag_preview(self) -> None:
+        self._initiative_drag_hover_target = None
+        indicator = self._initiative_drag_drop_indicator
+        if indicator is not None:
+            indicator.hide()
+        for kind in ("player", "entity"):
+            for row_widget in self._initiative_row_widgets_for_kind(kind):
+                self._apply_initiative_row_visual_state(row_widget)
+
+    def _initiative_drop_target_from_rows_local(self, rows_local_pos: QPoint) -> tuple[str, str, bool] | None:
+        source = self._initiative_drag_source
+        if source is None or not hasattr(self, "_initiative_rows_root") or self._initiative_rows_root is None:
+            return None
+        source_kind = str(source[0] or "").strip()
+        source_id = str(source[1] or "").strip()
+        if not source_kind or not source_id:
+            return None
+        rows = self._initiative_row_widgets_for_kind(source_kind)
+        if not rows:
+            return None
+        local_y = int(rows_local_pos.y())
+        before_row = rows[0]
+        if local_y <= before_row.geometry().top():
+            return (source_kind, str(before_row.property("initiative_id") or "").strip(), False)
+        for row_widget in rows:
+            row_id = str(row_widget.property("initiative_id") or "").strip()
+            row_geometry = row_widget.geometry()
+            center_y = row_geometry.center().y()
+            if local_y <= center_y:
+                return (source_kind, row_id, False)
+            if local_y <= row_geometry.bottom():
+                return (source_kind, row_id, True)
+        last_row = rows[-1]
+        return (source_kind, str(last_row.property("initiative_id") or "").strip(), True)
+
+    def _initiative_drop_target_from_global(self, global_pos: QPoint) -> tuple[str, str, bool] | None:
+        if not hasattr(self, "_initiative_rows_root") or self._initiative_rows_root is None:
+            return None
+        return self._initiative_drop_target_from_rows_local(
+            self._initiative_rows_root.mapFromGlobal(global_pos)
+        )
 
     def _find_initiative_input(self, kind: str, key: str) -> QLineEdit | None:
         if not hasattr(self, "_initiative_rows_root") or self._initiative_rows_root is None:
@@ -10993,34 +11422,96 @@ class DungeonAppletWidget(QWidget):
             ghost.hide()
             ghost.clear()
         self._initiative_drag_source_widget = None
+        self._clear_initiative_drag_preview()
 
-    def _start_initiative_drag_ghost(self, row_widget: QWidget, global_pos: QPoint) -> None:
-        try:
-            pixmap = row_widget.grab()
-        except RuntimeError:
-            self._hide_initiative_drag_ghost()
-            return
-        if pixmap.isNull():
-            self._hide_initiative_drag_ghost()
-            return
+    def _start_initiative_drag_ghost_at(
+        self,
+        row_widget: QWidget,
+        host_local_pos: QPoint,
+        rows_local_pos: QPoint | None = None,
+    ) -> None:
         ghost = self._ensure_initiative_drag_ghost()
+        row_label = self._initiative_row_drag_label(row_widget)
+        font = ghost.font()
+        if font.pointSize() <= 0:
+            font.setPointSize(10)
+        font.setBold(True)
+        ghost.setFont(font)
+        metrics = QFontMetrics(font)
+        text_width = metrics.horizontalAdvance(row_label)
+        text_height = metrics.height()
+        chip_width = max(140, text_width + 52)
+        chip_height = max(28, text_height + 12)
+        pixmap = QPixmap(chip_width, chip_height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor("#58a6ff"), 1))
+        painter.setBrush(QColor(14, 20, 27, 235))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, chip_width - 1.0, chip_height - 1.0), 9, 9)
+        handle_rect = QRectF(8.0, 6.0, 24.0, chip_height - 12.0)
+        painter.setPen(QPen(QColor("#58a6ff"), 1))
+        painter.setBrush(QColor(25, 38, 56, 255))
+        painter.drawRoundedRect(handle_rect, 6, 6)
+        grip_pixmap = self._make_initiative_drag_grip_pixmap("#9ecbff")
+        grip_x = int(round(handle_rect.center().x() - grip_pixmap.width() / 2))
+        grip_y = int(round(handle_rect.center().y() - grip_pixmap.height() / 2))
+        painter.drawPixmap(grip_x, grip_y, grip_pixmap)
+        painter.setPen(QColor("#e6edf3"))
+        text_rect = QRectF(handle_rect.right() + 10.0, 0.0, chip_width - handle_rect.right() - 18.0, chip_height)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, row_label)
+        painter.end()
         ghost.setPixmap(pixmap)
         ghost.resize(pixmap.deviceIndependentSize().toSize())
-        ghost.setWindowOpacity(0.72)
+        ghost.setWindowOpacity(0.92)
         self._initiative_drag_source_widget = row_widget
-        self._update_initiative_drag_ghost(global_pos)
+        self._ensure_initiative_drag_drop_indicator()
+        if rows_local_pos is not None:
+            self._initiative_drag_hover_target = self._initiative_drop_target_from_rows_local(rows_local_pos)
+            self._refresh_initiative_drag_preview()
+        else:
+            self._refresh_initiative_drag_preview()
+        self._update_initiative_drag_ghost_at(host_local_pos, rows_local_pos=rows_local_pos)
         ghost.show()
         ghost.raise_()
 
-    def _update_initiative_drag_ghost(self, global_pos: QPoint) -> None:
+    def _start_initiative_drag_ghost(self, row_widget: QWidget, global_pos: QPoint) -> None:
+        host_local_pos = self.mapFromGlobal(global_pos)
+        rows_local_pos = None
+        if hasattr(self, "_initiative_rows_root") and self._initiative_rows_root is not None:
+            rows_local_pos = self._initiative_rows_root.mapFromGlobal(global_pos)
+        self._start_initiative_drag_ghost_at(
+            row_widget,
+            host_local_pos,
+            rows_local_pos=rows_local_pos,
+        )
+
+    def _update_initiative_drag_ghost_at(
+        self,
+        host_local_pos: QPoint,
+        *,
+        rows_local_pos: QPoint | None = None,
+    ) -> None:
         ghost = self._initiative_drag_ghost
         if ghost is None or ghost.pixmap() is None or ghost.isHidden():
             return
-        local_pos = self.mapFromGlobal(global_pos)
-        x = int(local_pos.x() - (ghost.width() // 2))
-        y = int(local_pos.y() - (ghost.height() // 2))
+        x = int(host_local_pos.x() + 14)
+        y = int(host_local_pos.y() - (ghost.height() // 2))
         ghost.move(x, y)
         ghost.raise_()
+        if rows_local_pos is not None:
+            self._initiative_drag_hover_target = self._initiative_drop_target_from_rows_local(rows_local_pos)
+        self._refresh_initiative_drag_preview()
+
+    def _update_initiative_drag_ghost(self, global_pos: QPoint) -> None:
+        host_local_pos = self.mapFromGlobal(global_pos)
+        rows_local_pos = None
+        if hasattr(self, "_initiative_rows_root") and self._initiative_rows_root is not None:
+            rows_local_pos = self._initiative_rows_root.mapFromGlobal(global_pos)
+        self._update_initiative_drag_ghost_at(
+            host_local_pos,
+            rows_local_pos=rows_local_pos,
+        )
 
     def _render_initiative_overlay(self) -> None:
         if not hasattr(self, "_initiative_rows_layout"):
@@ -11049,6 +11540,7 @@ class DungeonAppletWidget(QWidget):
         if not active and not inactive_preview:
             self._debug_log("initiative_render_inactive")
             self._hide_initiative_drag_ghost()
+            self._clear_initiative_drag_preview()
             self._initiative_draft_values.clear()
             while self._initiative_rows_layout.count():
                 child = self._initiative_rows_layout.takeAt(0)
@@ -11065,6 +11557,7 @@ class DungeonAppletWidget(QWidget):
             return
         self._seed_initiative_state()
         self._hide_initiative_drag_ghost()
+        self._clear_initiative_drag_preview()
         while self._initiative_rows_layout.count():
             child = self._initiative_rows_layout.takeAt(0)
             widget = child.widget()
@@ -11203,12 +11696,16 @@ class DungeonAppletWidget(QWidget):
                 row_widget.setProperty("initiative_id", player_id)
                 row_widget.setFrameShape(QFrame.Shape.NoFrame)
                 row_widget.setCursor(Qt.CursorShape.OpenHandCursor)
+                row_widget.setMinimumHeight(40)
                 row_layout = QHBoxLayout(row_widget)
-                row_layout.setContentsMargins(0, 0, 0, 0)
-                row_layout.setSpacing(6)
+                row_layout.setContentsMargins(8, 6, 8, 6)
+                row_layout.setSpacing(8)
+                drag_handle = self._build_initiative_drag_handle(row_widget)
+                row_layout.addWidget(drag_handle)
                 value = entry.get("initiative")
                 label = QLabel(str(entry.get("name") or player_id), row_widget)
                 label.setProperty("initiative_row_label", True)
+                label.setProperty("initiative_primary_label", True)
                 label.setCursor(Qt.CursorShape.OpenHandCursor)
                 row_layout.addWidget(label)
                 check = QLabel("OK" if isinstance(value, int) else "", row_widget)
@@ -11256,6 +11753,7 @@ class DungeonAppletWidget(QWidget):
                         editable=editable,
                     )
                 )
+                self._apply_initiative_row_visual_state(row_widget)
                 self._initiative_rows_layout.addWidget(row_widget)
 
         if is_dm:
@@ -11270,12 +11768,16 @@ class DungeonAppletWidget(QWidget):
                     row_widget.setProperty("initiative_id", entity_id)
                     row_widget.setFrameShape(QFrame.Shape.NoFrame)
                     row_widget.setCursor(Qt.CursorShape.OpenHandCursor)
+                    row_widget.setMinimumHeight(40)
                     row_layout = QHBoxLayout(row_widget)
-                    row_layout.setContentsMargins(0, 0, 0, 0)
-                    row_layout.setSpacing(6)
+                    row_layout.setContentsMargins(8, 6, 8, 6)
+                    row_layout.setSpacing(8)
+                    drag_handle = self._build_initiative_drag_handle(row_widget)
+                    row_layout.addWidget(drag_handle)
                     value = entry.get("initiative")
                     label = QLabel(f"Entity: {str(entry.get('name') or entity_id)}", row_widget)
                     label.setProperty("initiative_row_label", True)
+                    label.setProperty("initiative_primary_label", True)
                     label.setCursor(Qt.CursorShape.OpenHandCursor)
                     row_layout.addWidget(label)
                     check = QLabel("OK" if isinstance(value, int) else "", row_widget)
@@ -11320,6 +11822,7 @@ class DungeonAppletWidget(QWidget):
                             editable=True,
                         )
                     )
+                    self._apply_initiative_row_visual_state(row_widget)
                     self._initiative_rows_layout.addWidget(row_widget)
 
         self._initiative_rows_layout.addStretch(1)
@@ -20338,48 +20841,63 @@ class DungeonAppletWidget(QWidget):
                     if row_kind and row_id:
                         self._initiative_drag_source = (row_kind, row_id)
                         self._initiative_drag_started = False
-                        self._initiative_drag_origin = event.globalPosition().toPoint()
+                        self._initiative_drag_origin = watched_widget.mapTo(self, event.position().toPoint())
                         self._initiative_drag_source_widget = row_widget
+                        self._initiative_drag_hover_target = None
                 elif (
                     event_type == QEvent.Type.MouseMove
                     and self._initiative_drag_source is not None
                     and event.buttons() & Qt.MouseButton.LeftButton
                 ):
                     move_distance = (
-                        event.globalPosition().toPoint() - self._initiative_drag_origin
+                        watched_widget.mapTo(self, event.position().toPoint()) - self._initiative_drag_origin
                     ).manhattanLength()
                     if move_distance >= QApplication.startDragDistance():
                         self._initiative_drag_started = True
+                        host_local_pos = watched_widget.mapTo(self, event.position().toPoint())
+                        rows_local_pos = watched_widget.mapTo(
+                            self._initiative_rows_root,
+                            event.position().toPoint(),
+                        )
                         if self._initiative_drag_ghost is None or self._initiative_drag_ghost.isHidden():
                             source_widget = self._initiative_drag_source_widget
                             if source_widget is not None:
-                                self._start_initiative_drag_ghost(
+                                self._start_initiative_drag_ghost_at(
                                     source_widget,
-                                    event.globalPosition().toPoint(),
+                                    host_local_pos,
+                                    rows_local_pos=rows_local_pos,
                                 )
                         else:
-                            self._update_initiative_drag_ghost(event.globalPosition().toPoint())
+                            self._update_initiative_drag_ghost_at(
+                                host_local_pos,
+                                rows_local_pos=rows_local_pos,
+                            )
                 elif event_type == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                     drag_source = self._initiative_drag_source
                     drag_started = bool(self._initiative_drag_started)
+                    drag_hover_target = self._initiative_drag_hover_target
                     self._initiative_drag_source = None
                     self._initiative_drag_started = False
                     self._hide_initiative_drag_ghost()
                     if drag_source is not None and drag_started:
-                        target_row = self._find_initiative_row_widget(
-                            QApplication.widgetAt(event.globalPosition().toPoint())
-                        )
-                        if target_row is not None:
-                            target_kind = str(target_row.property("initiative_kind") or "").strip()
-                            target_id = str(target_row.property("initiative_id") or "").strip()
-                            source_kind, source_id = drag_source
+                        source_kind, source_id = drag_source
+                        if drag_hover_target is not None:
+                            target_kind, target_id, place_after = drag_hover_target
                             if (
                                 source_kind
                                 and source_id
                                 and target_kind == source_kind
                                 and target_id
-                                and target_id != source_id
-                                and self._move_initiative_row(source_kind, source_id, target_id)
+                                and (
+                                    target_id != source_id
+                                    or place_after
+                                )
+                                and self._move_initiative_row(
+                                    source_kind,
+                                    source_id,
+                                    target_id,
+                                    place_after=bool(place_after),
+                                )
                             ):
                                 event.accept()
                                 return True

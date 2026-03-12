@@ -607,10 +607,7 @@ def test_inspector_overlay_rule_reapplies_after_resize(dungeon_widget, qtbot):
     collapsed_large_y = dungeon_widget.inspector.y()
     dungeon_widget._set_session_panels_collapsed(False, animate=False)
     expanded_large_y = dungeon_widget.inspector.y()
-    inspector_h = max(
-        int(dungeon_widget.inspector.minimumSizeHint().height()),
-        int(dungeon_widget.inspector.sizeHint().height()),
-    )
+    inspector_h = int(dungeon_widget.inspector.overlay_visible_height())
     inspector_base_y = int((dungeon_widget.height() - inspector_h) / 2)
     required_for_inspector = dungeon_widget._required_overlay_lift_for_bottom(
         inspector_base_y + inspector_h,
@@ -956,6 +953,26 @@ def test_player_owned_entity_drag_moves_before_release_and_syncs_on_commit(
     assert "player_drag_release_commit" in movement_events
 
 
+def test_canvas_precise_scene_mapping_preserves_fractional_pointer_after_resize(
+    dungeon_widget,
+    qtbot,
+):
+    dungeon_widget.resize(700, 360)
+    dungeon_widget.show()
+    qtbot.waitExposed(dungeon_widget)
+
+    dungeon_widget.canvas.reset_view()
+    dungeon_widget.canvas.zoom_in(anchor_under_mouse=False)
+    QApplication.processEvents()
+
+    viewport_point = QPointF(153.6, 91.4)
+    precise_scene = dungeon_widget.canvas._map_viewport_pos_to_scene(viewport_point)
+    rounded_scene = dungeon_widget.canvas.mapToScene(viewport_point.toPoint())
+
+    assert not math.isclose(float(precise_scene.x()), float(rounded_scene.x()), abs_tol=1e-6)
+    assert not math.isclose(float(precise_scene.y()), float(rounded_scene.y()), abs_tol=1e-6)
+
+
 def test_switching_back_to_local_mode_hides_online_panels(dungeon_widget):
     dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
     dungeon_widget._set_online_mode(ONLINE_MODE_LOCAL_DM)
@@ -1048,6 +1065,137 @@ def test_position_overlays_preserves_inspector_minimum_height(dungeon_widget, qt
     dungeon_widget._position_floating_overlays()
 
     assert dungeon_widget.inspector.height() >= dungeon_widget.inspector.minimumSizeHint().height()
+
+
+def test_inspector_collapsed_token_panel_does_not_reserve_hidden_width(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget.resize(1200, 800)
+    entity = EntityItem(QPointF(10, 10))
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget._position_floating_overlays()
+    QApplication.processEvents()
+
+    gutter_point = QPoint(8, max(8, dungeon_widget.inspector.height() // 2))
+    card_point = dungeon_widget.inspector._container_column.geometry().center()
+
+    assert not dungeon_widget.inspector.token_controls_panel.isVisible()
+    assert not dungeon_widget.inspector.mask().contains(gutter_point)
+    assert dungeon_widget.inspector.mask().contains(card_point)
+
+    dungeon_widget.inspector.token_expand_btn.click()
+    qtbot.wait(260)
+    QApplication.processEvents()
+
+    assert dungeon_widget.inspector.token_controls_panel.isVisible()
+    assert dungeon_widget.inspector.mask().contains(
+        dungeon_widget.inspector.token_controls_panel.geometry().center()
+    )
+
+    dungeon_widget.inspector.token_expand_btn.click()
+    qtbot.wait(260)
+    QApplication.processEvents()
+
+    assert not dungeon_widget.inspector.token_controls_panel.isVisible()
+    assert not dungeon_widget.inspector.mask().contains(gutter_point)
+
+
+def test_inspector_expanded_token_panel_matches_compact_card_height(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget.resize(1200, 800)
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "compact-inspector")
+    entity.setData(ROLE_LABEL, "Compact Inspector")
+    entity.actions = ""
+    entity.description = ""
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget._position_floating_overlays()
+    QApplication.processEvents()
+
+    collapsed_y = dungeon_widget.inspector.y()
+    collapsed_height = dungeon_widget.inspector.container.height()
+
+    dungeon_widget.inspector.token_expand_btn.click()
+    qtbot.wait(260)
+    QApplication.processEvents()
+
+    assert dungeon_widget.inspector.y() == collapsed_y
+    assert dungeon_widget.inspector._container_bottom_pad.height() > 0
+    assert dungeon_widget.inspector.token_controls_panel.isVisible()
+    assert dungeon_widget.inspector.token_controls_panel.height() == collapsed_height
+
+
+def test_inspector_bottom_reserve_skips_description_heavy_entities(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget.resize(1200, 800)
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "full-inspector")
+    entity.setData(ROLE_LABEL, "Full Inspector")
+    entity.actions = "Attack"
+    entity.description = "Large lore block"
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget._position_floating_overlays()
+    QApplication.processEvents()
+
+    assert dungeon_widget.inspector._container_bottom_pad.height() == 0
+
+
+def test_position_overlays_keeps_visible_inspector_card_x_stable_for_current_width(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget.resize(1200, 800)
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "compact-x-stable")
+    entity.setData(ROLE_LABEL, "Compact X Stable")
+    entity.actions = ""
+    entity.description = ""
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget.inspector.token_expand_btn.click()
+    qtbot.wait(260)
+    QApplication.processEvents()
+
+    def _visible_card_left() -> int:
+        return int(dungeon_widget.inspector.x() + dungeon_widget.inspector._container_column.x())
+
+    dungeon_widget._position_floating_overlays()
+    QApplication.processEvents()
+    stable_left = _visible_card_left()
+    dungeon_widget._position_floating_overlays()
+    QApplication.processEvents()
+
+    assert _visible_card_left() == stable_left
+
+
+def test_expand_collapse_keeps_visible_inspector_card_x_stable(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget.resize(1200, 800)
+    entity = EntityItem(QPointF(10, 10))
+    entity.setData(ROLE_ENTITY_ID, "compact-x-toggle")
+    entity.setData(ROLE_LABEL, "Compact X Toggle")
+    entity.actions = ""
+    entity.description = ""
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    dungeon_widget._position_floating_overlays()
+    QApplication.processEvents()
+    stable_left = int(dungeon_widget.inspector.x() + dungeon_widget.inspector._container_column.x())
+
+    dungeon_widget.inspector.token_expand_btn.click()
+    qtbot.wait(260)
+    QApplication.processEvents()
+    assert int(dungeon_widget.inspector.x() + dungeon_widget.inspector._container_column.x()) == stable_left
+
+    dungeon_widget.inspector.token_expand_btn.click()
+    qtbot.wait(260)
+    QApplication.processEvents()
+    assert int(dungeon_widget.inspector.x() + dungeon_widget.inspector._container_column.x()) == stable_left
 
 
 def test_online_loot_toolbar_buttons_use_bottom_two_column_layout(dungeon_widget):
@@ -6557,6 +6705,36 @@ def test_dm_initiative_drag_reorders_rows_within_same_group(dungeon_widget):
     ]
 
 
+def test_dm_initiative_drag_reorders_row_after_target_when_requested(dungeon_widget):
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice", "player-2": "Bob"}
+    for entity_id, owner_id, label in (("e1", "player-1", "Wolf"), ("e2", "player-2", "Bear")):
+        entity = EntityItem(QPointF(0, 0))
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_LABEL, label)
+        entity.setData(ROLE_OWNER_PLAYER_ID, owner_id)
+        dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._seed_initiative_state()
+    dungeon_widget._initiative_state["player_entries"] = {
+        "player-1:e1": dungeon_widget._initiative_state["player_entries"]["player-1:e1"],
+        "player-2:e2": dungeon_widget._initiative_state["player_entries"]["player-2:e2"],
+    }
+
+    changed = dungeon_widget._move_initiative_row(
+        "player",
+        "player-1:e1",
+        "player-2:e2",
+        place_after=True,
+    )
+
+    assert changed is True
+    assert list(dungeon_widget._initiative_state["player_entries"].keys()) == [
+        "player-2:e2",
+        "player-1:e1",
+    ]
+
+
 def test_dm_initiative_entity_rows_use_duplicate_token_badge_names(dungeon_widget):
     dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
     for entity_id in ("dragon-a", "dragon-b"):
@@ -6612,6 +6790,7 @@ def test_initiative_drag_ghost_shows_and_hides_for_dm_rows(dungeon_widget):
         dungeon_widget.canvas.scene().addItem(entity)
     dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
     dungeon_widget._render_initiative_overlay()
+    dungeon_widget._show_initiative_overlay()
     QApplication.processEvents()
 
     row_widget = next(
@@ -6634,6 +6813,118 @@ def test_initiative_drag_ghost_shows_and_hides_for_dm_rows(dungeon_widget):
 
     assert dungeon_widget._initiative_drag_ghost.isHidden()
     assert dungeon_widget._initiative_drag_source_widget is None
+
+
+def test_initiative_drag_preview_keeps_target_row_neutral(dungeon_widget):
+    dungeon_widget.show()
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice", "player-2": "Bob"}
+    for entity_id, owner_id, label in (("e1", "player-1", "Wolf"), ("e2", "player-2", "Bear")):
+        entity = EntityItem(QPointF(0, 0))
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_LABEL, label)
+        entity.setData(ROLE_OWNER_PLAYER_ID, owner_id)
+        dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._render_initiative_overlay()
+    QApplication.processEvents()
+
+    row_widgets = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QFrame)
+        if bool(candidate.property("initiative_row"))
+        and str(candidate.property("initiative_kind") or "") == "player"
+    ]
+    row_widgets.sort(key=lambda candidate: candidate.geometry().top())
+    assert len(row_widgets) >= 2
+
+    source_row = next(
+        candidate
+        for candidate in row_widgets
+        if str(candidate.property("initiative_id") or "") == "player-1:e1"
+    )
+    target_row = next(
+        candidate
+        for candidate in row_widgets
+        if str(candidate.property("initiative_id") or "") == "player-2:e2"
+    )
+    dungeon_widget._initiative_drag_source = ("player", "player-1:e1")
+    neutral_target_style = target_row.styleSheet()
+
+    dungeon_widget._ensure_initiative_drag_drop_indicator()
+    dungeon_widget._initiative_drag_hover_target = ("player", "player-2:e2", False)
+    dungeon_widget._refresh_initiative_drag_preview()
+
+    assert target_row.styleSheet() == neutral_target_style
+    assert dungeon_widget._initiative_drag_drop_indicator is not None
+    assert not dungeon_widget._initiative_drag_drop_indicator.isHidden()
+    assert source_row.styleSheet() != neutral_target_style
+
+
+def test_initiative_drag_handles_render_as_grips_not_text(dungeon_widget):
+    dungeon_widget.show()
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice"}
+    entity = EntityItem(QPointF(0, 0))
+    entity.setData(ROLE_ENTITY_ID, "e1")
+    entity.setData(ROLE_LABEL, "Wolf")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._render_initiative_overlay()
+    QApplication.processEvents()
+
+    row_widget = next(
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QFrame)
+        if bool(candidate.property("initiative_row"))
+        and str(candidate.property("initiative_kind") or "") == "player"
+    )
+    drag_handle = next(
+        label
+        for label in row_widget.findChildren(QLabel)
+        if bool(label.property("initiative_drag_handle"))
+    )
+
+    assert drag_handle.text() == ""
+    assert drag_handle.pixmap() is not None
+    assert not drag_handle.pixmap().isNull()
+
+
+def test_initiative_drop_target_detects_before_and_after_positions(dungeon_widget):
+    dungeon_widget.show()
+    dungeon_widget.resize(1200, 800)
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._connected_players = {"player-1": "Alice", "player-2": "Bob"}
+    for entity_id, owner_id, label in (("e1", "player-1", "Wolf"), ("e2", "player-2", "Bear")):
+        entity = EntityItem(QPointF(0, 0))
+        entity.setData(ROLE_ENTITY_ID, entity_id)
+        entity.setData(ROLE_LABEL, label)
+        entity.setData(ROLE_OWNER_PLAYER_ID, owner_id)
+        dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {"active": True, "collapsed": False, "player_entries": {}, "entity_entries": {}}
+    dungeon_widget._render_initiative_overlay()
+    QApplication.processEvents()
+
+    row_widgets = [
+        candidate
+        for candidate in dungeon_widget._initiative_rows_root.findChildren(QFrame)
+        if bool(candidate.property("initiative_row"))
+        and str(candidate.property("initiative_kind") or "") == "player"
+    ]
+    row_widgets.sort(key=lambda candidate: candidate.geometry().top())
+    assert len(row_widgets) >= 2
+    target_row = row_widgets[1]
+    target_rect = target_row.rect()
+    target_top = target_row.mapToGlobal(QPoint(target_rect.center().x(), max(2, target_rect.height() // 4)))
+    target_bottom = target_row.mapToGlobal(
+        QPoint(target_rect.center().x(), max(2, int(target_rect.height() * 0.75)))
+    )
+
+    dungeon_widget._initiative_drag_source = ("player", "player-1:e1")
+
+    assert dungeon_widget._initiative_drop_target_from_global(target_top) == ("player", "player-2:e2", False)
+    assert dungeon_widget._initiative_drop_target_from_global(target_bottom) == ("player", "player-2:e2", True)
 
 
 def test_player_mode_shows_initiative_reopen_button_only_with_visible_rows(dungeon_widget):
