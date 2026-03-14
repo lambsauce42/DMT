@@ -57,6 +57,37 @@ class _MouseEventStub:
         self.accepted = True
 
 
+class _WheelDeltaStub:
+    def __init__(self, y_value: int) -> None:
+        self._y_value = y_value
+
+    def y(self) -> int:
+        return self._y_value
+
+
+class _WheelEventStub:
+    def __init__(self, *, delta: int, modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier) -> None:
+        self._delta = delta
+        self._modifiers = modifiers
+        self.accepted = False
+        self.ignored = False
+
+    def modifiers(self) -> Qt.KeyboardModifier:
+        return self._modifiers
+
+    def angleDelta(self) -> _WheelDeltaStub:
+        return _WheelDeltaStub(self._delta)
+
+    def pixelDelta(self) -> _WheelDeltaStub:
+        return _WheelDeltaStub(0)
+
+    def accept(self) -> None:
+        self.accepted = True
+
+    def ignore(self) -> None:
+        self.ignored = True
+
+
 class PdfiumViewerWidgetMouseEventTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -149,6 +180,34 @@ class PdfiumViewerWidgetRenderTests(unittest.TestCase):
         )
 
         self.assertEqual(final_shape, Qt.CursorShape.ArrowCursor)
+
+
+class PdfiumViewerWidgetWheelEventTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_plain_wheel_zooms_when_ctrl_requirement_is_disabled(self) -> None:
+        widget = PdfiumViewerWidget()
+        event = _WheelEventStub(delta=120)
+
+        with patch("viewer.pdfium_viewer_widget.is_ctrl_mouse_wheel_zoom_enabled", return_value=False):
+            widget.wheelEvent(event)
+
+        self.assertGreater(widget.zoom_factor(), 1.0)
+        self.assertTrue(event.accepted)
+        self.assertFalse(event.ignored)
+
+    def test_ctrl_wheel_no_longer_zooms_when_ctrl_requirement_is_disabled(self) -> None:
+        widget = PdfiumViewerWidget()
+        event = _WheelEventStub(delta=120, modifiers=Qt.KeyboardModifier.ControlModifier)
+
+        with patch("viewer.pdfium_viewer_widget.is_ctrl_mouse_wheel_zoom_enabled", return_value=False):
+            widget.wheelEvent(event)
+
+        self.assertEqual(widget.zoom_factor(), 1.0)
+        self.assertFalse(event.accepted)
+        self.assertTrue(event.ignored)
 
 
 if __name__ == "__main__":

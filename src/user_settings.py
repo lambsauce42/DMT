@@ -5,14 +5,21 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from PySide6.QtWidgets import QApplication
+except Exception:  # pragma: no cover - user settings also runs in non-Qt contexts
+    QApplication = None
+
 from save_paths import dnd_saves_dir, selected_debug_save_profile
 
 APP_SETTINGS_FILE_NAME = "app_settings.json"
 LEGACY_DUNGEON_PROFILE_FILE_NAME = "dungeon_profile.json"
 LOCAL_PLAYER_ID_KEY = "local_player_id"
+CTRL_MOUSE_WHEEL_ZOOM_KEY = "ctrl_mouse_wheel_zoom_enabled"
 DEFAULT_APP_SETTINGS: dict[str, object] = {
     "session_autosave_enabled": False,
     LOCAL_PLAYER_ID_KEY: "",
+    CTRL_MOUSE_WHEEL_ZOOM_KEY: True,
     "recap_ollama_host": "http://127.0.0.1:11434",
     "recap_ollama_model": "gpt-oss:20b",
 }
@@ -45,6 +52,12 @@ def save_app_settings(values: dict[str, object]) -> dict[str, object]:
     path = app_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    app = QApplication.instance() if QApplication is not None else None
+    if app is not None:
+        app.setProperty(
+            CTRL_MOUSE_WHEEL_ZOOM_KEY,
+            bool(settings.get(CTRL_MOUSE_WHEEL_ZOOM_KEY, True)),
+        )
     return settings
 
 
@@ -94,3 +107,15 @@ def get_or_create_local_player_id() -> str:
 
 def is_session_autosave_enabled() -> bool:
     return bool(load_app_settings().get("session_autosave_enabled", False))
+
+
+def is_ctrl_mouse_wheel_zoom_enabled() -> bool:
+    app = QApplication.instance() if QApplication is not None else None
+    if app is not None:
+        cached_value = app.property(CTRL_MOUSE_WHEEL_ZOOM_KEY)
+        if cached_value is not None:
+            return bool(cached_value)
+    enabled = bool(load_app_settings().get(CTRL_MOUSE_WHEEL_ZOOM_KEY, True))
+    if app is not None:
+        app.setProperty(CTRL_MOUSE_WHEEL_ZOOM_KEY, enabled)
+    return enabled

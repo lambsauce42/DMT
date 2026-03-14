@@ -187,6 +187,15 @@ def _resolved_payload_from_document(document: dict) -> dict | None:
     return resolved_payload
 
 
+def resolved_item_document_payload(document: dict | None) -> dict | None:
+    if not isinstance(document, dict):
+        return None
+    payload = _resolved_payload_from_document(document)
+    if not isinstance(payload, dict):
+        return None
+    return dict(payload)
+
+
 def _item_library_cache_key(root: Path) -> str:
     try:
         return str(root.resolve()).lower()

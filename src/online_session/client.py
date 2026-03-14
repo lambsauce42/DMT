@@ -9,10 +9,18 @@ from typing import Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
 
-from .protocol import FrameDecoder, encode_message
+from .protocol import (
+    CHUNKED_MESSAGE_TYPE,
+    FrameDecoder,
+    decode_chunked_payload_bytes,
+    encode_message,
+    prepare_outbound_transport_messages,
+    restore_chunked_transport_message,
+)
 
 _WILDCARD_LISTEN_HOSTS = {"0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0"}
 _LOSSLESS_MESSAGE_TYPES = {"error", "hello", "hello_ack", "kicked"}
+_CHUNKED_MESSAGE_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -125,6 +133,7 @@ class OnlineSessionClient(QObject):
         self._transport_rng = random.Random()
         self._pending_outbound_messages: list[_QueuedOutboundMessage] = []
         self._pending_inbound_messages: list[_QueuedInboundMessage] = []
+        self._inbound_chunked_messages: dict[str, dict] = {}
         self._next_outbound_due_ms = 0
         self._next_inbound_due_ms = 0
         self._outbound_timer = QTimer(self)
@@ -210,23 +219,34 @@ class OnlineSessionClient(QObject):
             self.log_line.emit("[WARN] Cannot send while disconnected")
             return False
         try:
-            encoded = encode_message(message)
+            transport_messages = prepare_outbound_transport_messages(message)
         except Exception as exc:
             self.log_line.emit(f"[ERROR] Failed to encode outbound message: {exc}")
             return False
         message_type = str(message.get("type") or "unknown")
-        if self._should_drop_message(message_type):
+        if len(transport_messages) > 1:
             self.log_line.emit(
-                f"[WARN] Simulated outbound packet loss for '{message_type}'"
+                f"[INFO] Sending '{message_type}' in {len(transport_messages)} chunks."
             )
-            return True
-        if self._transport_simulation.one_way_delay_ms > 0:
-            self._queue_outbound_message(encoded, message_type)
-            return True
-        written = int(self._socket.write(encoded))
-        if written <= 0:
-            self.log_line.emit("[ERROR] Failed to queue outbound message for send")
-            return False
+        for transport_message in transport_messages:
+            try:
+                encoded = encode_message(transport_message)
+            except Exception as exc:
+                self.log_line.emit(f"[ERROR] Failed to encode outbound message: {exc}")
+                return False
+            transport_message_type = str(transport_message.get("type") or message_type or "unknown")
+            if self._should_drop_message(transport_message_type):
+                self.log_line.emit(
+                    f"[WARN] Simulated outbound packet loss for '{transport_message_type}'"
+                )
+                continue
+            if self._transport_simulation.one_way_delay_ms > 0:
+                self._queue_outbound_message(encoded, transport_message_type)
+                continue
+            written = int(self._socket.write(encoded))
+            if written <= 0:
+                self.log_line.emit("[ERROR] Failed to queue outbound message for send")
+                return False
         return True
 
     def _on_connected(self) -> None:
@@ -243,6 +263,7 @@ class OnlineSessionClient(QObject):
         self._player_id = None
         # Drop any partial frame bytes from the previous socket lifetime.
         self._decoder = FrameDecoder()
+        self._inbound_chunked_messages.clear()
         self._reset_transport_simulation_queues()
         self.disconnected_from_server.emit(self._transport_epoch)
         self.log_line.emit("[INFO] Disconnected from host")
@@ -261,6 +282,15 @@ class OnlineSessionClient(QObject):
             return
 
         for message in frames:
+            if str(message.get("type") or "") == CHUNKED_MESSAGE_TYPE:
+                try:
+                    message = self._accumulate_chunked_message(message)
+                except Exception as exc:
+                    self.log_line.emit(f"[ERROR] Chunk decode error: {exc}")
+                    self.disconnect()
+                    return
+                if message is None:
+                    continue
             message_type = str(message.get("type") or "unknown")
             if self._should_drop_message(message_type):
                 self.log_line.emit(
@@ -271,6 +301,66 @@ class OnlineSessionClient(QObject):
                 self._queue_inbound_message(message)
                 continue
             self._deliver_inbound_message(message)
+
+    def _purge_stale_chunked_messages(self) -> None:
+        now = time.monotonic()
+        expired_ids = [
+            chunk_id
+            for chunk_id, entry in self._inbound_chunked_messages.items()
+            if (now - float(entry.get("updated_monotonic") or 0.0)) > _CHUNKED_MESSAGE_TIMEOUT_SECONDS
+        ]
+        for chunk_id in expired_ids:
+            self._inbound_chunked_messages.pop(chunk_id, None)
+
+    def _accumulate_chunked_message(self, message: dict) -> dict | None:
+        self._purge_stale_chunked_messages()
+        chunk_id = str(message.get("chunk_id") or "").strip()
+        if not chunk_id:
+            raise ValueError("missing chunk id")
+        try:
+            chunk_index = int(message.get("chunk_index"))
+            chunk_count = int(message.get("chunk_count"))
+            packed_size = int(message.get("packed_size"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid chunk metadata") from exc
+        if chunk_index < 0 or chunk_count <= 0 or chunk_index >= chunk_count:
+            raise ValueError("invalid chunk bounds")
+        packed_sha256 = str(message.get("packed_sha256") or "").strip()
+        if not packed_sha256:
+            raise ValueError("missing chunk checksum")
+        payload_bytes = decode_chunked_payload_bytes(payload_b64=str(message.get("payload_b64") or ""))
+        entry = self._inbound_chunked_messages.get(chunk_id)
+        if entry is None:
+            entry = {
+                "chunk_count": chunk_count,
+                "packed_size": packed_size,
+                "packed_sha256": packed_sha256,
+                "chunks": {},
+                "updated_monotonic": time.monotonic(),
+            }
+            self._inbound_chunked_messages[chunk_id] = entry
+        elif (
+            int(entry.get("chunk_count") or 0) != chunk_count
+            or int(entry.get("packed_size") or 0) != packed_size
+            or str(entry.get("packed_sha256") or "") != packed_sha256
+        ):
+            self._inbound_chunked_messages.pop(chunk_id, None)
+            raise ValueError("conflicting chunk metadata")
+        chunks = entry.get("chunks")
+        if not isinstance(chunks, dict):
+            chunks = {}
+            entry["chunks"] = chunks
+        chunks[chunk_index] = payload_bytes
+        entry["updated_monotonic"] = time.monotonic()
+        if len(chunks) < chunk_count:
+            return None
+        packed_payload = b"".join(chunks[index] for index in range(chunk_count))
+        self._inbound_chunked_messages.pop(chunk_id, None)
+        return restore_chunked_transport_message(
+            packed_payload=packed_payload,
+            packed_sha256=packed_sha256,
+            packed_size=packed_size,
+        )
 
     def _announce_transport_simulation_if_needed(self) -> None:
         if self._transport_simulation_announced:

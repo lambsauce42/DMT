@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 from asset_paths import icons_dir
 from dmt_package import list_dmt_package_assets, read_dmt_package_asset, read_dmt_package_info, write_dmt_package
 from navigation_repository import load_navigation_data, move_to_trash
+from user_settings import is_ctrl_mouse_wheel_zoom_enabled
 
 ICON_DIR = str(icons_dir())
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
@@ -751,10 +752,13 @@ class MapViewPanel(QGraphicsView):
         delta = event.angleDelta().y()
         if delta == 0:
             return super().wheelEvent(event)
-        
+        control_pressed = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if control_pressed != is_ctrl_mouse_wheel_zoom_enabled():
+            return super().wheelEvent(event)
+
         # Manual zoom deactivates auto-fit
         self._auto_fit_active = False
-        
+
         factor = 1.15 if delta > 0 else (1 / 1.15)
         self.set_zoom(self._zoom * factor, anchor="mouse")
         event.accept()

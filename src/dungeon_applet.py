@@ -176,13 +176,18 @@ from item_file_format import (
     load_item_payload,
     normalized_item_name_from_payload,
     normalize_item_name,
+    resolved_item_document_payload,
     write_item_document,
 )
-from user_settings import get_or_create_local_player_id
+from user_settings import (
+    get_or_create_local_player_id,
+    is_ctrl_mouse_wheel_zoom_enabled,
+)
 from unique_ids import generate_named_object_id, generate_probabilistic_unique_id, machine_entropy_string
 from session_media import SessionMediaHttpServer, SessionMediaPlaybackEngine, validate_media_source_path
 
 ICON_DIR = str(icons_dir())
+DUNGEON_BASE_ZOOM = 1.2
 
 class ToolType(Enum):
     SELECT = auto()
@@ -214,6 +219,7 @@ LOCAL_DUNGEON_PROFILE_FILENAME = "dungeon_profile.json"
 FOG_OVERLAY_Z = 200.0
 MAX_ONLINE_ICON_BYTES = 2 * 1024 * 1024
 MAX_ONLINE_SCENE_IMAGE_BYTES = 12 * 1024 * 1024
+LARGE_INCOMING_CHARACTER_WARNING_BYTES = 30 * 1024 * 1024
 COMMON_DICE_OPTIONS: tuple[tuple[str, int], ...] = (
     ("d4", 4),
     ("d6", 6),
@@ -1039,6 +1045,7 @@ class DungeonCanvas(QGraphicsView):
         self._init_states()
         
         self.centerOn(0, 0)
+        self._apply_zoom(DUNGEON_BASE_ZOOM, anchor_under_mouse=False)
         self._view_mode = "dm"
         self.set_current_layer(LAYER_FG)
     
@@ -1119,17 +1126,19 @@ class DungeonCanvas(QGraphicsView):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         modifiers = event.modifiers()
-        
+        control_pressed = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
         # Sideways scrolling: Ctrl + Shift + Scroll
-        if modifiers & Qt.KeyboardModifier.ControlModifier and modifiers & Qt.KeyboardModifier.ShiftModifier:
+        if control_pressed and shift_pressed:
             delta = event.angleDelta().y()
             h_bar = self.horizontalScrollBar()
             h_bar.setValue(h_bar.value() - delta)
             event.accept()
             return
 
-        # Zooming: Ctrl + Scroll
-        if modifiers & Qt.KeyboardModifier.ControlModifier:
+        zoom_requires_control = is_ctrl_mouse_wheel_zoom_enabled()
+        if control_pressed == zoom_requires_control:
             if event.angleDelta().y() > 0:
                 self.zoom_in(anchor_under_mouse=True)
             else:
@@ -1192,6 +1201,7 @@ class DungeonCanvas(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.resetTransform()
+        self.scale(DUNGEON_BASE_ZOOM, DUNGEON_BASE_ZOOM)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self._current_zoom = 1.0
@@ -4993,6 +5003,7 @@ class DungeonAppletWidget(QWidget):
         self._ignore_player_overwrite_requests: bool = False
         self._sent_character_override_fingerprints: dict[str, str] = {}
         self._host_unknown_item_review_cache: dict[str, dict] = {}
+        self._host_large_character_review_cache: dict[str, str] = {}
         self._suppress_client_disconnect_handler: bool = False
         self._join_retry_prompt_open: bool = False
         self._reconnect_status_dialog: QDialog | None = None
@@ -5566,6 +5577,7 @@ class DungeonAppletWidget(QWidget):
             self._owned_linked_character_resolution_dialog.close()
             self._owned_linked_character_resolution_dialog = None
         self._host_unknown_item_review_cache.clear()
+        self._host_large_character_review_cache.clear()
         if collection_path:
             path = Path(collection_path)
             if path.exists():
@@ -5715,6 +5727,7 @@ class DungeonAppletWidget(QWidget):
             self._owned_linked_character_resolution_dialog.close()
             self._owned_linked_character_resolution_dialog = None
         self._host_unknown_item_review_cache.clear()
+        self._host_large_character_review_cache.clear()
         self._update_workspace_tab_title(f"Join: {self._local_player_name}")
         self._set_online_mode(ONLINE_MODE_PLAYER)
         if self._client_controller is None:
@@ -6000,6 +6013,7 @@ class DungeonAppletWidget(QWidget):
             self._pending_loot_claim_rollbacks.clear()
             self._clear_pending_online_command_requests(reason="leaving the current online session")
             self._host_unknown_item_review_cache.clear()
+            self._host_large_character_review_cache.clear()
         else:
             self._server_log_panel.set_ignore_overwrite_checked(False)
             self._last_host_scene_signature = self._current_players_scene_signature()
@@ -7130,7 +7144,7 @@ class DungeonAppletWidget(QWidget):
             if isinstance(payload, dict):
                 return payload
         item_document = entry.get("item_document")
-        payload = item_document.get("payload") if isinstance(item_document, dict) else {}
+        payload = resolved_item_document_payload(item_document)
         if isinstance(payload, dict):
             return dict(payload)
         return {}
@@ -13395,6 +13409,7 @@ class DungeonAppletWidget(QWidget):
         for_player_id: str | None = None,
         *,
         include_linked_character_payload: bool = True,
+        include_linked_character_archive: bool = True,
     ) -> dict:
         self._save_active_dungeon_state()
         self._initiative_state.setdefault("active", False)
@@ -13417,6 +13432,7 @@ class DungeonAppletWidget(QWidget):
                 players_scene,
                 str(for_player_id),
                 keep_owned_payload=include_linked_character_payload,
+                keep_owned_archive=include_linked_character_archive,
             )
             initiative_state = self._player_visible_initiative_state(str(for_player_id))
             dungeons_payload = [
@@ -13460,6 +13476,7 @@ class DungeonAppletWidget(QWidget):
         player_id: str,
         *,
         keep_owned_payload: bool = True,
+        keep_owned_archive: bool = True,
     ) -> dict:
         if not isinstance(state, dict):
             return self._blank_dungeon_state()
@@ -13480,7 +13497,9 @@ class DungeonAppletWidget(QWidget):
                         player_id=owner_player_id,
                     )
                     item_data["linked_inventory"] = filtered_inventory
-                    item_data["linked_sheet_archive_b64"] = filtered_archive_b64
+                    item_data["linked_sheet_archive_b64"] = (
+                        filtered_archive_b64 if keep_owned_archive else ""
+                    )
                     item_data["linked_content_hash"] = filtered_content_hash
                 else:
                     item_data["linked_sheet_archive_b64"] = ""
@@ -13545,6 +13564,47 @@ class DungeonAppletWidget(QWidget):
         if not isinstance(state, dict):
             state = self._blank_dungeon_state()
         return self._scene_signature(state)
+
+    def _snapshot_fits_transport(self, snapshot: dict) -> tuple[bool, str]:
+        try:
+            from online_session.protocol import encode_message, prepare_outbound_transport_messages
+        except Exception:
+            return True, ""
+        try:
+            for transport_message in prepare_outbound_transport_messages(
+                {"type": "snapshot", "state": snapshot, "ts": ""}
+            ):
+                encode_message(transport_message)
+        except Exception as exc:
+            return False, str(exc or "transport encoding failed")
+        return True, ""
+
+    def _build_transport_safe_player_snapshot(self, player_id: str) -> dict:
+        clean_player_id = str(player_id or "").strip()
+        variants = (
+            (True, True, ""),
+            (True, False, "Bootstrap snapshot exceeded transport limit; retrying without linked character archive."),
+            (False, False, "Bootstrap snapshot still exceeded transport limit; retrying without linked character payload."),
+        )
+        last_reason = "transport encoding failed"
+        for include_payload, include_archive, warning in variants:
+            snapshot = self._build_online_snapshot(
+                for_player_id=clean_player_id,
+                include_linked_character_payload=include_payload,
+                include_linked_character_archive=include_archive,
+            )
+            fits, reason = self._snapshot_fits_transport(snapshot)
+            if fits:
+                if warning:
+                    self._append_server_log(
+                        f"[WARN] {warning} Player={clean_player_id or 'unknown'}."
+                    )
+                return snapshot
+            last_reason = reason or last_reason
+        raise ValueError(
+            "Bootstrap snapshot exceeds transport limit even without linked character payload: "
+            f"{last_reason}"
+        )
 
     def _on_scene_changed_for_online_sync(self, _regions: object = None) -> None:
         if self._online_mode != ONLINE_MODE_DM_HOST:
@@ -13617,6 +13677,14 @@ class DungeonAppletWidget(QWidget):
                     for_player_id=str(player_id),
                     include_linked_character_payload=False,
                 )
+                fits, reason = self._snapshot_fits_transport(snapshot)
+                if not fits:
+                    self._append_server_log(
+                        "[WARN] Skipped direct snapshot because it exceeds the transport limit even "
+                        f"without linked character payloads. Player={player_id or 'unknown'} "
+                        f"Reason={reason or 'transport encoding failed'}"
+                    )
+                    continue
                 self._debug_log(
                     "host_snapshot_send",
                     target_player_id=str(player_id),
@@ -13643,9 +13711,16 @@ class DungeonAppletWidget(QWidget):
             self._last_host_scene_signature = canonical_scene_signature
             return
         snapshot = self._build_online_snapshot()
+        fits, reason = self._snapshot_fits_transport(snapshot)
         self._last_host_scene_signature = canonical_scene_signature
         broadcast_snapshot = getattr(self._host_controller, "broadcast_snapshot", None)
         if not callable(broadcast_snapshot):
+            return
+        if not fits:
+            self._append_server_log(
+                "[WARN] Skipped broadcast snapshot because it exceeds the transport limit. "
+                f"Reason={reason or 'transport encoding failed'}"
+            )
             return
         self._debug_log(
             "host_snapshot_send",
@@ -13671,17 +13746,24 @@ class DungeonAppletWidget(QWidget):
             return
         self._normalize_all_dungeon_icons_for_online()
         self._normalize_all_dungeon_images_for_online()
-        snapshot = self._build_online_snapshot(for_player_id=player_id)
+        try:
+            snapshot = self._build_transport_safe_player_snapshot(player_id)
+        except ValueError as exc:
+            self._append_server_log(
+                "[WARN] Unable to build a transport-safe bootstrap snapshot for "
+                f"{str(player_id or '').strip() or 'unknown'}: {exc}"
+            )
+            return
         self._debug_log(
             "host_snapshot_requested",
             target_player_id=str(player_id),
-            linked_character_payload=True,
+            linked_character_payload=bool(snapshot.get("linked_character_payload_included", True)),
             **self._debug_snapshot_summary(snapshot),
         )
         self._online_log_event(
             "host_snapshot_requested",
             target_player_id=str(player_id),
-            linked_character_payload=True,
+            linked_character_payload=bool(snapshot.get("linked_character_payload_included", True)),
             **self._debug_snapshot_summary(snapshot),
         )
         try:
@@ -14941,6 +15023,23 @@ class DungeonAppletWidget(QWidget):
                     str(first_linked_item.get("linked_sheet_name") or sheet_id).strip()
                     or sheet_id
                 )
+        allowed_large_character, large_character_message = self._review_large_incoming_character_for_host(
+            sheet_id=sheet_id,
+            sheet_name=sheet_name_for_review,
+            character_id=character_id,
+            inventory_payload=inventory_payload,
+            archive_bytes=archive_bytes,
+        )
+        if not allowed_large_character:
+            self._append_server_log(f"[WARN] {large_character_message}")
+            self._host_controller.send_command_result(
+                player_id,
+                ok=False,
+                message=large_character_message,
+                request_id=request_id,
+                data=dict(claim_result_data) if isinstance(claim_result_data, dict) else None,
+            )
+            return
         unknown_status, resolved_payload, unknown_status_note = self._resolve_unknown_linked_items_for_host(
             player_id=player_id,
             character_id=character_id,
@@ -15185,6 +15284,17 @@ class DungeonAppletWidget(QWidget):
         )
         if not metadata_ok:
             _send_link_result(ok=False, message=metadata_message)
+            return
+        allowed_large_character, large_character_message = self._review_large_incoming_character_for_host(
+            sheet_id=sheet_id,
+            sheet_name=sheet_name,
+            character_id=resolved_character_id,
+            inventory_payload=normalized_inventory,
+            archive_bytes=archive_bytes,
+        )
+        if not allowed_large_character:
+            self._append_server_log(f"[WARN] {large_character_message}")
+            _send_link_result(ok=False, message=large_character_message)
             return
         unknown_status, resolved_payload, unknown_status_note = self._resolve_unknown_linked_items_for_host(
             player_id=player_id,
@@ -15554,6 +15664,140 @@ class DungeonAppletWidget(QWidget):
         if not validate_character_archive_bytes(raw_archive):
             return False, "", None
         return True, clean_archive_b64, raw_archive
+
+    def _format_storage_size_label(self, size_bytes: int) -> str:
+        value = max(0, int(size_bytes or 0))
+        units = ("B", "KiB", "MiB", "GiB")
+        amount = float(value)
+        unit = units[0]
+        for next_unit in units[1:]:
+            if amount < 1024.0:
+                break
+            amount /= 1024.0
+            unit = next_unit
+        if unit == "B":
+            return f"{int(amount)} {unit}"
+        return f"{amount:.1f} {unit}"
+
+    def _large_incoming_character_review_key(
+        self,
+        *,
+        character_id: str,
+        sheet_id: str,
+    ) -> str:
+        clean_character = str(character_id or "").strip()
+        clean_sheet = str(sheet_id or "").strip()
+        return f"{clean_character}::{clean_sheet}"
+
+    def _prompt_large_incoming_character_for_host(
+        self,
+        *,
+        sheet_id: str,
+        sheet_name: str,
+        character_id: str,
+        total_size_bytes: int,
+        archive_size_bytes: int,
+        inventory_size_bytes: int,
+    ) -> str:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Large Incoming Character")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        display_name = str(sheet_name or sheet_id or character_id or "Character").strip() or "Character"
+        dialog.setText(
+            f"'{display_name}' is sending a large character package to the DM host."
+        )
+        detail_lines = [
+            f"Character id: {str(character_id or 'unknown').strip() or 'unknown'}",
+            f"Sheet id: {str(sheet_id or 'unknown').strip() or 'unknown'}",
+            f"Archive size: {self._format_storage_size_label(archive_size_bytes)}",
+            f"Inventory payload: {self._format_storage_size_label(inventory_size_bytes)}",
+            f"Combined size: {self._format_storage_size_label(total_size_bytes)}",
+            "",
+            "Large character packages can take longer to process and sync.",
+            "Choose whether to allow this character now or remember a decision for this host session.",
+        ]
+        dialog.setInformativeText("\n".join(detail_lines))
+        accept_button = dialog.addButton("Accept", QMessageBox.ButtonRole.AcceptRole)
+        accept_session_button = dialog.addButton(
+            "Accept For This Character This Session",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        dismiss_session_button = dialog.addButton(
+            "Dismiss For This Character This Session",
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is accept_button:
+            return "accept"
+        if clicked is accept_session_button:
+            return "accept_session"
+        if clicked is dismiss_session_button:
+            return "dismiss_session"
+        return ""
+
+    def _review_large_incoming_character_for_host(
+        self,
+        *,
+        sheet_id: str,
+        sheet_name: str,
+        character_id: str,
+        inventory_payload: dict,
+        archive_bytes: bytes | None,
+    ) -> tuple[bool, str]:
+        inventory_size_bytes = self._debug_json_size_bytes(
+            inventory_payload if isinstance(inventory_payload, dict) else {}
+        )
+        archive_size_bytes = len(archive_bytes or b"")
+        total_size_bytes = max(0, int(inventory_size_bytes)) + max(0, int(archive_size_bytes))
+        if total_size_bytes <= LARGE_INCOMING_CHARACTER_WARNING_BYTES:
+            return True, ""
+        review_key = self._large_incoming_character_review_key(
+            character_id=character_id,
+            sheet_id=sheet_id,
+        )
+        cached_action = str(self._host_large_character_review_cache.get(review_key) or "").strip()
+        display_name = str(sheet_name or sheet_id or character_id or "Character").strip() or "Character"
+        size_label = self._format_storage_size_label(total_size_bytes)
+        if cached_action == "accept_session":
+            self._append_server_log(
+                f"[INFO] Accepted large incoming character '{display_name}' for this session ({size_label})."
+            )
+            return True, ""
+        if cached_action == "dismiss_session":
+            return False, (
+                f"DM dismissed large incoming character '{display_name}' for this session "
+                f"({size_label})."
+            )
+        if _in_test_env():
+            action = "accept"
+        else:
+            action = self._prompt_large_incoming_character_for_host(
+                sheet_id=sheet_id,
+                sheet_name=sheet_name,
+                character_id=character_id,
+                total_size_bytes=total_size_bytes,
+                archive_size_bytes=archive_size_bytes,
+                inventory_size_bytes=inventory_size_bytes,
+            )
+        if action == "accept":
+            self._append_server_log(
+                f"[WARN] Accepted large incoming character '{display_name}' once ({size_label})."
+            )
+            return True, ""
+        if action == "accept_session":
+            self._host_large_character_review_cache[review_key] = "accept_session"
+            self._append_server_log(
+                f"[WARN] Accepted large incoming character '{display_name}' for this session ({size_label})."
+            )
+            return True, ""
+        if action == "dismiss_session":
+            self._host_large_character_review_cache[review_key] = "dismiss_session"
+            return False, (
+                f"DM dismissed large incoming character '{display_name}' for this session "
+                f"({size_label})."
+            )
+        return False, f"DM cancelled large incoming character review for '{display_name}' ({size_label})."
 
     def _linked_inventory_content_hash(
         self,

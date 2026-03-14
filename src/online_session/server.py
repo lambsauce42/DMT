@@ -8,9 +8,17 @@ from typing import Dict, Optional
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
 
-from .protocol import FrameDecoder, encode_message
+from .protocol import (
+    CHUNKED_MESSAGE_TYPE,
+    FrameDecoder,
+    decode_chunked_payload_bytes,
+    encode_message,
+    prepare_outbound_transport_messages,
+    restore_chunked_transport_message,
+)
 
 _RECONNECT_GRACE_SECONDS = 10 * 60
+_CHUNKED_MESSAGE_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -53,6 +61,7 @@ class OnlineSessionServer(QObject):
         self._name_to_identity: Dict[str, str] = {}
         self._token_to_identity: Dict[str, str] = {}
         self._persistent_to_identity: Dict[str, str] = {}
+        self._inbound_chunked_messages: Dict[QTcpSocket, Dict[str, dict]] = {}
 
     @property
     def players(self) -> Dict[str, str]:
@@ -128,6 +137,7 @@ class OnlineSessionServer(QObject):
                 continue
             state = _ConnectionState(socket=socket, decoder=FrameDecoder())
             self._connections[socket] = state
+            self._inbound_chunked_messages[socket] = {}
             socket.readyRead.connect(self._on_ready_read_for_socket)
             socket.disconnected.connect(self._on_socket_disconnected)
             socket.errorOccurred.connect(self._on_socket_error_signal)
@@ -172,6 +182,7 @@ class OnlineSessionServer(QObject):
     def _on_disconnected(self, socket: QTcpSocket) -> None:
         self._detach_socket_signals(socket)
         state = self._connections.pop(socket, None)
+        self._inbound_chunked_messages.pop(socket, None)
         if state and state.player_id:
             self._players.pop(state.player_id, None)
             self._names_lower.pop(state.name.lower(), None)
@@ -199,6 +210,15 @@ class OnlineSessionServer(QObject):
             return
 
         for message in frames:
+            if str(message.get("type") or "") == CHUNKED_MESSAGE_TYPE:
+                try:
+                    message = self._accumulate_chunked_message(socket, message)
+                except Exception as exc:
+                    self.log_line.emit(f"[ERROR] Chunk decode error: {exc}")
+                    socket.disconnectFromHost()
+                    return
+                if message is None:
+                    continue
             if not state.player_id:
                 self._handle_handshake(state, message)
                 continue
@@ -360,7 +380,92 @@ class OnlineSessionServer(QObject):
 
     def _send_socket_message(self, socket: QTcpSocket, message: dict) -> None:
         try:
-            socket.write(encode_message(message))
+            transport_messages = prepare_outbound_transport_messages(message)
         except Exception as exc:
             self.log_line.emit(f"[ERROR] Send failed: {exc}")
-            socket.disconnectFromHost()
+            return
+        if len(transport_messages) > 1:
+            self.log_line.emit(
+                f"[INFO] Sending '{str(message.get('type') or 'unknown')}' in {len(transport_messages)} chunks."
+            )
+        for transport_message in transport_messages:
+            try:
+                encoded = encode_message(transport_message)
+            except Exception as exc:
+                self.log_line.emit(f"[ERROR] Send failed: {exc}")
+                return
+            try:
+                bytes_written = socket.write(encoded)
+                if int(bytes_written) < 0:
+                    raise RuntimeError("socket write failed")
+            except Exception as exc:
+                self.log_line.emit(f"[ERROR] Send failed: {exc}")
+                try:
+                    socket.disconnectFromHost()
+                except Exception:
+                    pass
+                return
+
+    def _purge_stale_chunked_messages(self, socket: QTcpSocket) -> None:
+        now = time.monotonic()
+        bucket = self._inbound_chunked_messages.get(socket)
+        if not isinstance(bucket, dict):
+            return
+        expired_ids = [
+            chunk_id
+            for chunk_id, entry in bucket.items()
+            if (now - float(entry.get("updated_monotonic") or 0.0)) > _CHUNKED_MESSAGE_TIMEOUT_SECONDS
+        ]
+        for chunk_id in expired_ids:
+            bucket.pop(chunk_id, None)
+
+    def _accumulate_chunked_message(self, socket: QTcpSocket, message: dict) -> dict | None:
+        self._purge_stale_chunked_messages(socket)
+        chunk_id = str(message.get("chunk_id") or "").strip()
+        if not chunk_id:
+            raise ValueError("missing chunk id")
+        try:
+            chunk_index = int(message.get("chunk_index"))
+            chunk_count = int(message.get("chunk_count"))
+            packed_size = int(message.get("packed_size"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid chunk metadata") from exc
+        if chunk_index < 0 or chunk_count <= 0 or chunk_index >= chunk_count:
+            raise ValueError("invalid chunk bounds")
+        packed_sha256 = str(message.get("packed_sha256") or "").strip()
+        if not packed_sha256:
+            raise ValueError("missing chunk checksum")
+        payload_bytes = decode_chunked_payload_bytes(payload_b64=str(message.get("payload_b64") or ""))
+        bucket = self._inbound_chunked_messages.setdefault(socket, {})
+        entry = bucket.get(chunk_id)
+        if entry is None:
+            entry = {
+                "chunk_count": chunk_count,
+                "packed_size": packed_size,
+                "packed_sha256": packed_sha256,
+                "chunks": {},
+                "updated_monotonic": time.monotonic(),
+            }
+            bucket[chunk_id] = entry
+        elif (
+            int(entry.get("chunk_count") or 0) != chunk_count
+            or int(entry.get("packed_size") or 0) != packed_size
+            or str(entry.get("packed_sha256") or "") != packed_sha256
+        ):
+            bucket.pop(chunk_id, None)
+            raise ValueError("conflicting chunk metadata")
+        chunks = entry.get("chunks")
+        if not isinstance(chunks, dict):
+            chunks = {}
+            entry["chunks"] = chunks
+        chunks[chunk_index] = payload_bytes
+        entry["updated_monotonic"] = time.monotonic()
+        if len(chunks) < chunk_count:
+            return None
+        packed_payload = b"".join(chunks[index] for index in range(chunk_count))
+        bucket.pop(chunk_id, None)
+        return restore_chunked_transport_message(
+            packed_payload=packed_payload,
+            packed_sha256=packed_sha256,
+            packed_size=packed_size,
+        )

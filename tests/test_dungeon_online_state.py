@@ -1764,6 +1764,46 @@ def test_loot_pool_resolve_item_path_materializes_item_document(dungeon_widget, 
     assert str(loaded.get("icon_path") or "").strip()
 
 
+def test_loot_pool_payload_for_entry_uses_embedded_icon_when_source_file_is_deleted(
+    dungeon_widget, tmp_path
+):
+    icon_path = tmp_path / "embedded_blade.png"
+    icon_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+        b"\x1f\x15\xc4\x89"
+        b"\x00\x00\x00\rIDATx\x9cc``\xf8\xff\xff?\x00\x05\xfe\x02\xfe"
+        b"\xa7\xd6\x9f\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    entry = {
+        "entry_id": "loot-doc-embedded",
+        "type": "item",
+        "item_id": "embedded-blade",
+        "title": "Embedded Blade",
+        "path": "",
+        "item_document": build_item_document(
+            {
+                "item_id": "embedded-blade",
+                "title": "Embedded Blade",
+                "rarity": "common",
+                "level": 1,
+                "icon_path": str(icon_path),
+            },
+            str(icon_path),
+        ),
+    }
+
+    icon_path.unlink()
+    payload = dungeon_widget._loot_pool_payload_for_entry(entry)
+
+    assert isinstance(payload, dict)
+    assert payload["title"] == "Embedded Blade"
+    assert str(payload.get("icon_path") or "").strip()
+    assert str(payload.get("icon_path") or "").strip() != str(icon_path)
+    assert Path(str(payload.get("icon_path") or "")).exists()
+
+
 def test_loot_pool_resolve_item_path_prefers_known_local_library_item_over_materialized_copy(
     dungeon_widget, monkeypatch, tmp_path
 ):
@@ -2947,6 +2987,138 @@ def test_host_sync_character_inventory_updates_owned_linked_entities(
     assert "hp" not in first_item["linked_inventory"]
     assert second_item["linked_inventory"] == {}
     assert dungeon_widget._dungeons[0]["dirty"] is True
+
+
+def test_host_sync_character_inventory_accepts_large_character_for_session_once(
+    monkeypatch, dungeon_widget
+):
+    prompt_calls: list[dict] = []
+    monkeypatch.setattr(dungeon_applet_module, "LARGE_INCOMING_CHARACTER_WARNING_BYTES", 1)
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_large_incoming_character_for_host",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or "accept_session",
+    )
+
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-1",
+            linked_sheet_name="Hero",
+            linked_character_id="character-sheet-1",
+            linked_inventory={},
+            icon_path="",
+        ),
+    )
+
+    payload = _sync_inventory_payload(
+        inventory={"inventory": []},
+        archive_b64=_valid_archive_b64(),
+    )
+    dungeon_widget._handle_host_sync_character_inventory("player-1", payload, request_id="sync-large-1")
+    dungeon_widget._handle_host_sync_character_inventory("player-1", payload, request_id="sync-large-2")
+
+    assert len(prompt_calls) == 1
+    assert host.results[-1][1]["ok"] is True
+    cache_key = dungeon_widget._large_incoming_character_review_key(
+        character_id="character-sheet-1",
+        sheet_id="sheet-1",
+    )
+    assert dungeon_widget._host_large_character_review_cache[cache_key] == "accept_session"
+
+
+def test_host_sync_character_inventory_dismisses_large_character_for_session_without_reprompt(
+    monkeypatch, dungeon_widget
+):
+    prompt_calls: list[dict] = []
+    monkeypatch.setattr(dungeon_applet_module, "LARGE_INCOMING_CHARACTER_WARNING_BYTES", 1)
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_large_incoming_character_for_host",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or "dismiss_session",
+    )
+
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            linked_sheet_id="sheet-1",
+            linked_sheet_name="Hero",
+            linked_character_id="character-sheet-1",
+            linked_inventory={"inventory": []},
+            icon_path="",
+        ),
+    )
+
+    payload = _sync_inventory_payload(
+        inventory={"inventory": []},
+        archive_b64=_valid_archive_b64(),
+    )
+    dungeon_widget._handle_host_sync_character_inventory("player-1", payload, request_id="sync-large-dismiss-1")
+    dungeon_widget._handle_host_sync_character_inventory("player-1", payload, request_id="sync-large-dismiss-2")
+
+    assert len(prompt_calls) == 1
+    assert host.results[-1][1]["ok"] is False
+    assert "dismissed large incoming character" in host.results[-1][1]["message"]
+    first_item = dungeon_widget._dungeons[0]["state"]["items"][0]
+    assert first_item["linked_inventory"]["inventory"] == []
+
+
+def test_host_link_character_entity_can_dismiss_large_character_for_session(
+    monkeypatch, dungeon_widget
+):
+    prompt_calls: list[dict] = []
+    monkeypatch.setattr(dungeon_applet_module, "LARGE_INCOMING_CHARACTER_WARNING_BYTES", 1)
+    monkeypatch.setattr("dungeon_applet._in_test_env", lambda: False)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_prompt_large_incoming_character_for_host",
+        lambda **kwargs: prompt_calls.append(dict(kwargs)) or "dismiss_session",
+    )
+
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state("e1", "player-1", label="Entity", hp=10, max_hp=10, ac=10),
+        load_state=True,
+    )
+
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        _link_character_payload(
+            entity_id="e1",
+            sheet_id="sheet-1",
+            sheet_name="Hero",
+            character_id="character-sheet-1",
+            inventory={"inventory": []},
+            stats={"name": "Hero"},
+            archive_b64=_valid_archive_b64(),
+        ),
+        request_id="link-large-dismiss-1",
+    )
+    dungeon_widget._handle_host_link_character_entity(
+        "player-1",
+        _link_character_payload(
+            entity_id="e1",
+            sheet_id="sheet-1",
+            sheet_name="Hero",
+            character_id="character-sheet-1",
+            inventory={"inventory": []},
+            stats={"name": "Hero"},
+            archive_b64=_valid_archive_b64(),
+        ),
+        request_id="link-large-dismiss-2",
+    )
+
+    assert len(prompt_calls) == 1
+    assert host.results[-1][1]["ok"] is False
+    assert "dismissed large incoming character" in host.results[-1][1]["message"]
+    item_data = dungeon_widget._dungeons[0]["state"]["items"][0]
+    assert str(item_data.get("linked_sheet_id") or "") == ""
 
 
 def test_host_sync_character_inventory_uses_authoritative_item_canonicalization(
@@ -5386,6 +5558,284 @@ def test_routine_player_snapshot_strips_owned_linked_character_package(dungeon_w
     requested_item = requested_snapshot["dungeons"][0]["state"]["items"][0]
     assert requested_item["linked_sheet_archive_b64"] == _valid_archive_b64()
     assert requested_item["linked_inventory"]["inventory"][0]["item_id"] == "item-known"
+
+
+def test_host_snapshot_request_falls_back_to_inventory_without_archive_when_full_payload_is_too_large(
+    dungeon_widget, monkeypatch
+):
+    class _HostControllerStub:
+        def __init__(self) -> None:
+            self.sent_snapshots: list[dict] = []
+
+        def send_snapshot_to(self, _player_id: str, snapshot: dict) -> None:
+            self.sent_snapshots.append(snapshot)
+
+        def stop(self) -> None:
+            return
+
+    dungeon_widget._players_dungeon_id = "players"
+    dungeon_widget._active_dungeon_id = "players"
+    dungeon_widget._save_active_dungeon_state = lambda: None
+    dungeon_widget._dungeons = [
+        {
+            "id": "players",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-a",
+                        "linked_sheet_id": "sheet-a",
+                        "linked_sheet_name": "Sheet A",
+                        "linked_character_id": "char-a",
+                        "linked_authority_player_id": "player-a",
+                        "linked_save_revision": 3,
+                        "linked_last_saved_at": "2026-03-09T18:00:00+00:00",
+                        "linked_content_hash": "hash-a",
+                        "linked_sheet_archive_b64": _valid_archive_b64(),
+                        "linked_inventory": {
+                            "inventory": [
+                                {"item_id": "item-known", "quantity": 1},
+                            ]
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    log_lines = []
+    host_controller = _HostControllerStub()
+    dungeon_widget._host_controller = host_controller
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_icon_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_image_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_append_server_log", log_lines.append)
+
+    def _snapshot_fits(snapshot):
+        item = snapshot["dungeons"][0]["state"]["items"][0]
+        if str(item.get("linked_sheet_archive_b64") or ""):
+            return False, "message too large"
+        return True, ""
+
+    monkeypatch.setattr(dungeon_widget, "_snapshot_fits_transport", _snapshot_fits)
+
+    dungeon_widget._on_host_snapshot_requested("player-a")
+
+    assert len(host_controller.sent_snapshots) == 1
+    sent_item = host_controller.sent_snapshots[0]["dungeons"][0]["state"]["items"][0]
+    assert host_controller.sent_snapshots[0]["linked_character_payload_included"] is True
+    assert sent_item["linked_sheet_archive_b64"] == ""
+    assert sent_item["linked_inventory"]["inventory"][0]["item_id"] == "item-known"
+    assert any("without linked character archive" in line for line in log_lines)
+
+
+def test_host_snapshot_request_falls_back_to_scene_only_when_inventory_payload_is_still_too_large(
+    dungeon_widget, monkeypatch
+):
+    class _HostControllerStub:
+        def __init__(self) -> None:
+            self.sent_snapshots: list[dict] = []
+
+        def send_snapshot_to(self, _player_id: str, snapshot: dict) -> None:
+            self.sent_snapshots.append(snapshot)
+
+        def stop(self) -> None:
+            return
+
+    dungeon_widget._players_dungeon_id = "players"
+    dungeon_widget._active_dungeon_id = "players"
+    dungeon_widget._save_active_dungeon_state = lambda: None
+    dungeon_widget._dungeons = [
+        {
+            "id": "players",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-a",
+                        "linked_sheet_id": "sheet-a",
+                        "linked_sheet_name": "Sheet A",
+                        "linked_character_id": "char-a",
+                        "linked_authority_player_id": "player-a",
+                        "linked_save_revision": 3,
+                        "linked_last_saved_at": "2026-03-09T18:00:00+00:00",
+                        "linked_content_hash": "hash-a",
+                        "linked_sheet_archive_b64": _valid_archive_b64(),
+                        "linked_inventory": {
+                            "inventory": [
+                                {"item_id": "item-known", "quantity": 1},
+                            ]
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    log_lines = []
+    host_controller = _HostControllerStub()
+    dungeon_widget._host_controller = host_controller
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_icon_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_image_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_append_server_log", log_lines.append)
+
+    def _snapshot_fits(snapshot):
+        if bool(snapshot.get("linked_character_payload_included", True)):
+            return False, "message too large"
+        return True, ""
+
+    monkeypatch.setattr(dungeon_widget, "_snapshot_fits_transport", _snapshot_fits)
+
+    dungeon_widget._on_host_snapshot_requested("player-a")
+
+    assert len(host_controller.sent_snapshots) == 1
+    sent_item = host_controller.sent_snapshots[0]["dungeons"][0]["state"]["items"][0]
+    assert host_controller.sent_snapshots[0]["linked_character_payload_included"] is False
+    assert sent_item["linked_sheet_archive_b64"] == ""
+    assert sent_item["linked_inventory"]["inventory"] == []
+    assert any("without linked character payload" in line for line in log_lines)
+
+
+def test_host_snapshot_request_logs_and_returns_when_no_transport_safe_variant_exists(
+    dungeon_widget, monkeypatch
+):
+    class _HostControllerStub:
+        def __init__(self) -> None:
+            self.sent_snapshots: list[dict] = []
+
+        def send_snapshot_to(self, _player_id: str, snapshot: dict) -> None:
+            self.sent_snapshots.append(snapshot)
+
+        def stop(self) -> None:
+            return
+
+    dungeon_widget._players_dungeon_id = "players"
+    dungeon_widget._active_dungeon_id = "players"
+    dungeon_widget._save_active_dungeon_state = lambda: None
+    dungeon_widget._dungeons = [
+        {
+            "id": "players",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-a",
+                        "linked_sheet_id": "sheet-a",
+                        "linked_sheet_name": "Sheet A",
+                        "linked_character_id": "char-a",
+                        "linked_authority_player_id": "player-a",
+                        "linked_save_revision": 3,
+                        "linked_last_saved_at": "2026-03-09T18:00:00+00:00",
+                        "linked_content_hash": "hash-a",
+                        "linked_sheet_archive_b64": _valid_archive_b64(),
+                        "linked_inventory": {
+                            "inventory": [
+                                {"item_id": "item-known", "quantity": 1},
+                            ]
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    log_lines = []
+    host_controller = _HostControllerStub()
+    dungeon_widget._host_controller = host_controller
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_icon_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_image_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_append_server_log", log_lines.append)
+    monkeypatch.setattr(dungeon_widget, "_snapshot_fits_transport", lambda _snapshot: (False, "message too large"))
+
+    dungeon_widget._on_host_snapshot_requested("player-a")
+
+    assert host_controller.sent_snapshots == []
+    assert any("Unable to build a transport-safe bootstrap snapshot" in line for line in log_lines)
+
+
+def test_host_broadcast_snapshot_skips_oversized_direct_snapshot_without_disconnect(
+    dungeon_widget, monkeypatch
+):
+    class _HostControllerStub:
+        def __init__(self) -> None:
+            self.players = {"player-a": "Player A"}
+            self.sent_snapshots: list[tuple[str, dict]] = []
+
+        def send_snapshot_to(self, player_id: str, snapshot: dict) -> None:
+            self.sent_snapshots.append((player_id, snapshot))
+
+        def stop(self) -> None:
+            return
+
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "players"
+    dungeon_widget._active_dungeon_id = "players"
+    dungeon_widget._save_active_dungeon_state = lambda: None
+    dungeon_widget._normalize_all_dungeon_icons_for_online = lambda: None
+    dungeon_widget._normalize_all_dungeon_images_for_online = lambda: None
+    dungeon_widget._current_players_scene_signature = lambda: "sig-players"
+    dungeon_widget._dungeons = [
+        {
+            "id": "players",
+            "name": "Players",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "entity-1",
+                        "owner_player_id": "player-a",
+                        "linked_sheet_id": "sheet-a",
+                        "linked_sheet_name": "Sheet A",
+                        "linked_character_id": "char-a",
+                        "linked_authority_player_id": "player-a",
+                        "linked_save_revision": 3,
+                        "linked_last_saved_at": "2026-03-09T18:00:00+00:00",
+                        "linked_content_hash": "hash-a",
+                        "linked_sheet_archive_b64": _valid_archive_b64(),
+                        "linked_inventory": {
+                            "inventory": [
+                                {"item_id": "item-known", "quantity": 1},
+                            ]
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    log_lines = []
+    host_controller = _HostControllerStub()
+    dungeon_widget._host_controller = host_controller
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_icon_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_image_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_append_server_log", log_lines.append)
+    monkeypatch.setattr(dungeon_widget, "_snapshot_fits_transport", lambda _snapshot: (False, "message too large"))
+
+    dungeon_widget._broadcast_snapshot_if_host()
+
+    assert host_controller.sent_snapshots == []
+    assert any("Skipped direct snapshot because it exceeds the transport limit" in line for line in log_lines)
 
 
 def test_dm_host_link_character_prefers_collection_backed_state(monkeypatch, dungeon_widget, tmp_path):

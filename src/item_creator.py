@@ -1474,9 +1474,13 @@ class ItemCreatorWidget(QWidget):
         payload.pop("item_id", None)
         document = build_item_document(payload, spec.icon_path)
         write_item_document(Path(item_path), document)
-        payload = document.get("payload")
-        if isinstance(payload, dict):
-            self._item_id = str(payload.get("item_id") or "").strip()
+        loaded_payload = load_item_payload(Path(item_path))
+        if isinstance(loaded_payload, dict):
+            self._apply_spec(spec_from_dict(loaded_payload))
+        else:
+            payload = document.get("payload")
+            if isinstance(payload, dict):
+                self._item_id = str(payload.get("item_id") or "").strip()
         self._last_save_path = item_path
         self._last_saved_base_name = self._default_base_name()
         save_dir = os.path.dirname(item_path)

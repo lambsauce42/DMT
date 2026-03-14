@@ -17,7 +17,11 @@ from app import (
     build_applet_widget,
     _append_online_launch_log,
 )
-from user_settings import is_session_autosave_enabled, load_app_settings
+from user_settings import (
+    is_ctrl_mouse_wheel_zoom_enabled,
+    is_session_autosave_enabled,
+    load_app_settings,
+)
 
 
 @pytest.fixture(scope="module")
@@ -260,7 +264,8 @@ def test_home_settings_saves_session_autosave_toggle(monkeypatch, qapp):
     widget = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
 
     def _fake_exec(self):
-        checkbox = self.findChild(QCheckBox)
+        checkboxes = {checkbox.text(): checkbox for checkbox in self.findChildren(QCheckBox)}
+        checkbox = checkboxes.get("Enable autosave while editing sessions")
         assert checkbox is not None
         assert checkbox.isChecked() is False
         checkbox.setChecked(True)
@@ -275,6 +280,28 @@ def test_home_settings_saves_session_autosave_toggle(monkeypatch, qapp):
     widget._show_settings()
 
     assert is_session_autosave_enabled() is True
+
+
+def test_home_settings_saves_ctrl_wheel_zoom_toggle(monkeypatch, qapp):
+    widget = HomeWidget(APPLET_DEFINITIONS, lambda applet, focus: None)
+
+    def _fake_exec(self):
+        checkboxes = {checkbox.text(): checkbox for checkbox in self.findChildren(QCheckBox)}
+        checkbox = checkboxes.get("Require Ctrl for mouse-wheel zoom")
+        assert checkbox is not None
+        assert checkbox.isChecked() is True
+        checkbox.setChecked(False)
+        for button in self.findChildren(QPushButton):
+            if button.text() == "Save":
+                button.click()
+                return 0
+        pytest.fail("Save button not found")
+
+    monkeypatch.setattr("app.ModernDialog.exec", _fake_exec)
+
+    widget._show_settings()
+
+    assert is_ctrl_mouse_wheel_zoom_enabled() is False
 
 
 def test_home_widget_creates_and_reuses_launcher_player_id(qapp):

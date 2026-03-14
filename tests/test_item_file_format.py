@@ -17,6 +17,7 @@ from item_file_format import (
     list_item_file_paths,
     load_item_document,
     load_item_payload,
+    resolved_item_document_payload,
     write_item_document,
 )
 
@@ -62,6 +63,31 @@ def test_build_document_with_embedded_icon_round_trip(tmp_path: Path) -> None:
     embedded_icon_path = Path(str(loaded.get("icon_path") or ""))
     assert embedded_icon_path.exists()
     assert embedded_icon_path.suffix == ".png"
+
+
+def test_resolved_item_document_payload_uses_embedded_icon_after_source_is_deleted(
+    tmp_path: Path,
+) -> None:
+    icon_source = tmp_path / "icon.png"
+    icon_source.write_bytes(_PNG_1X1_BYTES)
+
+    document = build_item_document(
+        {
+            "title": "Blade",
+            "rarity": "common",
+            "level": 1,
+            "icon_path": str(icon_source),
+        },
+        str(icon_source),
+    )
+    icon_source.unlink()
+
+    resolved = resolved_item_document_payload(document)
+
+    assert isinstance(resolved, dict)
+    assert resolved["title"] == "Blade"
+    assert str(resolved.get("icon_path") or "").strip() != str(icon_source)
+    assert Path(str(resolved.get("icon_path") or "")).exists()
 
 
 def test_build_item_document_preserves_existing_item_id() -> None:

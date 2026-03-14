@@ -28,6 +28,30 @@ def _write_png(path: Path, *, width: int = 32, height: int = 32) -> None:
     assert image.save(str(path), "PNG")
 
 
+class _WheelDeltaStub:
+    def __init__(self, y_value: int) -> None:
+        self._y_value = y_value
+
+    def y(self) -> int:
+        return self._y_value
+
+
+class _WheelEventStub:
+    def __init__(self, *, delta: int, modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier) -> None:
+        self._delta = delta
+        self._modifiers = modifiers
+        self.accepted = False
+
+    def angleDelta(self) -> _WheelDeltaStub:
+        return _WheelDeltaStub(self._delta)
+
+    def modifiers(self) -> Qt.KeyboardModifier:
+        return self._modifiers
+
+    def accept(self) -> None:
+        self.accepted = True
+
+
 def test_map_dialog_new_entry_accepts_and_persists_copy(qtbot, monkeypatch, tmp_path):
     source = tmp_path / "source.png"
     _write_png(source)
@@ -191,6 +215,26 @@ def test_map_view_panel_pan_is_stable_without_vertical_jitter(qtbot, tmp_path):
     y_values = [entry[2] for entry in samples]
     y_jitter = max(y_values) - min(y_values)
     assert y_jitter < 0.05
+
+
+def test_map_view_panel_plain_wheel_zooms_when_ctrl_requirement_is_disabled(qtbot, tmp_path, monkeypatch):
+    source = tmp_path / "wheel_zoom.png"
+    _write_png(source)
+
+    view = MapViewPanel()
+    qtbot.addWidget(view)
+    view.resize(600, 400)
+    view.show()
+    view.load_image(str(source))
+
+    baseline_zoom = float(view._zoom)
+    event = _WheelEventStub(delta=120)
+    monkeypatch.setattr("maps_applet.is_ctrl_mouse_wheel_zoom_enabled", lambda: False)
+
+    view.wheelEvent(event)
+
+    assert event.accepted is True
+    assert view._zoom > baseline_zoom
 
 
 def test_maps_widget_restores_map_view_state_and_reset_view(qtbot, monkeypatch, tmp_path):

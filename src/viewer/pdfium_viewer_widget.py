@@ -12,6 +12,8 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 
+from user_settings import is_ctrl_mouse_wheel_zoom_enabled
+
 
 _MAX_RENDER_CACHE = 6
 _PAGE_SPACING = 16
@@ -410,7 +412,8 @@ class PdfiumViewerWidget(QWidget):
             event.accept()
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        control_pressed = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if control_pressed == is_ctrl_mouse_wheel_zoom_enabled():
             delta = event.angleDelta().y()
             if delta == 0:
                 delta = event.pixelDelta().y()

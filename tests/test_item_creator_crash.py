@@ -162,6 +162,34 @@ def test_editing_loaded_item_prompts_for_new_filename_on_title_change(item_widge
     assert seen_default_paths == [str(renamed_item_path)]
 
 
+def test_save_item_document_rehydrates_embedded_icon_into_editor_state(item_widget, tmp_path):
+    icon_source = tmp_path / "source_icon.png"
+    icon_source.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+        b"\x1f\x15\xc4\x89"
+        b"\x00\x00\x00\rIDATx\x9cc``\xf8\xff\xff?\x00\x05\xfe\x02\xfe"
+        b"\xa7\xd6\x9f\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    item_path = tmp_path / "saved_item.dmtitem"
+
+    item_widget.title_edit.setText("Saved Blade")
+    item_widget.icon_edit.setText(str(icon_source))
+
+    item_widget._save_item_document(str(item_path))
+    icon_source.unlink()
+
+    current_icon_path = item_widget.icon_edit.text().strip()
+    loaded_payload = load_item_payload(item_path)
+
+    assert current_icon_path
+    assert current_icon_path != str(icon_source)
+    assert os.path.exists(current_icon_path)
+    assert isinstance(loaded_payload, dict)
+    assert loaded_payload["icon_path"] == current_icon_path
+
+
 def test_show_item_library_supports_search_category_filter_and_sort(item_widget, qtbot, tmp_path):
     first_path = tmp_path / "blade.dmtitem"
     second_path = tmp_path / "potion.dmtitem"

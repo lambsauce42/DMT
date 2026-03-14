@@ -11,14 +11,15 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+import online_session.protocol as protocol_module
 from online_session.client import OnlineSessionClient
-from online_session.protocol import encode_message
+from online_session.protocol import FrameDecoder, encode_message
 from online_session.controllers import (
     ClientSessionController,
     HostSessionController,
     _RECONNECT_MAX_ATTEMPTS,
 )
-from online_session.server import OnlineSessionServer
+from online_session.server import OnlineSessionServer, _ConnectionState
 
 
 def _free_tcp_port() -> int:
@@ -340,6 +341,115 @@ def test_client_simulated_packet_loss_does_not_drop_hello_ack(monkeypatch):
     assert client.session_token == "token-lossless"
 
 
+def test_client_send_chunks_large_messages_when_inline_limit_is_lowered(monkeypatch):
+    monkeypatch.setattr(protocol_module, "_INLINE_MESSAGE_JSON_LIMIT_BYTES", 32)
+    monkeypatch.setattr(protocol_module, "_CHUNKED_MESSAGE_SLICE_BYTES", 64)
+
+    client = OnlineSessionClient()
+    client._socket = _SocketStub()
+    payload = {"type": "command", "action": "sync_character_inventory", "archive_b64": "A" * 512}
+
+    assert client.send(payload) is True
+    assert len(client._socket.writes) > 1
+
+    decoder = FrameDecoder()
+    frames = decoder.feed(b"".join(client._socket.writes))
+    assert len(frames) == len(client._socket.writes)
+    assert all(str(frame.get("type") or "") == "chunked_message_part" for frame in frames)
+
+
+def test_client_reassembles_chunked_inbound_messages(monkeypatch):
+    monkeypatch.setattr(protocol_module, "_INLINE_MESSAGE_JSON_LIMIT_BYTES", 32)
+    monkeypatch.setattr(protocol_module, "_CHUNKED_MESSAGE_SLICE_BYTES", 64)
+
+    client = OnlineSessionClient()
+    client._socket = _SocketStub()
+    received = []
+    client.message_received.connect(lambda _epoch, message: received.append(dict(message)))
+
+    payload = {"type": "command_result", "ok": True, "data": {"archive_b64": "A" * 512}}
+    parts = protocol_module.prepare_outbound_transport_messages(payload)
+    assert len(parts) > 1
+    client._socket.set_read_payload(b"".join(encode_message(part) for part in parts))
+
+    client._on_ready_read()
+
+    assert received == [payload]
+
+
+def test_server_reassembles_chunked_command_messages(monkeypatch):
+    class _ServerSocketStub:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+            self.disconnect_calls = 0
+
+        def readAll(self):
+            payload = self._payload
+            self._payload = b""
+            return payload
+
+        def disconnectFromHost(self):
+            self.disconnect_calls += 1
+
+    monkeypatch.setattr(protocol_module, "_INLINE_MESSAGE_JSON_LIMIT_BYTES", 32)
+    monkeypatch.setattr(protocol_module, "_CHUNKED_MESSAGE_SLICE_BYTES", 64)
+
+    server = OnlineSessionServer()
+    received = []
+    server.message_received.connect(lambda player_id, message: received.append((player_id, dict(message))))
+    payload = {
+        "type": "command",
+        "action": "sync_character_inventory",
+        "payload": {"archive_b64": "A" * 512},
+        "request_id": "req-large-1",
+    }
+    parts = protocol_module.prepare_outbound_transport_messages(payload)
+    socket = _ServerSocketStub(b"".join(encode_message(part) for part in parts))
+    server._connections[socket] = _ConnectionState(
+        socket=socket,
+        decoder=FrameDecoder(),
+        player_id="player-1",
+        name="Alice",
+        session_token="token-1",
+    )
+    server._inbound_chunked_messages[socket] = {}
+
+    server._on_ready_read(socket)
+
+    assert received == [("player-1", payload)]
+    assert socket.disconnect_calls == 0
+
+
+def test_server_send_socket_message_chunks_large_messages(monkeypatch):
+    class _ServerSocketStub:
+        def __init__(self):
+            self.writes = []
+            self.disconnect_calls = 0
+
+        def write(self, payload):
+            self.writes.append(payload)
+            return len(payload)
+
+        def disconnectFromHost(self):
+            self.disconnect_calls += 1
+
+    monkeypatch.setattr(protocol_module, "_INLINE_MESSAGE_JSON_LIMIT_BYTES", 32)
+    monkeypatch.setattr(protocol_module, "_CHUNKED_MESSAGE_SLICE_BYTES", 64)
+
+    server = OnlineSessionServer()
+    socket = _ServerSocketStub()
+    server._send_socket_message(
+        socket,
+        {"type": "command_result", "ok": True, "data": {"archive_b64": "A" * 512}},
+    )
+
+    assert len(socket.writes) > 1
+    assert socket.disconnect_calls == 0
+    decoder = FrameDecoder()
+    frames = decoder.feed(b"".join(socket.writes))
+    assert all(str(frame.get("type") or "") == "chunked_message_part" for frame in frames)
+
+
 def test_host_controller_kick_player_only_broadcasts_after_disconnect_starts(monkeypatch):
     controller = HostSessionController()
     controller.server._players["player-1"] = "Alice"
@@ -378,6 +488,50 @@ def test_host_controller_kick_player_only_broadcasts_after_disconnect_starts(mon
             "system": True,
         }
     ]
+
+
+def test_server_send_socket_message_does_not_disconnect_on_local_encode_failure(monkeypatch):
+    class _SocketStub:
+        def __init__(self) -> None:
+            self.disconnect_calls = 0
+            self.write_calls = 0
+
+        def write(self, _payload):
+            self.write_calls += 1
+            return 0
+
+        def disconnectFromHost(self):
+            self.disconnect_calls += 1
+
+    server = OnlineSessionServer()
+    logs = []
+    server.log_line.connect(logs.append)
+    socket = _SocketStub()
+
+    monkeypatch.setattr("online_session.server.encode_message", lambda _message: (_ for _ in ()).throw(ValueError("message too large")))
+
+    server._send_socket_message(socket, {"type": "snapshot"})
+
+    assert socket.write_calls == 0
+    assert socket.disconnect_calls == 0
+    assert any("Send failed: message too large" in line for line in logs)
+
+
+def test_server_send_socket_message_swallows_deleted_socket_cleanup_failure():
+    class _DeletedSocketStub:
+        def write(self, _payload):
+            raise RuntimeError("Internal C++ object (PySide6.QtNetwork.QTcpSocket) already deleted.")
+
+        def disconnectFromHost(self):
+            raise RuntimeError("Internal C++ object (PySide6.QtNetwork.QTcpSocket) already deleted.")
+
+    server = OnlineSessionServer()
+    logs = []
+    server.log_line.connect(logs.append)
+
+    server._send_socket_message(_DeletedSocketStub(), {"type": "snapshot"})
+
+    assert any("already deleted" in line for line in logs)
 
 
 def test_client_controller_pauses_auto_reconnect_after_max_attempts():

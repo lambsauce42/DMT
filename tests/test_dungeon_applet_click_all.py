@@ -60,6 +60,8 @@ def test_click_zoom_buttons(dungeon_widget, qtbot):
     """
     initial_zoom = dungeon_widget.canvas._current_zoom
     initial_label = dungeon_widget.zoom_label.text()
+    initial_transform_zoom = dungeon_widget.canvas.transform().m11()
+    assert initial_transform_zoom == pytest.approx(1.2)
     
     # Find Zoom In button (it has the plus icon)
     # Since we don't have direct public accessors easily without inspecting children or relying on member names:
@@ -72,6 +74,7 @@ def test_click_zoom_buttons(dungeon_widget, qtbot):
     
     new_zoom = dungeon_widget.canvas._current_zoom
     assert new_zoom > initial_zoom, "Zoom level should increase after clicking Zoom In"
+    assert dungeon_widget.canvas.transform().m11() > initial_transform_zoom
     assert dungeon_widget.zoom_label.text() != initial_label, "Zoom label should update"
     
     # Click Zoom Out
@@ -99,6 +102,7 @@ def test_click_origin_button(dungeon_widget, qtbot):
     
     # Verify reset
     assert dungeon_widget.canvas._current_zoom == 1.0, "Zoom should reset to 1.0"
+    assert dungeon_widget.canvas.transform().m11() == pytest.approx(1.2)
     
     # centerOn(0,0) ensures the scene center is in view. 
     # Exact scrollbar values depend on viewport size, but we can check internal zoom state.

@@ -85,6 +85,7 @@ from tab_workspace import TabWorkspaceController, WorkspaceTabsHost
 from ui.encounter_panel import EncounterPanel
 from user_settings import (
     get_or_create_local_player_id,
+    is_ctrl_mouse_wheel_zoom_enabled,
     load_app_settings,
     save_app_settings,
 )
@@ -2731,6 +2732,28 @@ class HomeWidget(QWidget):
         session_layout.addWidget(session_hint)
 
         content_layout.addWidget(session_group)
+
+        wheel_group = QGroupBox("Mouse Wheel", content)
+        wheel_group.setObjectName("TransparentContainer")
+        wheel_layout = QVBoxLayout(wheel_group)
+        wheel_layout.setContentsMargins(12, 12, 12, 12)
+        wheel_layout.setSpacing(6)
+
+        ctrl_wheel_zoom_checkbox = QCheckBox(
+            "Require Ctrl for mouse-wheel zoom",
+            wheel_group,
+        )
+        ctrl_wheel_zoom_checkbox.setChecked(is_ctrl_mouse_wheel_zoom_enabled())
+        wheel_layout.addWidget(ctrl_wheel_zoom_checkbox)
+
+        wheel_hint = QLabel(
+            "When disabled, the plain mouse wheel zooms and Ctrl+wheel scrolls instead."
+        )
+        wheel_hint.setWordWrap(True)
+        wheel_hint.setStyleSheet("color: #8b949e;")
+        wheel_layout.addWidget(wheel_hint)
+
+        content_layout.addWidget(wheel_group)
         content_layout.addStretch(1)
         dialog.add_content(content)
 
@@ -2739,6 +2762,9 @@ class HomeWidget(QWidget):
                 save_app_settings(
                     {
                         "session_autosave_enabled": bool(session_autosave_checkbox.isChecked()),
+                        "ctrl_mouse_wheel_zoom_enabled": bool(
+                            ctrl_wheel_zoom_checkbox.isChecked()
+                        ),
                     }
                 )
             except Exception as exc:
