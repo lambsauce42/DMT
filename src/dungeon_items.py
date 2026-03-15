@@ -212,6 +212,61 @@ class WallItem(QGraphicsLineItem):
             
         super().paint(painter, option, widget)
 
+
+class StrokeItem(QGraphicsPathItem):
+    """Freehand stroke with an outline-only hit shape."""
+
+    _HITBOX_PADDING = 5.0
+
+    def __init__(
+        self,
+        path: QPainterPath | None = None,
+        parent: QGraphicsItem | None = None,
+    ) -> None:
+        super().__init__(path or QPainterPath(), parent)
+        self.setBrush(Qt.BrushStyle.NoBrush)
+
+    def boundingRect(self) -> QRectF:
+        padding = float(self._HITBOX_PADDING)
+        return super().boundingRect().adjusted(-padding, -padding, padding, padding)
+
+    def _hitbox_width(self) -> float:
+        return max(1.0, float(self.pen().widthF() or 0.0)) + (self._HITBOX_PADDING * 2.0)
+
+    def shape(self) -> QPainterPath:
+        path = self.path()
+        if path.isEmpty():
+            return QPainterPath()
+
+        pen = self.pen()
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self._hitbox_width())
+        stroker.setCapStyle(pen.capStyle())
+        stroker.setJoinStyle(pen.joinStyle())
+        stroker.setMiterLimit(pen.miterLimit())
+        return stroker.createStroke(path)
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionGraphicsItem,
+        widget: QWidget | None = None,
+    ) -> None:
+        clean_option = QStyleOptionGraphicsItem(option)
+        clean_option.state &= ~QStyle.StateFlag.State_Selected
+        super().paint(painter, clean_option, widget)
+
+        if not (option.state & QStyle.StateFlag.State_Selected):
+            return
+
+        selection_pen = QPen(QColor("#60a5fa"), self._hitbox_width(), Qt.PenStyle.DashLine)
+        selection_pen.setCosmetic(True)
+        selection_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        selection_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(selection_pen)
+        painter.drawPath(self.path())
+
 class DungeonEllipseItem(RoomGroup):
     """
     Representation of an elliptical room using segmented walls

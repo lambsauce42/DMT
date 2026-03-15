@@ -10,7 +10,7 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from PySide6.QtCore import QPoint, QRect, QSize
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSplitter, QWidget
@@ -708,6 +708,283 @@ class PlayerSheetsEquipmentLayoutTests(unittest.TestCase):
         self.assertEqual(widget._inventory_list.item(0).toolTip(), "")
         widget.close()
 
+    def test_backpack_stacks_duplicate_items_into_one_tile(self) -> None:
+        widget = PlayerSheetsWidget()
+        widget.show()
+        QApplication.processEvents()
+
+        item = LootItem(
+            item_id="stacked-item",
+            title="Stacked Item",
+            rarity="common",
+            category_label=None,
+            categories=set(),
+            level=1,
+            tags=set(),
+            path="stacked_item.json",
+        )
+        widget._inventory_item_by_id[item.item_id] = item
+        entry = PlayerSheetEntry(
+            name="Stacked Character",
+            pdf_path="test.pdf",
+            inventory=[item.item_id, item.item_id, item.item_id],
+        )
+        widget._current_entry = entry
+        widget._set_inventory(entry)
+
+        self.assertEqual(widget._inventory_list.count(), 1)
+        row = widget._inventory_list.item(0)
+        self.assertEqual(
+            row.data(player_sheets_module.INVENTORY_ITEM_QUANTITY_ROLE),
+            3,
+        )
+        widget.close()
+
+    def test_backpack_quantity_button_click_edits_stack_exactly(self) -> None:
+        widget = PlayerSheetsWidget()
+        widget.resize(1280, 820)
+        widget.show()
+        QApplication.processEvents()
+        widget._save_entries = lambda **_kwargs: None  # type: ignore[assignment]
+
+        item = LootItem(
+            item_id="editable-stack",
+            title="Editable Stack",
+            rarity="common",
+            category_label=None,
+            categories=set(),
+            level=1,
+            tags=set(),
+            path="editable_stack.json",
+        )
+        widget._inventory_item_by_id[item.item_id] = item
+        entry = PlayerSheetEntry(
+            name="Editable Character",
+            pdf_path="test.pdf",
+            inventory=[item.item_id, item.item_id],
+        )
+        widget._current_entry = entry
+        widget._set_inventory(entry)
+        QApplication.processEvents()
+
+        row = widget._inventory_list.item(0)
+        row_rect = widget._inventory_list.visualItemRect(row)
+        icon_rect = player_sheets_module._inventory_icon_rect(row_rect)
+        plus_center = player_sheets_module._inventory_quantity_button_rect(icon_rect).center()
+        QTest.mouseMove(widget._inventory_list.viewport(), plus_center)
+        QApplication.processEvents()
+        self.assertTrue(widget._inventory_list.is_quantity_button_visible_for_row(0))
+        self.assertTrue(widget._inventory_list.is_quantity_button_hot_for_row(0))
+
+        with patch("player_sheets.QInputDialog.getInt", return_value=(7, True)):
+            QTest.mouseClick(
+                widget._inventory_list.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                plus_center,
+            )
+        QApplication.processEvents()
+
+        self.assertEqual(
+            entry.inventory,
+            [{"item_id": item.item_id, "normalized_item_name": item.item_id, "quantity": 7}],
+        )
+        self.assertEqual(widget._inventory_list.count(), 1)
+        self.assertEqual(
+            widget._inventory_list.item(0).data(player_sheets_module.INVENTORY_ITEM_QUANTITY_ROLE),
+            7,
+        )
+        widget.close()
+
+    def test_backpack_large_quantity_edit_keeps_single_stack_row(self) -> None:
+        widget = PlayerSheetsWidget()
+        widget.resize(1280, 820)
+        widget.show()
+        QApplication.processEvents()
+        widget._save_entries = lambda **_kwargs: None  # type: ignore[assignment]
+
+        item = LootItem(
+            item_id="large-stack",
+            title="Large Stack",
+            rarity="common",
+            category_label=None,
+            categories=set(),
+            level=1,
+            tags=set(),
+            path="large_stack.json",
+        )
+        widget._inventory_item_by_id[item.item_id] = item
+        entry = PlayerSheetEntry(
+            name="Large Stack Character",
+            pdf_path="test.pdf",
+            inventory=[item.item_id],
+        )
+        widget._current_entry = entry
+        widget._set_inventory(entry)
+        QApplication.processEvents()
+
+        with patch("player_sheets.QInputDialog.getInt", return_value=(4444, True)):
+            widget._edit_inventory_item_quantity(item.item_id)
+        QApplication.processEvents()
+
+        self.assertEqual(widget._inventory_list.count(), 1)
+        self.assertEqual(
+            entry.inventory,
+            [{"item_id": item.item_id, "normalized_item_name": item.item_id, "quantity": 4444}],
+        )
+        self.assertEqual(
+            widget._inventory_list.item(0).data(player_sheets_module.INVENTORY_ITEM_QUANTITY_ROLE),
+            4444,
+        )
+        widget.close()
+
+    def test_backpack_quantity_button_uses_current_quantity_as_dialog_default(self) -> None:
+        widget = PlayerSheetsWidget()
+        widget.resize(1280, 820)
+        widget.show()
+        QApplication.processEvents()
+        widget._save_entries = lambda **_kwargs: None  # type: ignore[assignment]
+
+        item = LootItem(
+            item_id="default-stack",
+            title="Default Stack",
+            rarity="common",
+            category_label=None,
+            categories=set(),
+            level=1,
+            tags=set(),
+            path="default_stack.json",
+        )
+        widget._inventory_item_by_id[item.item_id] = item
+        entry = PlayerSheetEntry(
+            name="Default Quantity Character",
+            pdf_path="test.pdf",
+            inventory=[item.item_id, item.item_id, item.item_id],
+        )
+        widget._current_entry = entry
+        widget._set_inventory(entry)
+        QApplication.processEvents()
+
+        captured = {}
+
+        def _capture_get_int(*args, **kwargs):
+            captured["default_value"] = args[3]
+            return (3, False)
+
+        with patch("player_sheets.QInputDialog.getInt", side_effect=_capture_get_int):
+            widget._edit_inventory_item_quantity(item.item_id)
+
+        self.assertEqual(captured["default_value"], 3)
+        widget.close()
+
+    def test_inventory_quantity_formatter_supports_millions(self) -> None:
+        self.assertEqual(player_sheets_module._format_inventory_quantity(999), "999")
+        self.assertEqual(player_sheets_module._format_inventory_quantity(1200), "1.2k")
+        self.assertEqual(player_sheets_module._format_inventory_quantity(1_200_000), "1.2m")
+
+    def test_backpack_remove_button_decrements_stack_until_empty(self) -> None:
+        widget = PlayerSheetsWidget()
+        widget.show()
+        QApplication.processEvents()
+        widget._save_entries = lambda **_kwargs: None  # type: ignore[assignment]
+
+        item = LootItem(
+            item_id="remove-stack",
+            title="Remove Stack",
+            rarity="common",
+            category_label=None,
+            categories=set(),
+            level=1,
+            tags=set(),
+            path="remove_stack.json",
+        )
+        widget._inventory_item_by_id[item.item_id] = item
+        entry = PlayerSheetEntry(
+            name="Remove Character",
+            pdf_path="test.pdf",
+            inventory=[item.item_id, item.item_id],
+        )
+        widget._current_entry = entry
+        widget._set_inventory(entry)
+        widget._select_inventory_item_by_id(item.item_id)
+
+        widget._remove_inventory_item()
+        QApplication.processEvents()
+        self.assertEqual(
+            entry.inventory,
+            [{"item_id": item.item_id, "normalized_item_name": item.item_id, "quantity": 1}],
+        )
+        self.assertEqual(widget._inventory_list.count(), 1)
+        self.assertEqual(
+            widget._inventory_list.item(0).data(player_sheets_module.INVENTORY_ITEM_QUANTITY_ROLE),
+            1,
+        )
+
+        widget._select_inventory_item_by_id(item.item_id)
+        widget._remove_inventory_item()
+        QApplication.processEvents()
+        self.assertEqual(entry.inventory, [])
+        self.assertEqual(widget._inventory_list.count(), 0)
+        self.assertTrue(widget._inventory_placeholder.isVisible())
+        widget.close()
+
+    def test_dragging_between_backpack_and_equipment_moves_one_unit(self) -> None:
+        widget = PlayerSheetsWidget()
+        widget.show()
+        QApplication.processEvents()
+        widget._save_entries = lambda **_kwargs: None  # type: ignore[assignment]
+
+        item = LootItem(
+            item_id="equip-stack",
+            title="Equip Stack",
+            rarity="common",
+            category_label=None,
+            categories=set(),
+            level=1,
+            tags=set(),
+            path="equip_stack.json",
+        )
+        widget._inventory_item_by_id[item.item_id] = item
+        entry = PlayerSheetEntry(
+            name="Equip Character",
+            pdf_path="test.pdf",
+            inventory=[item.item_id, item.item_id],
+        )
+        widget._current_entry = entry
+        widget._set_inventory(entry)
+
+        widget._on_equipment_slot_dropped(
+            "head",
+            {"source": "backpack", "item_id": item.item_id, "index": 0},
+        )
+        QApplication.processEvents()
+        self.assertEqual(
+            entry.inventory,
+            [{"item_id": item.item_id, "normalized_item_name": item.item_id, "quantity": 1}],
+        )
+        self.assertEqual(entry.equipment["head"], item.item_id)
+        self.assertEqual(widget._inventory_list.count(), 1)
+        self.assertEqual(
+            widget._inventory_list.item(0).data(player_sheets_module.INVENTORY_ITEM_QUANTITY_ROLE),
+            1,
+        )
+
+        widget._on_inventory_drop_from_equipment(
+            {"source": "equipment", "slot": "head", "item_id": item.item_id}
+        )
+        QApplication.processEvents()
+        self.assertEqual(
+            entry.inventory,
+            [{"item_id": item.item_id, "normalized_item_name": item.item_id, "quantity": 2}],
+        )
+        self.assertIsNone(entry.equipment["head"])
+        self.assertEqual(widget._inventory_list.count(), 1)
+        self.assertEqual(
+            widget._inventory_list.item(0).data(player_sheets_module.INVENTORY_ITEM_QUANTITY_ROLE),
+            2,
+        )
+        widget.close()
+
     def test_backpack_preview_position_is_sticky_until_unhover(self) -> None:
         widget = PlayerSheetsWidget()
         widget.show()
@@ -795,7 +1072,7 @@ class PlayerSheetsEquipmentLayoutTests(unittest.TestCase):
 
         entry = PlayerSheetEntry(name="Notepad Test", pdf_path="test.pdf")
         widget._current_entry = entry
-        widget._save_entries = lambda: None  # avoid persistence side-effects in this UI test
+        widget._save_entries = lambda **_kwargs: None  # type: ignore[assignment]
         widget._set_inventory(entry)
         QApplication.processEvents()
 

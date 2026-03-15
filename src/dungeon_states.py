@@ -28,7 +28,14 @@ from dungeon_commands import (
     ResizeImageCommand,
     ResizeRoomCommand,
 )
-from dungeon_items import WallItem, DungeonEllipseItem, RoomGroup, DungeonImageItem, _qt_object_is_valid
+from dungeon_items import (
+    WallItem,
+    DungeonEllipseItem,
+    RoomGroup,
+    DungeonImageItem,
+    StrokeItem,
+    _qt_object_is_valid,
+)
 
 if TYPE_CHECKING:
     from dungeon_applet import DungeonCanvas
@@ -934,7 +941,7 @@ class FreeDrawState(CanvasState):
             self.is_drawing = True
             self.current_path = QPainterPath()
             self.current_path.moveTo(scene_pos)
-            self.preview_item = QGraphicsPathItem(self.current_path)
+            self.preview_item = StrokeItem(self.current_path)
             draw_color = QColor(getattr(self.canvas, "stroke_color", QColor(WALL_COLOR)))
             self.preview_item.setPen(QPen(draw_color, WALL_WIDTH))
             
@@ -962,7 +969,7 @@ class FreeDrawState(CanvasState):
         if event.button() == Qt.MouseButton.LeftButton and self.is_drawing:
             if self.current_path and self.preview_item and _qt_object_is_valid(self.preview_item):
                 # Finalize the stroke
-                final_item = QGraphicsPathItem(self.current_path)
+                final_item = StrokeItem(self.current_path)
                 
                 # Layer assignment
                 current_layer = getattr(self.canvas, "_current_layer", LAYER_FG)

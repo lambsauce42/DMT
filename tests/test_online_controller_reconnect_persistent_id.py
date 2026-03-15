@@ -8,7 +8,7 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from online_session.controllers import ClientSessionController
+from online_session.controllers import ClientSessionController, HostSessionController
 from online_session.server import OnlineSessionServer
 
 
@@ -72,3 +72,46 @@ def test_controller_reconnect_keeps_configured_persistent_player_id_after_host_r
         if server_b is not None:
             server_b.stop()
         server_a.stop()
+
+
+def test_host_controller_replays_cached_command_results_without_reprocessing():
+    controller = HostSessionController()
+    emitted_commands = []
+    sent_messages = []
+    controller.command_received.connect(lambda player_id, message: emitted_commands.append((player_id, dict(message))))
+    controller.server.send_to_player = lambda player_id, payload: sent_messages.append((player_id, dict(payload)))
+    try:
+        controller.send_command_result(
+            "player-1",
+            ok=True,
+            message="Synced",
+            request_id="req-1",
+            data={"action": "sync_character_inventory"},
+        )
+        sent_messages.clear()
+
+        controller._on_server_message(
+            "player-1",
+            {
+                "type": "command",
+                "action": "sync_character_inventory",
+                "payload": {"sheet_id": "sheet-1"},
+                "request_id": "req-1",
+            },
+        )
+
+        assert emitted_commands == []
+        assert sent_messages == [
+            (
+                "player-1",
+                {
+                    "type": "command_result",
+                    "ok": True,
+                    "message": "Synced",
+                    "request_id": "req-1",
+                    "data": {"action": "sync_character_inventory"},
+                },
+            )
+        ]
+    finally:
+        controller.stop()

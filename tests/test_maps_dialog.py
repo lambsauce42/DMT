@@ -19,7 +19,7 @@ from maps_applet import (
     map_image_trash_path,
     map_thumb_trash_path,
 )
-from dmt_package import write_dmt_package
+from dmt_package import read_dmt_package_asset, read_dmt_package_info, write_dmt_package
 
 
 def _write_png(path: Path, *, width: int = 32, height: int = 32) -> None:
@@ -367,3 +367,40 @@ def test_maps_widget_preserves_fit_scale_for_untouched_maps_across_switches(
     assert abs(restored_large_zoom - initial_large_zoom) < 0.01
     assert abs(restored_large_center.x() - expected_large_center.x()) < 1.25
     assert abs(restored_large_center.y() - expected_large_center.y()) < 1.25
+
+
+def test_maps_widget_save_embeds_assets_without_local_filepaths(qtbot, monkeypatch, tmp_path):
+    maps_dir = tmp_path / "maps"
+    images_dir = maps_dir / "images"
+    thumbs_dir = images_dir / ".thumbs"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    image_path = images_dir / "crypt.png"
+    _write_png(image_path, width=128, height=96)
+
+    monkeypatch.setattr("maps_applet.load_navigation_data", lambda: [])
+    monkeypatch.setattr("maps_applet.maps_storage_dir", lambda: maps_dir)
+    monkeypatch.setattr("maps_applet.maps_images_dir", lambda: images_dir)
+    monkeypatch.setattr("maps_applet.maps_thumbs_dir", lambda: thumbs_dir)
+
+    widget = MapsWidget()
+    qtbot.addWidget(widget)
+    widget._manager.entries = [MapAsset(id="map-crypt", name="Crypt", image_path=str(image_path))]
+
+    widget._save_entries()
+
+    package_path = maps_dir / "Crypt.dmtmap"
+    info = read_dmt_package_info(package_path)
+    assert isinstance(info, dict)
+    payload = info.get("payload")
+    assert isinstance(payload, dict)
+    assert "image_path" not in payload
+    assert "thumbnail_path" not in payload
+
+    image_asset_name = str(info.get("image_asset") or "")
+    thumb_asset_name = str(info.get("thumbnail_asset") or "")
+    assert image_asset_name == "assets/map.png"
+    assert thumb_asset_name == "assets/thumb.png"
+    assert read_dmt_package_asset(package_path, image_asset_name)
+    assert read_dmt_package_asset(package_path, thumb_asset_name)

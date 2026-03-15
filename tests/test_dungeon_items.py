@@ -6,13 +6,13 @@ from datetime import datetime
 from pathlib import Path
 import pytest
 from PySide6.QtCore import QPointF, QRectF
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtGui import QImage, QPainter, QPainterPath, QPen, QColor, QTransform
 from PySide6.QtWidgets import QApplication, QGraphicsScene
 
 # Adjust import path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from dungeon_items import RoomGroup, EntityItem, WallItem, DungeonEllipseItem, PingItem
+from dungeon_items import RoomGroup, EntityItem, WallItem, DungeonEllipseItem, PingItem, StrokeItem
 from dungeon_constants import (
     GRID_SIZE,
     ROLE_LABEL,
@@ -356,6 +356,47 @@ class TestDungeonEllipseItem:
         ellipse = DungeonEllipseItem(QRectF(0, 0, 100, 50))
         scene.addItem(ellipse)
         assert ellipse.flags() & ellipse.GraphicsItemFlag.ItemIsSelectable
+
+
+class TestStrokeItem:
+    """Tests for freehand stroke hitboxes."""
+
+    def test_closed_stroke_shape_does_not_include_interior(self, scene):
+        path = QPainterPath()
+        path.moveTo(0, 0)
+        path.lineTo(100, 0)
+        path.lineTo(100, 100)
+        path.lineTo(0, 100)
+        path.closeSubpath()
+
+        stroke = StrokeItem(path)
+        stroke.setPen(QPen(QColor("#ffffff"), 4))
+        scene.addItem(stroke)
+
+        assert stroke.shape().contains(QPointF(3, 50))
+        assert not stroke.shape().contains(QPointF(50, 50))
+
+    def test_closed_stroke_does_not_block_room_pick(self, scene):
+        room = RoomGroup()
+        room.add_floor(QRectF(10, 10, 80, 80))
+        scene.addItem(room)
+
+        path = QPainterPath()
+        path.moveTo(0, 0)
+        path.lineTo(100, 0)
+        path.lineTo(100, 100)
+        path.lineTo(0, 100)
+        path.closeSubpath()
+
+        stroke = StrokeItem(path)
+        stroke.setPen(QPen(QColor("#ffffff"), 4))
+        stroke.setZValue(100)
+        scene.addItem(stroke)
+
+        picked = scene.itemAt(QPointF(50, 50), QTransform())
+        assert picked is not None
+        assert picked is not stroke
+        assert picked is room or picked.parentItem() is room
 
 
 class TestGridConstants:

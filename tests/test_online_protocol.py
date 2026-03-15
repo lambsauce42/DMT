@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
@@ -12,6 +14,7 @@ from online_session.protocol import (
     FrameDecoder,
     encode_message,
     prepare_outbound_transport_messages,
+    validate_chunked_message_metadata,
 )
 
 
@@ -76,3 +79,19 @@ def test_prepare_outbound_transport_messages_chunks_large_payloads_when_inline_l
     decoder = FrameDecoder()
     decoded_parts = decoder.feed(b"".join(encode_message(part) for part in transport_messages))
     assert decoded_parts == transport_messages
+
+
+def test_chunked_message_metadata_rejects_oversized_claims():
+    with pytest.raises(ValueError, match="too large"):
+        validate_chunked_message_metadata(
+            packed_size=(65 * 1024 * 1024),
+            chunk_count=1,
+        )
+
+
+def test_chunked_message_metadata_rejects_impossible_chunk_count():
+    with pytest.raises(ValueError, match="chunk count"):
+        validate_chunked_message_metadata(
+            packed_size=1024,
+            chunk_count=4,
+        )

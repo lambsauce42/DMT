@@ -390,6 +390,81 @@ def test_player_inventory_sync_uses_recent_character_sync_payload_cache(dungeon_
     }
 
 
+def test_player_inventory_sync_is_retried_after_disconnect_with_same_request_id(
+    dungeon_widget, monkeypatch
+):
+    class _ClientStub:
+        def __init__(self):
+            self.calls = []
+
+        def send_command(self, action, payload, request_id=None):
+            self.calls.append((action, dict(payload), request_id))
+            return True
+
+        def disconnect(self):
+            return None
+
+    client = _ClientStub()
+    dungeon_widget._client_controller = client
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._active_dungeon_id = "d1"
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda _character_id: {
+            "sheet_id": "sheet-1",
+            "save_revision": 3,
+            "last_saved_at": "2026-03-15T10:00:00+00:00",
+            "content_hash": "hash-3",
+            "stats": {"name": "Hero"},
+            "archive_b64": "YXJjaGl2ZQ==",
+        },
+    )
+    monkeypatch.setattr(
+        "player_sheets.character_id_for_sheet_id",
+        lambda sheet_id: "character-1" if sheet_id == "sheet-1" else "",
+    )
+    monkeypatch.setattr(
+        "player_sheets.inventory_payload_for_sheet_id",
+        lambda _sheet_id: {"inventory": [{"item_id": "item-a", "quantity": 2}]},
+    )
+
+    request_id, _character_id = dungeon_widget._dispatch_online_character_inventory_sync(
+        "sheet-1",
+        {"inventory": [{"item_id": "item-a", "quantity": 2}]},
+    )
+    assert request_id
+    assert request_id in dungeon_widget._pending_character_inventory_sync_requests
+
+    dungeon_widget._on_client_disconnected()
+    assert (
+        dungeon_widget._pending_character_inventory_sync_requests[request_id]["_retry_needed"] is True
+    )
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {"items": [], "fog": {"path": []}},
+            }
+        ],
+    }
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._awaiting_player_snapshot = True
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    sync_calls = [call for call in client.calls if call[0] == "sync_character_inventory"]
+    assert len(sync_calls) == 2
+    assert sync_calls[0][2] == request_id
+    assert sync_calls[1][2] == request_id
+
+
 def test_player_state_update_omits_linked_character_payloads_for_owned_entities(dungeon_widget):
     dungeon_widget._local_player_id = "player-1"
 
@@ -1487,6 +1562,67 @@ def test_player_loot_add_from_inventory_sends_source_metadata(dungeon_widget, mo
     assert isinstance(request_id, str) and request_id
 
 
+def test_player_loot_add_from_inventory_prompts_for_stack_quantity(dungeon_widget, monkeypatch):
+    class _ClientStub:
+        def __init__(self):
+            self.calls = []
+
+        def send_command(self, action, payload, request_id=None):
+            self.calls.append((action, payload, request_id))
+
+        def disconnect(self):
+            return None
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._player_connection_ready = True
+    monkeypatch.setattr(dungeon_widget, "_choose_sheet_for_claim", lambda: ("sheet-1", "Hero"))
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_inventory_loot_rows_for_sheet",
+        lambda _sheet_id: [
+            {
+                "item_id": "item_a",
+                "title": "Backpack Item",
+                "source_type": "backpack",
+                "source_index": 0,
+                "quantity": 5,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_choose_inventory_rows_for_loot",
+        lambda **_kwargs: [
+            {
+                "item_id": "item_a",
+                "title": "Backpack Item",
+                "source_type": "backpack",
+                "source_index": 0,
+                "quantity": 5,
+            }
+        ],
+    )
+    monkeypatch.setattr(dungeon_widget, "_prompt_stack_quantity", lambda **_kwargs: 3)
+
+    dungeon_widget._on_loot_add_from_player_inventory()
+
+    assert dungeon_widget._client_controller.calls
+    action, payload, request_id = dungeon_widget._client_controller.calls[-1]
+    assert action == "add_loot_from_inventory"
+    assert payload["items"] == [
+        {
+            "item_id": "item_a",
+            "title": "Backpack Item",
+            "path": "item_a",
+            "source": "backpack",
+            "quantity": 3,
+            "source_index": 0,
+        }
+    ]
+    assert isinstance(request_id, str) and request_id
+
+
 def test_local_loot_claim_runs_through_local_action_path(dungeon_widget, monkeypatch):
     captured = {}
     dungeon_widget._online_mode = ONLINE_MODE_LOCAL_DM
@@ -1509,6 +1645,32 @@ def test_local_loot_claim_runs_through_local_action_path(dungeon_widget, monkeyp
     assert captured["sheet_id"] == "sheet-1"
     assert [entry["entry_id"] for entry in captured["claimed_entries"]] == ["loot-1"]
     assert [entry["entry_id"] for entry in dungeon_widget._session_loot_pool] == ["loot-2"]
+
+
+def test_local_loot_claim_can_take_partial_stack(dungeon_widget, monkeypatch):
+    captured = {}
+    dungeon_widget._online_mode = ONLINE_MODE_LOCAL_DM
+    dungeon_widget._session_loot_pool = [
+        {"entry_id": "loot-1", "type": "item", "item_id": "item-a", "title": "Potion", "quantity": 5},
+    ]
+    monkeypatch.setattr(dungeon_widget, "_selected_loot_pool_ids", lambda: ["loot-1"])
+    monkeypatch.setattr(dungeon_widget, "_choose_sheet_for_claim", lambda: ("sheet-1", "Hero"))
+    monkeypatch.setattr(dungeon_widget, "_prompt_stack_quantity", lambda **_kwargs: 2)
+
+    def _apply_claim(sheet_id, claimed_entries):
+        captured["sheet_id"] = sheet_id
+        captured["claimed_entries"] = [dict(entry) for entry in claimed_entries]
+        return True, "Claim applied."
+
+    monkeypatch.setattr(dungeon_widget, "_apply_claim_entries_to_sheet", _apply_claim)
+
+    dungeon_widget._on_loot_claim_selected()
+
+    assert captured["sheet_id"] == "sheet-1"
+    assert captured["claimed_entries"][0]["entry_id"] == "loot-1"
+    assert captured["claimed_entries"][0]["quantity"] == 2
+    assert len(dungeon_widget._session_loot_pool) == 1
+    assert dungeon_widget._session_loot_pool[0]["quantity"] == 3
 
 
 def test_apply_claim_entries_to_sheet_uses_canonical_item_ids(dungeon_widget, monkeypatch, tmp_path):
@@ -2190,6 +2352,32 @@ def test_participant_presence_panel_collapses_and_expands_on_overflow(dungeon_wi
         panel._scroll.verticalScrollBarPolicy()
         == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     )
+
+
+def test_participant_presence_panel_uses_space_before_inspector(dungeon_widget, qtbot):
+    dungeon_widget.show()
+    qtbot.wait(20)
+    dungeon_widget.resize(1400, 900)
+
+    entity = EntityItem(QPointF(10, 10))
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget.inspector.set_entity(entity)
+    assert dungeon_widget.inspector.isVisible()
+
+    dungeon_widget._host_display_name = "Rin"
+    dungeon_widget._set_online_mode(ONLINE_MODE_DM_HOST)
+    dungeon_widget._update_connected_players(
+        {f"player-{index:02d}": f"Player {index:02d}" for index in range(1, 6)}
+    )
+    qtbot.wait(20)
+
+    panel = dungeon_widget._participant_presence_panel
+    assert panel is not None
+    assert panel.isHidden() is False
+    assert len(dungeon_widget._participant_presence_entries()) == 6
+    assert panel._overflow_hint.isHidden() is True
+    assert panel.height() == panel._rows_height(6)
+    assert panel.y() + panel.height() <= dungeon_widget.inspector.y() - 8
 
 
 def test_joining_player_session_stops_existing_host_controller(dungeon_widget):
@@ -3867,6 +4055,94 @@ def test_host_add_loot_from_inventory_transfers_items_and_syncs_inventory(dungeo
     assert dungeon_widget._host_controller.snapshots
 
 
+def test_host_add_loot_from_inventory_transfers_partial_stack_and_syncs_inventory(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_inventory": {
+                            "inventory": [{"item_id": "item_a", "quantity": 5}],
+                            "inventory_notes": "",
+                            "equipment": {},
+                            "item_documents": {
+                                "item_a": build_item_document(
+                                    {"item_id": "item_a", "title": "Item A"},
+                                    None,
+                                ),
+                            },
+                            "gold": 0,
+                            "silver": 0,
+                            "copper": 0,
+                        },
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
+    dungeon_widget._session_loot_pool = []
+
+    dungeon_widget._handle_host_add_loot_from_inventory(
+        "player-1",
+        {
+            "sheet_id": "sheet-1",
+            "items": [
+                {
+                    "item_id": "item_a",
+                    "title": "Item A",
+                    "path": "item_a",
+                    "source": "backpack",
+                    "source_index": 0,
+                    "quantity": 3,
+                }
+            ],
+        },
+        request_id="add-stack-1",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is True
+    assert result["data"]["inventory"]["inventory"] == [
+        {"item_id": "item_a", "normalized_item_name": "item_a", "quantity": 2}
+    ]
+    assert len(dungeon_widget._session_loot_pool) == 1
+    assert dungeon_widget._session_loot_pool[0]["item_id"] == "item_a"
+    assert dungeon_widget._session_loot_pool[0]["quantity"] == 3
+    linked_inventory = dungeon_widget._dungeons[0]["state"]["items"][0]["linked_inventory"]
+    assert linked_inventory["inventory"] == [
+        {"item_id": "item_a", "normalized_item_name": "item_a", "quantity": 2}
+    ]
+    assert dungeon_widget._host_controller.snapshots
+
+
 def test_host_add_loot_from_equipment_clears_slot_and_adds_loot_entry(dungeon_widget):
     class _HostStub:
         def __init__(self):
@@ -4291,6 +4567,152 @@ def test_host_claim_loot_reserves_entries_until_finalize(dungeon_widget):
     assert len(dungeon_widget._session_loot_pool) == 1
     assert dungeon_widget._session_loot_pool[0]["entry_id"] == "loot-2"
     assert len(dungeon_widget._host_controller.snapshots) == 1
+
+
+def test_host_claim_loot_can_take_partial_stack_and_keep_remainder(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "linked_character_id": "character-1",
+                        "linked_inventory": {"inventory": []},
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
+    dungeon_widget._session_loot_pool = [
+        {"entry_id": "loot-1", "type": "item", "item_id": "item_a", "title": "Item A", "quantity": 5},
+    ]
+    dungeon_widget._refresh_loot_pool_list()
+
+    dungeon_widget._handle_host_claim_loot(
+        "player-1",
+        {"entry_ids": ["loot-1"], "entry_quantities": {"loot-1": 2}, "sheet_id": "sheet-1"},
+        request_id="claim-partial-stack",
+    )
+
+    result = dungeon_widget._host_controller.results[-1][1]
+    assert result["ok"] is True
+    assert result["data"]["claimed_entries"][0]["entry_id"] == "loot-1"
+    assert result["data"]["claimed_entries"][0]["quantity"] == 2
+    assert len(dungeon_widget._session_loot_pool) == 1
+    assert dungeon_widget._session_loot_pool[0]["entry_id"] != "loot-1"
+    assert dungeon_widget._session_loot_pool[0]["quantity"] == 3
+
+    claim_id = str(result["data"]["claim_id"])
+    dungeon_widget._apply_inventory_sync_to_linked_entities(
+        owner_player_id="player-1",
+        sheet_id="sheet-1",
+        character_id="character-1",
+        inventory_payload={"inventory": [{"item_id": "item_a", "quantity": 2}]},
+        save_revision=1,
+        last_saved_at="2026-03-03T12:00:00+00:00",
+        content_hash="claim-sync-partial",
+    )
+    dungeon_widget._handle_host_finalize_loot_claim(
+        "player-1",
+        {"claim_id": claim_id, "applied": True},
+        request_id="finalize-partial-stack",
+    )
+
+    finalize_result = dungeon_widget._host_controller.results[-1][1]
+    assert finalize_result["ok"] is True
+    assert len(dungeon_widget._session_loot_pool) == 1
+    assert dungeon_widget._session_loot_pool[0]["quantity"] == 3
+
+
+def test_host_claim_loot_finalize_failure_restores_partial_stack_quantity(dungeon_widget):
+    class _HostStub:
+        def __init__(self):
+            self.results = []
+            self.snapshots = []
+
+        def send_command_result(self, player_id, **kwargs):
+            self.results.append((player_id, kwargs))
+
+        def broadcast_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._dungeons = [
+        {
+            "id": "d1",
+            "name": "Dungeon 1",
+            "state": {
+                "items": [
+                    {
+                        "type": "entity",
+                        "entity_id": "e1",
+                        "owner_player_id": "player-1",
+                        "linked_sheet_id": "sheet-1",
+                        "pos": [0.0, 0.0],
+                    }
+                ],
+                "fog": {"path": []},
+            },
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    _load_assigned_players_dungeon_state(dungeon_widget, "d1")
+    dungeon_widget._session_loot_pool = [
+        {"entry_id": "loot-1", "type": "item", "item_id": "item_a", "title": "Item A", "quantity": 5},
+    ]
+
+    dungeon_widget._handle_host_claim_loot(
+        "player-1",
+        {"entry_ids": ["loot-1"], "entry_quantities": {"loot-1": 2}, "sheet_id": "sheet-1"},
+        request_id="claim-fail-partial",
+    )
+    claim_result = dungeon_widget._host_controller.results[-1][1]
+    claim_id = str(claim_result["data"]["claim_id"])
+
+    dungeon_widget._handle_host_finalize_loot_claim(
+        "player-1",
+        {"claim_id": claim_id, "applied": False, "error": "sheet apply failed"},
+        request_id="finalize-fail-partial",
+    )
+
+    finalize_result = dungeon_widget._host_controller.results[-1][1]
+    assert finalize_result["ok"] is False
+    assert len(dungeon_widget._session_loot_pool) == 1
+    assert dungeon_widget._session_loot_pool[0]["entry_id"] != "loot-1"
+    assert dungeon_widget._session_loot_pool[0]["quantity"] == 5
 
 
 def test_host_claim_loot_finalize_requires_host_authority_update(dungeon_widget):
@@ -5713,9 +6135,13 @@ def test_host_snapshot_request_logs_and_returns_when_no_transport_safe_variant_e
     class _HostControllerStub:
         def __init__(self) -> None:
             self.sent_snapshots: list[dict] = []
+            self.snapshot_statuses: list[tuple[str, dict]] = []
 
         def send_snapshot_to(self, _player_id: str, snapshot: dict) -> None:
             self.sent_snapshots.append(snapshot)
+
+        def send_snapshot_status(self, player_id: str, **payload) -> None:
+            self.snapshot_statuses.append((player_id, dict(payload)))
 
         def stop(self) -> None:
             return
@@ -5767,6 +6193,16 @@ def test_host_snapshot_request_logs_and_returns_when_no_transport_safe_variant_e
     dungeon_widget._on_host_snapshot_requested("player-a")
 
     assert host_controller.sent_snapshots == []
+    assert host_controller.snapshot_statuses == [
+        (
+            "player-a",
+            {
+                "ok": False,
+                "message": "Host could not build a transport-safe player snapshot. Reduce the players map payload and retry reconnect.",
+                "reason": "transport_limit",
+            },
+        )
+    ]
     assert any("Unable to build a transport-safe bootstrap snapshot" in line for line in log_lines)
 
 
@@ -5777,9 +6213,13 @@ def test_host_broadcast_snapshot_skips_oversized_direct_snapshot_without_disconn
         def __init__(self) -> None:
             self.players = {"player-a": "Player A"}
             self.sent_snapshots: list[tuple[str, dict]] = []
+            self.snapshot_statuses: list[tuple[str, dict]] = []
 
         def send_snapshot_to(self, player_id: str, snapshot: dict) -> None:
             self.sent_snapshots.append((player_id, snapshot))
+
+        def send_snapshot_status(self, player_id: str, **payload) -> None:
+            self.snapshot_statuses.append((player_id, dict(payload)))
 
         def stop(self) -> None:
             return
@@ -5835,7 +6275,60 @@ def test_host_broadcast_snapshot_skips_oversized_direct_snapshot_without_disconn
     dungeon_widget._broadcast_snapshot_if_host()
 
     assert host_controller.sent_snapshots == []
+    assert host_controller.snapshot_statuses == [
+        (
+            "player-a",
+            {
+                "ok": False,
+                "message": "Host could not deliver the latest player snapshot because it exceeds the online transport limit. Reduce the players map payload and reconnect.",
+                "reason": "transport_limit",
+            },
+        )
+    ]
     assert any("Skipped direct snapshot because it exceeds the transport limit" in line for line in log_lines)
+
+
+def test_host_broadcast_snapshot_skips_duplicate_snapshot_payload_for_same_player(
+    dungeon_widget, monkeypatch
+):
+    class _HostControllerStub:
+        def __init__(self) -> None:
+            self.players = {"player-a": "Player A"}
+            self.sent_snapshots: list[tuple[str, dict]] = []
+
+        def send_snapshot_to(self, player_id: str, snapshot: dict) -> None:
+            self.sent_snapshots.append((player_id, snapshot))
+
+        def stop(self) -> None:
+            return
+
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "players"
+    dungeon_widget._active_dungeon_id = "players"
+    dungeon_widget._save_active_dungeon_state = lambda: None
+    dungeon_widget._normalize_all_dungeon_icons_for_online = lambda: None
+    dungeon_widget._normalize_all_dungeon_images_for_online = lambda: None
+    dungeon_widget._current_players_scene_signature = lambda: "sig-players"
+    dungeon_widget._dungeons = [
+        {
+            "id": "players",
+            "name": "Players",
+            "state": {"items": [], "fog": {"path": []}},
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    host_controller = _HostControllerStub()
+    dungeon_widget._host_controller = host_controller
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_icon_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_send_snapshot_image_assets_to_player", lambda *_args: None)
+    monkeypatch.setattr(dungeon_widget, "_snapshot_fits_transport", lambda _snapshot: (True, ""))
+
+    dungeon_widget._broadcast_snapshot_if_host()
+    dungeon_widget._broadcast_snapshot_if_host()
+
+    assert len(host_controller.sent_snapshots) == 1
 
 
 def test_dm_host_link_character_prefers_collection_backed_state(monkeypatch, dungeon_widget, tmp_path):
@@ -6031,6 +6524,49 @@ def test_client_claim_result_applies_items_and_custom_notes(monkeypatch, dungeon
     action, payload, request_id = dungeon_widget._client_controller.calls[-1]
     assert action == "claim_loot_finalize"
     assert payload["claim_id"] == "claim-1"
+
+
+def test_client_claim_result_expands_item_quantity_for_sheet_apply(monkeypatch, dungeon_widget):
+    class _ClientStub:
+        def __init__(self):
+            self.calls = []
+
+        def send_command(self, action, payload, request_id=None):
+            self.calls.append((action, payload, request_id))
+
+        def disconnect(self):
+            return None
+
+    captured = {}
+
+    def _apply_claim(sheet_id, *, item_ids, note_lines):
+        captured["sheet_id"] = sheet_id
+        captured["item_ids"] = list(item_ids)
+        captured["note_lines"] = list(note_lines)
+        return True, "Claim applied.", {}
+
+    fake_module = types.SimpleNamespace(apply_claim_to_sheet=_apply_claim)
+    monkeypatch.setitem(sys.modules, "player_sheets", fake_module)
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._player_connection_ready = True
+
+    dungeon_widget._on_client_command_result(
+        {
+            "ok": True,
+            "data": {
+                "claim_id": "claim-qty-1",
+                "sheet_id": "sheet-1",
+                "claimed_entries": [
+                    {"type": "item", "item_id": "item-a", "title": "Potion", "quantity": 3},
+                ],
+            },
+        }
+    )
+
+    assert captured["sheet_id"] == "sheet-1"
+    assert captured["item_ids"] == ["item-a", "item-a", "item-a"]
+    assert captured["note_lines"] == []
 
 
 def test_client_claim_finalize_failure_rolls_back_local_inventory(monkeypatch, dungeon_widget):
@@ -10018,7 +10554,7 @@ def test_player_state_update_is_queued_when_send_fails_and_flushed_after_snapsho
     dungeon_widget._active_dungeon_id = "d1"
     monkeypatch.setattr(
         dungeon_widget,
-        "_serialize_scene",
+        "_serialize_scene_for_player_state_update",
         lambda: {"items": [{"type": "entity", "entity_id": "entity-1"}], "fog": {"path": []}},
     )
 
@@ -10060,7 +10596,71 @@ def test_player_state_update_is_queued_when_send_fails_and_flushed_after_snapsho
     assert dungeon_widget._pending_player_state_update is None
 
 
-def test_player_state_update_is_dropped_on_disconnect_before_reconnect(dungeon_widget, monkeypatch):
+def test_player_state_update_is_preserved_on_disconnect_and_replayed_if_snapshot_is_stale(
+    dungeon_widget, monkeypatch
+):
+    class _ClientStub:
+        def __init__(self):
+            self.calls = []
+            self.deliver = False
+
+        def send_command(self, action, payload, request_id=None):
+            self.calls.append((action, dict(payload), request_id))
+            if self.deliver and action == "state_update":
+                dungeon_widget._pending_player_state_update_request_id = str(request_id or "")
+            return True
+
+        def disconnect(self):
+            return None
+
+    client = _ClientStub()
+    dungeon_widget._client_controller = client
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._active_dungeon_id = "d1"
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_serialize_scene_for_player_state_update",
+        lambda: {"items": [{"type": "entity", "entity_id": "entity-1"}], "fog": {"path": []}},
+    )
+
+    dungeon_widget._on_canvas_changed()
+
+    first_state_update = [call for call in client.calls if call[0] == "state_update"][-1]
+    assert dungeon_widget._pending_player_state_update is not None
+    assert dungeon_widget._pending_player_state_update_request_id == first_state_update[2]
+
+    dungeon_widget._on_client_disconnected()
+
+    assert dungeon_widget._pending_player_state_update is not None
+    assert dungeon_widget._pending_player_state_update_request_id == first_state_update[2]
+
+    snapshot = {
+        "players": {"player-local": "Mira"},
+        "players_dungeon_id": "d1",
+        "active_dungeon_id": "d1",
+        "dungeons": [
+            {
+                "id": "d1",
+                "name": "Players",
+                "state": {"items": [], "fog": {"path": []}},
+            }
+        ],
+    }
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._awaiting_player_snapshot = True
+    client.deliver = True
+    dungeon_widget._on_client_snapshot_received(snapshot)
+
+    state_update_calls = [call for call in client.calls if call[0] == "state_update"]
+    assert len(state_update_calls) == 2
+    assert state_update_calls[-1][2] == first_state_update[2]
+
+
+def test_player_state_update_preserved_on_disconnect_is_cleared_if_snapshot_matches(
+    dungeon_widget, monkeypatch
+):
     class _ClientStub:
         def __init__(self):
             self.calls = []
@@ -10080,20 +10680,19 @@ def test_player_state_update_is_dropped_on_disconnect_before_reconnect(dungeon_w
     dungeon_widget._active_dungeon_id = "d1"
     monkeypatch.setattr(
         dungeon_widget,
-        "_serialize_scene",
-        lambda: {"items": [{"type": "entity", "entity_id": "entity-1"}], "fog": {"path": []}},
+        "_serialize_scene_for_player_state_update",
+        lambda: {
+            "items": [
+                {"type": "entity", "entity_id": "entity-1", "owner_player_id": "player-local"}
+            ],
+            "fog": {"path": []},
+        },
     )
 
     dungeon_widget._on_canvas_changed()
-
     first_state_update = [call for call in client.calls if call[0] == "state_update"][-1]
-    assert dungeon_widget._pending_player_state_update is not None
-    assert dungeon_widget._pending_player_state_update_request_id == first_state_update[2]
 
     dungeon_widget._on_client_disconnected()
-
-    assert dungeon_widget._pending_player_state_update is None
-    assert dungeon_widget._pending_player_state_update_request_id == ""
 
     snapshot = {
         "players": {"player-local": "Mira"},
@@ -10103,7 +10702,12 @@ def test_player_state_update_is_dropped_on_disconnect_before_reconnect(dungeon_w
             {
                 "id": "d1",
                 "name": "Players",
-                "state": {"items": [], "fog": {"path": []}},
+                "state": {
+                    "items": [
+                        {"type": "entity", "entity_id": "entity-1", "owner_player_id": "player-local"}
+                    ],
+                    "fog": {"path": []},
+                },
             }
         ],
     }
@@ -10114,6 +10718,56 @@ def test_player_state_update_is_dropped_on_disconnect_before_reconnect(dungeon_w
     state_update_calls = [call for call in client.calls if call[0] == "state_update"]
     assert len(state_update_calls) == 1
     assert state_update_calls[-1][2] == first_state_update[2]
+    assert dungeon_widget._pending_player_state_update is None
+    assert dungeon_widget._pending_player_state_update_request_id == ""
+
+
+def test_client_snapshot_status_failure_unblocks_wait_and_shows_retry_state(dungeon_widget):
+    log_lines = []
+    chat_lines = []
+    reconnect_prompts = []
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._awaiting_player_snapshot = True
+    dungeon_widget._player_connection_ready = False
+    dungeon_widget._append_server_log = log_lines.append
+    dungeon_widget._append_chat_message = lambda actor, text, system: chat_lines.append(
+        (actor, text, system)
+    )
+    dungeon_widget._show_reconnect_status_dialog = (
+        lambda message, *, allow_retry, animate_waiting: reconnect_prompts.append(
+            (message, allow_retry, animate_waiting)
+        )
+    )
+
+    dungeon_widget._on_client_snapshot_status_received(
+        {
+            "ok": False,
+            "message": "Snapshot too large",
+            "reason": "transport_limit",
+        }
+    )
+
+    assert dungeon_widget._awaiting_player_snapshot is False
+    assert dungeon_widget._player_connection_ready is False
+    assert log_lines == ["[WARN] Snapshot too large"]
+    assert chat_lines == [("System", "Snapshot too large", True)]
+    assert reconnect_prompts == [("Snapshot too large", True, False)]
+
+
+def test_host_canvas_change_defers_snapshot_broadcast_until_sync_flush(dungeon_widget, monkeypatch):
+    calls = []
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._broadcast_snapshot_if_host = lambda: calls.append("broadcast")
+    monkeypatch.setattr(dungeon_widget, "_sync_host_scene_icons_for_online", lambda: None)
+    monkeypatch.setattr(dungeon_widget, "_seed_initiative_state", lambda: None)
+    monkeypatch.setattr(dungeon_widget, "_render_initiative_overlay", lambda: None)
+    monkeypatch.setattr(dungeon_widget, "_mark_active_dungeon_dirty", lambda: None)
+
+    dungeon_widget._on_canvas_changed()
+
+    assert calls == []
+    assert dungeon_widget._host_scene_sync_pending is True
+    assert dungeon_widget._host_scene_sync_timer.isActive() is True
 
 
 def test_leaving_player_mode_clears_sent_override_fingerprints(dungeon_widget):

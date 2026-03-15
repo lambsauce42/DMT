@@ -36,6 +36,7 @@ class HostSessionController(QObject):
         self.server.player_disconnected.connect(self._on_player_disconnected)
         self.server.message_received.connect(self._on_server_message)
         self._pending_kick_messages: Dict[str, str] = {}
+        self._command_result_cache: Dict[tuple[str, str], dict] = {}
 
     @property
     def players(self) -> Dict[str, str]:
@@ -45,6 +46,7 @@ class HostSessionController(QObject):
         return self.server.start(port)
 
     def stop(self) -> None:
+        self._command_result_cache.clear()
         self.server.stop()
 
     def broadcast_snapshot(self, snapshot: dict) -> None:
@@ -80,7 +82,30 @@ class HostSessionController(QObject):
             "request_id": request_id,
             "data": data or {},
         }
+        clean_player_id = str(player_id or "").strip()
+        clean_request_id = str(request_id or "").strip()
+        if clean_player_id and clean_request_id:
+            self._command_result_cache[(clean_player_id, clean_request_id)] = dict(payload)
         self.server.send_to_player(player_id, payload)
+
+    def send_snapshot_status(
+        self,
+        player_id: str,
+        *,
+        ok: bool,
+        message: str,
+        reason: str = "",
+    ) -> None:
+        self.server.send_to_player(
+            player_id,
+            {
+                "type": "snapshot_status",
+                "ok": bool(ok),
+                "message": str(message or ""),
+                "reason": str(reason or "").strip(),
+                "ts": _utc_timestamp(),
+            },
+        )
 
     def kick_player(self, player_id: str, *, message: str) -> bool:
         clean_player_id = str(player_id or "").strip()
@@ -212,6 +237,13 @@ class HostSessionController(QObject):
     def _on_server_message(self, player_id: str, message: dict) -> None:
         msg_type = message.get("type")
         if msg_type == "command":
+            request_id = str(message.get("request_id") or "").strip()
+            clean_player_id = str(player_id or "").strip()
+            if clean_player_id and request_id:
+                cached_result = self._command_result_cache.get((clean_player_id, request_id))
+                if isinstance(cached_result, dict):
+                    self.server.send_to_player(clean_player_id, dict(cached_result))
+                    return
             self.command_received.emit(player_id, message)
             return
         if msg_type == "chat":
@@ -238,6 +270,7 @@ class ClientSessionController(QObject):
     players_changed = Signal(dict)
     chat_received = Signal(str, str, bool)
     snapshot_received = Signal(dict)
+    snapshot_status_received = Signal(dict)
     command_result = Signal(dict)
     player_state_patch_received = Signal(dict)
     icon_asset_received = Signal(str, str, str)
@@ -495,6 +528,9 @@ class ClientSessionController(QObject):
             state = effective_message.get("state")
             if isinstance(state, dict):
                 self.snapshot_received.emit(state)
+            return
+        if msg_type == "snapshot_status":
+            self.snapshot_status_received.emit(dict(effective_message))
             return
         if msg_type == "command_result":
             self.command_result.emit(effective_message)

@@ -216,6 +216,13 @@ def entry_to_dict(entry: MapAsset) -> dict:
     }
 
 
+def entry_to_package_dict(entry: MapAsset) -> dict:
+    payload = entry_to_dict(entry)
+    payload.pop("image_path", None)
+    payload.pop("thumbnail_path", None)
+    return payload
+
+
 def entry_from_dict(payload: dict) -> Optional[MapAsset]:
     if not isinstance(payload, dict):
         return None
@@ -1395,7 +1402,7 @@ class MapsWidget(QWidget):
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
                     "image_asset": image_asset_name,
                     "thumbnail_asset": thumb_asset_name if thumb_asset_name in assets else "",
-                    "payload": entry_to_dict(entry),
+                    "payload": entry_to_package_dict(entry),
                 },
                 assets=assets,
             )

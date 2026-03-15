@@ -10,10 +10,11 @@ from typing import Any, Dict, List
 
 
 # Large linked-character archives can legitimately exceed the old 16 MiB
-# transport limit once they include embedded item definitions and archives.
-_MAX_FRAME_SIZE = 256 * 1024 * 1024
-_MAX_DECODED_PAYLOAD_SIZE = 256 * 1024 * 1024
-_MAX_CHUNKED_MESSAGE_BYTES = 1024 * 1024 * 1024
+# transport limit once they include embedded item definitions and archives,
+# but allowing hundreds of MiB per message is too easy to OOM on reconnect.
+_MAX_FRAME_SIZE = 64 * 1024 * 1024
+_MAX_DECODED_PAYLOAD_SIZE = 64 * 1024 * 1024
+_MAX_CHUNKED_MESSAGE_BYTES = 64 * 1024 * 1024
 _INLINE_MESSAGE_JSON_LIMIT_BYTES = 8 * 1024 * 1024
 _CHUNKED_MESSAGE_SLICE_BYTES = 1024 * 1024
 CHUNKED_MESSAGE_TYPE = "chunked_message_part"
@@ -126,3 +127,13 @@ def restore_chunked_transport_message(
     if not isinstance(restored, dict):
         raise ValueError("chunked message payload must decode to an object")
     return restored
+
+
+def validate_chunked_message_metadata(*, packed_size: int, chunk_count: int) -> None:
+    if packed_size <= 0 or packed_size > _MAX_CHUNKED_MESSAGE_BYTES:
+        raise ValueError("chunked payload too large")
+    if chunk_count <= 0:
+        raise ValueError("invalid chunk count")
+    expected_max_chunks = max(1, (packed_size + _CHUNKED_MESSAGE_SLICE_BYTES - 1) // _CHUNKED_MESSAGE_SLICE_BYTES)
+    if chunk_count > expected_max_chunks:
+        raise ValueError("chunk count exceeds packed payload size")

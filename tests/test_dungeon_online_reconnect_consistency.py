@@ -54,6 +54,7 @@ class _HostControllerStub:
     def __init__(self):
         self.players = {"player-1": "Mira"}
         self.results = []
+        self.player_state_patches = []
 
     def send_command_result(self, player_id, **kwargs):
         self.results.append((player_id, kwargs))
@@ -67,6 +68,9 @@ class _HostControllerStub:
     def send_icon_asset(self, player_id, **kwargs):
         _debug_log(f"host send_icon_asset invoked player_id={player_id!r} kwargs={kwargs!r}")
 
+    def broadcast_player_state_patch(self, **kwargs):
+        self.player_state_patches.append(dict(kwargs))
+
     def stop(self):
         return None
 
@@ -75,6 +79,7 @@ class _PlayerClientStub:
     def __init__(self, host_widget: DungeonAppletWidget):
         self.host_widget = host_widget
         self.calls = []
+        self.deliver_commands = True
 
     def send_command(self, action, payload, request_id=None):
         self.calls.append((action, dict(payload), request_id))
@@ -83,14 +88,15 @@ class _PlayerClientStub:
             f"action={action!r} request_id={request_id!r} "
             f"hp={payload.get('state', {}).get('items', [{}])[0].get('hp')!r}"
         )
-        self.host_widget._on_host_command_received(
-            "player-1",
-            {
-                "action": action,
-                "payload": payload,
-                "request_id": request_id,
-            },
-        )
+        if self.deliver_commands:
+            self.host_widget._on_host_command_received(
+                "player-1",
+                {
+                    "action": action,
+                    "payload": payload,
+                    "request_id": request_id,
+                },
+            )
         return True
 
     def disconnect(self):
@@ -108,11 +114,11 @@ def _build_online_widget(qtbot, *, mode: str, item: dict) -> DungeonAppletWidget
     return widget
 
 
-def test_reconnect_snapshot_does_not_reapply_stale_player_state_to_host(qtbot):
+def test_reconnect_snapshot_replays_preserved_player_state_when_host_is_older(qtbot):
     host = _build_online_widget(
         qtbot,
         mode=ONLINE_MODE_DM_HOST,
-        item=_entity_state(hp=9, label="Host Newer"),
+        item=_entity_state(hp=5, label="Host Older"),
     )
     host._host_controller = _HostControllerStub()
     host._load_dungeon_state(host._dungeons[0]["state"])
@@ -120,27 +126,35 @@ def test_reconnect_snapshot_does_not_reapply_stale_player_state_to_host(qtbot):
     player = _build_online_widget(
         qtbot,
         mode=ONLINE_MODE_PLAYER,
-        item=_entity_state(hp=5, label="Player Stale"),
+        item=_entity_state(hp=9, label="Player Newer"),
     )
-    player._client_controller = _PlayerClientStub(host)
+    client = _PlayerClientStub(host)
+    client.deliver_commands = False
+    player._client_controller = client
     player._local_player_id = "player-1"
     player._player_connection_ready = True
-    player._pending_player_state_update = {
-        "dungeon_id": "d1",
+    player._load_dungeon_state(player._dungeons[0]["state"])
+
+    player_payload = {
         "state": {
-            "items": [_entity_state(hp=5, label="Player Stale")],
+            "items": [_entity_state(hp=9, label="Player Newer")],
             "fog": {"path": []},
         },
+        "dungeon_id": "d1",
     }
-    player._pending_player_state_update_request_id = "req-before-disconnect"
+    assert player._send_player_state_update(player_payload)
+    first_request_id = str(player._pending_player_state_update_request_id)
+    assert first_request_id
+    assert host._dungeons[0]["state"]["items"][0]["hp"] == 5
 
-    _debug_log("disconnect phase: stale pending state should be dropped before reconnect")
+    _debug_log("disconnect phase: pending state should be preserved for replay")
     player._on_client_disconnected()
-    assert player._pending_player_state_update is None
-    assert player._pending_player_state_update_request_id == ""
+    assert player._pending_player_state_update is not None
+    assert player._pending_player_state_update_request_id == first_request_id
 
     player._local_player_id = "player-1"
     player._awaiting_player_snapshot = True
+    client.deliver_commands = True
 
     snapshot = host._build_online_snapshot(for_player_id="player-1")
     _debug_log(
@@ -157,4 +171,54 @@ def test_reconnect_snapshot_does_not_reapply_stale_player_state_to_host(qtbot):
     )
 
     assert host_item["hp"] == 9
-    assert host_item["label"] == "Host Newer"
+    assert host_item["label"] == "Player Newer"
+    replayed_calls = [call for call in client.calls if call[0] == "state_update"]
+    assert len(replayed_calls) == 2
+    assert replayed_calls[-1][2] == first_request_id
+
+
+def test_reconnect_snapshot_skips_replay_when_host_already_contains_preserved_player_state(qtbot):
+    host = _build_online_widget(
+        qtbot,
+        mode=ONLINE_MODE_DM_HOST,
+        item=_entity_state(hp=9, label="Player Newer"),
+    )
+    host._host_controller = _HostControllerStub()
+    host._load_dungeon_state(host._dungeons[0]["state"])
+    matching_state = host._extract_player_owned_state(
+        host._serialize_scene(),
+        player_id="player-1",
+    )
+
+    player = _build_online_widget(
+        qtbot,
+        mode=ONLINE_MODE_PLAYER,
+        item=_entity_state(hp=9, label="Player Newer"),
+    )
+    client = _PlayerClientStub(host)
+    client.deliver_commands = False
+    player._client_controller = client
+    player._local_player_id = "player-1"
+    player._player_connection_ready = True
+    player._load_dungeon_state(player._dungeons[0]["state"])
+
+    player_payload = {
+        "state": matching_state,
+        "dungeon_id": "d1",
+    }
+    assert player._send_player_state_update(player_payload)
+    first_request_id = str(player._pending_player_state_update_request_id)
+
+    player._on_client_disconnected()
+    assert player._pending_player_state_update is not None
+    assert player._pending_player_state_update_request_id == first_request_id
+
+    player._local_player_id = "player-1"
+    player._awaiting_player_snapshot = True
+    snapshot = host._build_online_snapshot(for_player_id="player-1")
+    player._on_client_snapshot_received(snapshot)
+
+    replayed_calls = [call for call in client.calls if call[0] == "state_update"]
+    assert len(replayed_calls) == 1
+    assert player._pending_player_state_update is None
+    assert player._pending_player_state_update_request_id == ""

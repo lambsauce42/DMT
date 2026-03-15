@@ -48,7 +48,9 @@ class PlayerSheetsEventTests(unittest.TestCase):
 
         widget._on_external_inventory_saved("Event_Test", payload)
 
-        self.assertEqual(entry.inventory, [payload["inventory"][0]])
+        self.assertEqual(len(entry.inventory), 1)
+        self.assertEqual(entry.inventory[0]["item_id"], payload["inventory"][0])
+        self.assertEqual(entry.inventory[0]["quantity"], 1)
         self.assertEqual(entry.inventory_notes, "Custom line")
         self.assertEqual(entry.equipment.get("weapon_1"), payload["equipment"]["weapon_1"])
         self.assertEqual(entry.gold, 7)

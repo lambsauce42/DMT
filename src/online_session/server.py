@@ -15,6 +15,7 @@ from .protocol import (
     encode_message,
     prepare_outbound_transport_messages,
     restore_chunked_transport_message,
+    validate_chunked_message_metadata,
 )
 
 _RECONNECT_GRACE_SECONDS = 10 * 60
@@ -432,10 +433,16 @@ class OnlineSessionServer(QObject):
             raise ValueError("invalid chunk metadata") from exc
         if chunk_index < 0 or chunk_count <= 0 or chunk_index >= chunk_count:
             raise ValueError("invalid chunk bounds")
+        validate_chunked_message_metadata(
+            packed_size=packed_size,
+            chunk_count=chunk_count,
+        )
         packed_sha256 = str(message.get("packed_sha256") or "").strip()
         if not packed_sha256:
             raise ValueError("missing chunk checksum")
         payload_bytes = decode_chunked_payload_bytes(payload_b64=str(message.get("payload_b64") or ""))
+        if len(payload_bytes) > packed_size:
+            raise ValueError("invalid chunk payload size")
         bucket = self._inbound_chunked_messages.setdefault(socket, {})
         entry = bucket.get(chunk_id)
         if entry is None:
@@ -444,6 +451,7 @@ class OnlineSessionServer(QObject):
                 "packed_size": packed_size,
                 "packed_sha256": packed_sha256,
                 "chunks": {},
+                "received_bytes": 0,
                 "updated_monotonic": time.monotonic(),
             }
             bucket[chunk_id] = entry
@@ -458,7 +466,13 @@ class OnlineSessionServer(QObject):
         if not isinstance(chunks, dict):
             chunks = {}
             entry["chunks"] = chunks
+        previous_size = len(chunks.get(chunk_index, b""))
         chunks[chunk_index] = payload_bytes
+        received_bytes = int(entry.get("received_bytes") or 0) - previous_size + len(payload_bytes)
+        if received_bytes > packed_size:
+            bucket.pop(chunk_id, None)
+            raise ValueError("chunked payload exceeds declared size")
+        entry["received_bytes"] = received_bytes
         entry["updated_monotonic"] = time.monotonic()
         if len(chunks) < chunk_count:
             return None

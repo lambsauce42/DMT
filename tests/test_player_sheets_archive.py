@@ -179,7 +179,7 @@ def test_load_entries_prefers_archive_over_stale_cache_row(
     assert entry.campaign == "Ashen Crown"
     assert entry.group == "Silver Lances"
     assert sorted(entry.tags) == ["fighter", "tank"]
-    assert entry.inventory == ["rope"]
+    assert entry.inventory == [{"item_id": "rope", "normalized_item_name": "rope", "quantity": 1}]
     assert entry.inventory_notes == "from archive"
     assert entry.gold == 5
     assert entry.silver == 1
@@ -187,7 +187,7 @@ def test_load_entries_prefers_archive_over_stale_cache_row(
 
     persisted = json.loads(cache_index.read_text(encoding="utf-8"))
     assert persisted[0]["world"] == "Eldervale"
-    assert persisted[0]["inventory"] == ["rope"]
+    assert persisted[0]["inventory"] == [{"item_id": "rope", "normalized_item_name": "rope", "quantity": 1}]
     assert persisted[0]["gold"] == 5
 
 
@@ -251,7 +251,7 @@ def test_apply_remote_character_package_does_not_overwrite_existing_personal_she
     entry = entries[0]
     assert entry.name == "Personal Hero"
     assert entry.managed_linked is False
-    assert entry.inventory == ["item-personal"]
+    assert entry.inventory == [{"item_id": "item-personal", "normalized_item_name": "item-personal", "quantity": 1}]
 
 
 def test_apply_remote_character_package_can_overwrite_existing_personal_sheet_when_explicitly_allowed(
@@ -286,7 +286,7 @@ def test_apply_remote_character_package_can_overwrite_existing_personal_sheet_wh
     entry = entries[0]
     assert player_sheets.sheet_id_for_entry(entry) == "sheet-host"
     assert entry.managed_linked is True
-    assert entry.inventory == ["item-remote"]
+    assert entry.inventory == [{"item_id": "item-remote", "normalized_item_name": "item-remote", "quantity": 1}]
 
 
 def test_apply_remote_character_package_can_backup_existing_local_sheet_before_replace(
@@ -327,10 +327,10 @@ def test_apply_remote_character_package_can_backup_existing_local_sheet_before_r
     )
     assert player_sheets.sheet_id_for_entry(real_entry) == "sheet-host"
     assert real_entry.managed_linked is True
-    assert real_entry.inventory == ["item-remote"]
+    assert real_entry.inventory == [{"item_id": "item-remote", "normalized_item_name": "item-remote", "quantity": 1}]
     assert backup_entry.name == "Personal Hero_bak"
     assert backup_entry.managed_linked is False
-    assert backup_entry.inventory == ["item-personal"]
+    assert backup_entry.inventory == [{"item_id": "item-personal", "normalized_item_name": "item-personal", "quantity": 1}]
     assert player_sheets.character_id_for_entry(backup_entry) != "character-shared"
 
 

@@ -274,9 +274,9 @@ def _local_item_document_for_item_id(item_id: str) -> dict | None:
 def _entry_embedded_item_documents(entry: "PlayerSheetEntry") -> dict[str, dict]:
     embedded_documents = _entry_item_documents(entry)
     referenced_item_ids: set[str] = {
-        str(item_id or "").strip()
-        for item_id in getattr(entry, "inventory", [])
-        if str(item_id or "").strip()
+        _inventory_entry_item_id_local(item_entry)
+        for item_entry in _normalized_inventory_entries(getattr(entry, "inventory", []))
+        if _inventory_entry_item_id_local(item_entry)
     }
     for item_id in getattr(entry, "equipment", {}).values():
         clean_item_id = str(item_id or "").strip()
@@ -395,6 +395,150 @@ def _flatten_canonical_inventory_entries(entries: object) -> list[str]:
     return flattened
 
 
+def _normalized_inventory_entries(entries: object) -> list[dict[str, object]]:
+    normalized = normalize_inventory_payload({"inventory": list(entries) if isinstance(entries, list) else []})
+    rows = normalized.get("inventory")
+    if not isinstance(rows, list):
+        return []
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _inventory_entry_item_id_local(entry: object) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("item_id") or "").strip()
+
+
+def _inventory_entry_quantity_local(entry: object) -> int:
+    if not isinstance(entry, dict):
+        return 0
+    try:
+        return max(0, int(entry.get("quantity", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _stacked_inventory_entries(entries: object) -> list[dict[str, int | str]]:
+    stacked: list[dict[str, int | str]] = []
+    for index, row in enumerate(_normalized_inventory_entries(entries)):
+        item_id = _inventory_entry_item_id_local(row)
+        if not item_id:
+            continue
+        stacked.append(
+            {
+                "item_id": item_id,
+                "quantity": max(1, _inventory_entry_quantity_local(row)),
+                "first_index": index,
+            }
+        )
+    return stacked
+
+
+def _inventory_quantity_for_item(entries: object, item_id: str) -> int:
+    clean_item_id = str(item_id or "").strip()
+    if not clean_item_id:
+        return 0
+    quantity = 0
+    for row in _normalized_inventory_entries(entries):
+        if _inventory_entry_item_id_local(row) != clean_item_id:
+            continue
+        quantity += max(1, _inventory_entry_quantity_local(row))
+    return quantity
+
+
+def _inventory_with_item_quantity(
+    entries: object,
+    item_id: str,
+    quantity: int,
+) -> list[dict[str, object]]:
+    clean_item_id = str(item_id or "").strip()
+    safe_quantity = max(0, int(quantity))
+    updated: list[dict[str, object]] = []
+    insert_index: int | None = None
+    for row in _normalized_inventory_entries(entries):
+        clean_value = _inventory_entry_item_id_local(row)
+        if not clean_value:
+            continue
+        if clean_value == clean_item_id:
+            if insert_index is None:
+                insert_index = len(updated)
+            continue
+        updated.append(dict(row))
+    if not clean_item_id or safe_quantity <= 0:
+        return updated
+    if insert_index is None:
+        insert_index = len(updated)
+    updated.insert(
+        insert_index,
+        _canonical_item_entry_for_item_id(clean_item_id, quantity=safe_quantity),
+    )
+    return updated
+
+
+def _inventory_increment_item(
+    entries: object,
+    item_id: str,
+    delta: int = 1,
+) -> list[dict[str, object]]:
+    clean_item_id = str(item_id or "").strip()
+    if not clean_item_id:
+        return _normalized_inventory_entries(entries)
+    return _inventory_with_item_quantity(
+        entries,
+        clean_item_id,
+        _inventory_quantity_for_item(entries, clean_item_id) + int(delta),
+    )
+
+
+def _format_inventory_quantity(quantity: object) -> str:
+    try:
+        safe_quantity = max(0, int(quantity))
+    except (TypeError, ValueError):
+        safe_quantity = 0
+    if safe_quantity < 1000:
+        return str(safe_quantity)
+    if safe_quantity < 1_000_000:
+        abbreviated = safe_quantity / 1000.0
+        return f"{abbreviated:.1f}".rstrip("0").rstrip(".") + "k"
+    abbreviated = safe_quantity / 1_000_000.0
+    return f"{abbreviated:.1f}".rstrip("0").rstrip(".") + "m"
+
+
+def _inventory_icon_rect(cell_rect: QRect, icon_size: int | None = None) -> QRect:
+    safe_size = max(1, int(INVENTORY_ICON_SIZE if icon_size is None else icon_size))
+    x = cell_rect.x() + (cell_rect.width() - safe_size) // 2
+    y = cell_rect.y() + (cell_rect.height() - safe_size) // 2
+    return QRect(x, y, safe_size, safe_size)
+
+
+def _inventory_quantity_button_rect(icon_rect: QRect) -> QRect:
+    return QRect(
+        icon_rect.right() - INVENTORY_QUANTITY_BUTTON_SIZE + 1 - INVENTORY_QUANTITY_BUTTON_MARGIN,
+        icon_rect.top() + INVENTORY_QUANTITY_BUTTON_MARGIN,
+        INVENTORY_QUANTITY_BUTTON_SIZE,
+        INVENTORY_QUANTITY_BUTTON_SIZE,
+    )
+
+
+def _inventory_quantity_badge_rect(icon_rect: QRect) -> QRect:
+    return QRect(
+        icon_rect.left() + INVENTORY_QUANTITY_BADGE_MARGIN,
+        icon_rect.bottom() - INVENTORY_QUANTITY_BADGE_HEIGHT + 1 - INVENTORY_QUANTITY_BADGE_MARGIN,
+        INVENTORY_QUANTITY_BADGE_WIDTH,
+        INVENTORY_QUANTITY_BADGE_HEIGHT,
+    )
+
+
+def _collapsed_inventory_item_counts(item_ids: Sequence[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for raw_item_id in item_ids:
+        clean_item_id = str(raw_item_id or "").strip()
+        if not clean_item_id:
+            continue
+        counts[clean_item_id] = counts.get(clean_item_id, 0) + 1
+    return counts
+
+
 def _linked_npc_names_by_sheet_id() -> dict[str, list[str]]:
     try:
         from npc_database import linked_npc_names_by_sheet_id
@@ -467,6 +611,7 @@ def _unlink_npc_links_for_sheet(sheet_id: str) -> int:
 ICON_DIR = str(icons_dir())
 RESET_ICON = os.path.join(ICON_DIR, "reset.svg")
 LINK_INDICATOR_ICON = os.path.join(ICON_DIR, "link_indicator.svg")
+INVENTORY_STACK_PLUS_ICON = os.path.join(ICON_DIR, "inventory_stack_plus.svg")
 LINK_INDICATOR_ICON_14 = os.path.join(ICON_DIR, "link_indicator_14.png")
 LINK_INDICATOR_ICON_20 = os.path.join(ICON_DIR, "link_indicator_20.png")
 _SUPERSAMPLED_ICON_CACHE: dict[tuple[str, int], QPixmap] = {}
@@ -551,6 +696,15 @@ INVENTORY_ITEM_PAD = 4
 INVENTORY_HIGHLIGHT_OUTSET = 3
 INVENTORY_ITEM_SIZE = INVENTORY_ICON_SIZE + (INVENTORY_ITEM_PAD * 2)
 INVENTORY_DRAG_MIME = "application/x-dmt-inventory-item"
+INVENTORY_ITEM_ID_ROLE = int(Qt.ItemDataRole.UserRole)
+INVENTORY_ITEM_QUANTITY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+INVENTORY_ITEM_FIRST_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+INVENTORY_QUANTITY_BADGE_WIDTH = 44
+INVENTORY_QUANTITY_BADGE_HEIGHT = 22
+INVENTORY_QUANTITY_BADGE_MARGIN = 6
+INVENTORY_QUANTITY_BUTTON_SIZE = 18
+INVENTORY_QUANTITY_BUTTON_MARGIN = 6
+INVENTORY_QUANTITY_EDIT_MAX = 1_000_000
 EQUIPMENT_SLOT_SIZE = INVENTORY_ITEM_SIZE
 # PDF pane should be 80% of inventory pane width: pdf / inventory = 0.8.
 # Therefore pdf share of total is 0.8 / (1 + 0.8) = 0.444...
@@ -1731,7 +1885,7 @@ def entry_from_dict(payload: dict) -> Optional[PlayerSheetEntry]:
         campaign=payload.get("campaign") or None,
         group=payload.get("group") or None,
         tags=[str(tag) for tag in tags if str(tag).strip()],
-        inventory=[str(item) for item in inventory if str(item).strip()],
+        inventory=list(inventory),
         inventory_notes=str(payload.get("inventory_notes", "")),
         equipment=_normalize_equipment(equipment),
         gold=_read_currency(payload.get("gold", 0)),
@@ -1756,7 +1910,7 @@ class PlayerSheetEntry:
     campaign: Optional[str] = None
     group: Optional[str] = None
     tags: List[str] = field(default_factory=list)
-    inventory: List[str] = field(default_factory=list)
+    inventory: List[dict[str, object]] = field(default_factory=list)
     inventory_notes: str = ""
     equipment: dict[str, Optional[str]] = field(default_factory=_empty_equipment_slots)
     gold: int = 0
@@ -1774,6 +1928,7 @@ class PlayerSheetEntry:
         self.sheet_id = str(self.sheet_id or "").strip()
         self.character_id = str(self.character_id or "").strip()
         self.tags = normalize_tags(self.tags)
+        self.inventory = _normalized_inventory_entries(self.inventory)
         self.inventory_notes = str(self.inventory_notes or "")
         self.equipment = _normalize_equipment(self.equipment)
         self.item_documents = _normalized_item_documents_map(self.item_documents)
@@ -1806,7 +1961,6 @@ def _entry_archive_path(entry: PlayerSheetEntry) -> Path:
 
 
 def _entry_inventory_payload(entry: PlayerSheetEntry) -> dict:
-    canonical_inventory = [_canonical_item_entry_for_item_id(item_id) for item_id in entry.inventory if str(item_id or "").strip()]
     canonical_equipment: dict[str, dict | None] = {}
     for slot_id, item_id in entry.equipment.items():
         clean_item_id = str(item_id or "").strip()
@@ -1817,7 +1971,7 @@ def _entry_inventory_payload(entry: PlayerSheetEntry) -> dict:
         )
     return normalize_inventory_payload(
         {
-            "inventory": canonical_inventory,
+            "inventory": _normalized_inventory_entries(entry.inventory),
             "inventory_notes": entry.inventory_notes,
             "equipment": canonical_equipment,
             "gold": entry.gold,
@@ -1895,7 +2049,7 @@ def _apply_inventory_payload_to_entry(
     normalized = normalize_inventory_payload(
         inventory_payload if isinstance(inventory_payload, dict) else {}
     )
-    entry.inventory = _flatten_canonical_inventory_entries(normalized.get("inventory"))
+    entry.inventory = _normalized_inventory_entries(normalized.get("inventory"))
     entry.inventory_notes = str(normalized.get("inventory_notes", ""))
     entry.equipment = _normalize_equipment(normalized.get("equipment", {}))
     try:
@@ -2700,10 +2854,16 @@ def replace_item_references(
     for entry in entries:
         changed = False
         if entry.inventory:
-            updated_inventory = [
-                replacement if str(item_id or "").strip() in old_ids else item_id
-                for item_id in entry.inventory
-            ]
+            updated_inventory: list[dict[str, object]] = []
+            for item_entry in _normalized_inventory_entries(entry.inventory):
+                item_id = _inventory_entry_item_id_local(item_entry)
+                quantity = max(1, _inventory_entry_quantity_local(item_entry))
+                updated_inventory.append(
+                    _canonical_item_entry_for_item_id(
+                        replacement if item_id in old_ids else item_id,
+                        quantity=quantity,
+                    )
+                )
             if updated_inventory != entry.inventory:
                 entry.inventory = updated_inventory
                 changed = True
@@ -2762,8 +2922,8 @@ def apply_claim_to_sheet(
 
     clean_items = [str(item).strip() for item in item_ids if str(item).strip()]
     clean_notes = [str(line).strip() for line in note_lines if str(line).strip()]
-    if clean_items:
-        target_entry.inventory.extend(clean_items)
+    for item_id, quantity in _collapsed_inventory_item_counts(clean_items).items():
+        target_entry.inventory = _inventory_increment_item(target_entry.inventory, item_id, quantity)
     if clean_notes:
         existing = [line.strip() for line in str(target_entry.inventory_notes or "").splitlines() if line.strip()]
         target_entry.inventory_notes = "\n".join(existing + clean_notes)
@@ -2793,8 +2953,8 @@ def apply_claim_to_character(
 
     clean_items = [str(item).strip() for item in item_ids if str(item).strip()]
     clean_notes = [str(line).strip() for line in note_lines if str(line).strip()]
-    if clean_items:
-        target_entry.inventory.extend(clean_items)
+    for item_id, quantity in _collapsed_inventory_item_counts(clean_items).items():
+        target_entry.inventory = _inventory_increment_item(target_entry.inventory, item_id, quantity)
     if clean_notes:
         existing = [line.strip() for line in str(target_entry.inventory_notes or "").splitlines() if line.strip()]
         target_entry.inventory_notes = "\n".join(existing + clean_notes)
@@ -3734,6 +3894,7 @@ class InventoryIconDelegate(QStyledItemDelegate):
         self._icon_size = icon_size
         self._highlight_outset = highlight_pad
         self._highlight_color = QColor("#58a6ff")
+        self._quantity_button_icon = QIcon(INVENTORY_STACK_PLUS_ICON)
 
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
@@ -3744,10 +3905,8 @@ class InventoryIconDelegate(QStyledItemDelegate):
         icon = index.data(Qt.ItemDataRole.DecorationRole)
         if isinstance(icon, QIcon):
             pixmap = icon.pixmap(self._icon_size, self._icon_size)
-            x = rect.x() + (rect.width() - self._icon_size) // 2
-            y = rect.y() + (rect.height() - self._icon_size) // 2
-            icon_rect = QRect(x, y, self._icon_size, self._icon_size)
-            painter.drawPixmap(x, y, pixmap)
+            icon_rect = _inventory_icon_rect(rect, self._icon_size)
+            painter.drawPixmap(icon_rect.topLeft(), pixmap)
             if option.state & QStyle.StateFlag.State_Selected:
                 highlight_rect = icon_rect.adjusted(
                     -self._highlight_outset,
@@ -3760,10 +3919,92 @@ class InventoryIconDelegate(QStyledItemDelegate):
                 painter.setPen(pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(highlight_rect, 6, 6)
+            quantity = index.data(INVENTORY_ITEM_QUANTITY_ROLE)
+            self._paint_quantity_badge(painter, icon_rect, quantity)
+            if self._should_paint_quantity_button(option, index):
+                self._paint_quantity_button(
+                    painter,
+                    icon_rect,
+                    is_hot=self._is_quantity_button_hot(option, index),
+                )
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(INVENTORY_ITEM_SIZE, INVENTORY_ITEM_SIZE)
+
+    def _paint_quantity_button(
+        self,
+        painter: QPainter,
+        icon_rect: QRect,
+        *,
+        is_hot: bool,
+    ) -> None:
+        button_rect = _inventory_quantity_button_rect(icon_rect)
+        border_color = QColor("#79c0ff") if is_hot else QColor("#2f81f7")
+        fill_color = QColor(32, 44, 59, 240) if is_hot else QColor(13, 17, 23, 224)
+        painter.setPen(QPen(border_color, 1))
+        painter.setBrush(fill_color)
+        painter.drawEllipse(button_rect)
+        icon_target = button_rect.adjusted(3, 3, -3, -3)
+        plus_icon = self._quantity_button_icon
+        if not plus_icon.isNull():
+            painter.drawPixmap(icon_target, plus_icon.pixmap(icon_target.size()))
+
+    def _paint_quantity_badge(
+        self,
+        painter: QPainter,
+        icon_rect: QRect,
+        quantity: object,
+    ) -> None:
+        try:
+            safe_quantity = max(0, int(quantity))
+        except (TypeError, ValueError):
+            safe_quantity = 0
+        if safe_quantity <= 1:
+            return
+        badge_rect = _inventory_quantity_badge_rect(icon_rect)
+        painter.setPen(QPen(QColor(139, 148, 158, 190), 1))
+        painter.setBrush(QColor(13, 17, 23, 220))
+        painter.drawRoundedRect(
+            badge_rect,
+            badge_rect.height() / 2.0,
+            badge_rect.height() / 2.0,
+        )
+        badge_font = QFont(painter.font())
+        point_size = badge_font.pointSizeF()
+        if point_size <= 0:
+            point_size = 9.0
+        badge_font.setPointSizeF(max(8.0, point_size - 1.0))
+        badge_font.setBold(True)
+        painter.setFont(badge_font)
+        painter.setPen(QColor("#f0f6fc"))
+        painter.drawText(
+            badge_rect.translated(0, -2),
+            Qt.AlignmentFlag.AlignCenter,
+            _format_inventory_quantity(safe_quantity),
+        )
+
+    def _should_paint_quantity_button(self, option, index) -> bool:
+        parent_widget = self.parent()
+        if isinstance(parent_widget, InventoryListWidget):
+            return parent_widget.is_quantity_button_visible_for_row(index.row())
+        widget = getattr(option, "widget", None)
+        if widget is not None:
+            maybe_list = widget.parent()
+            if isinstance(maybe_list, InventoryListWidget):
+                return maybe_list.is_quantity_button_visible_for_row(index.row())
+        return False
+
+    def _is_quantity_button_hot(self, option, index) -> bool:
+        parent_widget = self.parent()
+        if isinstance(parent_widget, InventoryListWidget):
+            return parent_widget.is_quantity_button_hot_for_row(index.row())
+        widget = getattr(option, "widget", None)
+        if widget is not None:
+            maybe_list = widget.parent()
+            if isinstance(maybe_list, InventoryListWidget):
+                return maybe_list.is_quantity_button_hot_for_row(index.row())
+        return False
 
 
 class CharacterSheetListDelegate(QStyledItemDelegate):
@@ -3864,6 +4105,7 @@ class CharacterSheetListDelegate(QStyledItemDelegate):
 
 class InventoryListWidget(QListWidget):
     equipmentDropped = Signal(dict)
+    quantityAdjustRequested = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -3873,17 +4115,86 @@ class InventoryListWidget(QListWidget):
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDropIndicatorShown(False)
         self.viewport().setAcceptDrops(True)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self._drag_start_pos = QPoint()
+        self._hovered_item_row = -1
+        self._hovered_quantity_button_row = -1
+
+    def is_quantity_button_visible_for_row(self, row: int) -> bool:
+        return int(row) >= 0 and int(row) == self._hovered_item_row
+
+    def is_quantity_button_hot_for_row(self, row: int) -> bool:
+        return int(row) >= 0 and int(row) == self._hovered_quantity_button_row
+
+    def _set_hovered_item_row(self, row: int) -> None:
+        safe_row = int(row)
+        if safe_row == self._hovered_item_row:
+            return
+        previous_row = self._hovered_item_row
+        self._hovered_item_row = safe_row
+        for target_row in (previous_row, self._hovered_item_row):
+            if target_row < 0:
+                continue
+            target_item = self.item(target_row)
+            if target_item is None:
+                continue
+            self.viewport().update(self.visualItemRect(target_item))
+
+    def _set_hovered_quantity_button_row(self, row: int) -> None:
+        safe_row = int(row)
+        if safe_row == self._hovered_quantity_button_row:
+            return
+        previous_row = self._hovered_quantity_button_row
+        self._hovered_quantity_button_row = safe_row
+        for target_row in (previous_row, self._hovered_quantity_button_row):
+            if target_row < 0:
+                continue
+            target_item = self.item(target_row)
+            if target_item is None:
+                continue
+            self.viewport().update(self.visualItemRect(target_item))
+
+    def _update_hover_from_pos(self, pos: QPoint) -> None:
+        hovered_item = self.itemAt(pos)
+        hovered_row = self.row(hovered_item) if hovered_item is not None else -1
+        self._set_hovered_item_row(hovered_row)
+        if hovered_item is None:
+            self._set_hovered_quantity_button_row(-1)
+            return
+        item_rect = self.visualItemRect(hovered_item)
+        icon_rect = _inventory_icon_rect(
+            item_rect,
+            self.iconSize().width() if self.iconSize().isValid() else INVENTORY_ICON_SIZE,
+        )
+        button_row = hovered_row if _inventory_quantity_button_rect(icon_rect).contains(pos) else -1
+        self._set_hovered_quantity_button_row(button_row)
+
+    def _item_for_quantity_button_pos(self, pos: QPoint) -> Optional[QListWidgetItem]:
+        item = self.itemAt(pos)
+        if item is None:
+            return None
+        row = self.row(item)
+        if not self.is_quantity_button_visible_for_row(row):
+            return None
+        item_rect = self.visualItemRect(item)
+        icon_rect = _inventory_icon_rect(
+            item_rect,
+            self.iconSize().width() if self.iconSize().isValid() else INVENTORY_ICON_SIZE,
+        )
+        if _inventory_quantity_button_rect(icon_rect).contains(pos):
+            return item
+        return None
 
     def _start_drag_for_item(self, item: QListWidgetItem) -> None:
         if item is None:
             return
-        item_id = item.data(Qt.ItemDataRole.UserRole)
+        item_id = item.data(INVENTORY_ITEM_ID_ROLE)
         if not item_id:
             return
         payload = {
             "source": "backpack",
-            "index": self.row(item),
+            "index": item.data(INVENTORY_ITEM_FIRST_INDEX_ROLE),
             "item_id": item_id,
         }
         mime = QMimeData()
@@ -3897,20 +4208,33 @@ class InventoryListWidget(QListWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_pos = event.position().toPoint()
+            press_pos = event.position().toPoint()
+            quantity_item = self._item_for_quantity_button_pos(press_pos)
+            if quantity_item is not None:
+                self.setCurrentItem(quantity_item)
+                item_id = str(quantity_item.data(INVENTORY_ITEM_ID_ROLE) or "").strip()
+                if item_id:
+                    self.quantityAdjustRequested.emit(item_id)
+                event.accept()
+                return
+            self._drag_start_pos = press_pos
             item = self.itemAt(self._drag_start_pos)
             if item is not None:
                 self.setCurrentItem(item)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        self._update_hover_from_pos(event.position().toPoint())
         if not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
             return
         distance = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
         if distance < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
             return
         item = self.currentItem() or self.itemAt(self._drag_start_pos)
         if item is None:
+            super().mouseMoveEvent(event)
             return
         self._start_drag_for_item(item)
 
@@ -3942,7 +4266,15 @@ class InventoryListWidget(QListWidget):
     def dragLeaveEvent(self, event) -> None:
         event.accept()
 
+    def leaveEvent(self, event) -> None:
+        self._set_hovered_item_row(-1)
+        self._set_hovered_quantity_button_row(-1)
+        super().leaveEvent(event)
+
     def viewportEvent(self, event) -> bool:
+        if event.type() == QEvent.Type.Leave:
+            self._set_hovered_item_row(-1)
+            self._set_hovered_quantity_button_row(-1)
         if event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop):
             payload = _decode_inventory_drag(event.mimeData())
             if payload and payload.get("source") == "equipment":
@@ -4800,6 +5132,7 @@ class PlayerSheetsWidget(QWidget):
         self._inventory_list.viewport().installEventFilter(self)
         self._inventory_list.itemSelectionChanged.connect(self._sync_inventory_controls)
         self._inventory_list.equipmentDropped.connect(self._on_inventory_drop_from_equipment)
+        self._inventory_list.quantityAdjustRequested.connect(self._edit_inventory_item_quantity)
         self._inventory_list.setStyleSheet(
             "QListWidget#InventoryIconList {"
             "background-color: transparent;"
@@ -5462,6 +5795,38 @@ class PlayerSheetsWidget(QWidget):
     def _inventory_item_for_id(self, item_id: str) -> Optional[LootItem]:
         return self._inventory_item_by_id.get(item_id)
 
+    def _inventory_quantity_for_item_id(self, item_id: str) -> int:
+        if self._current_entry is None:
+            return 0
+        return _inventory_quantity_for_item(self._current_entry.inventory, item_id)
+
+    def _set_current_inventory_item_quantity(self, item_id: str, quantity: int) -> int:
+        if self._current_entry is None:
+            return 0
+        self._current_entry.inventory = _inventory_with_item_quantity(
+            self._current_entry.inventory,
+            item_id,
+            quantity,
+        )
+        return _inventory_quantity_for_item(self._current_entry.inventory, item_id)
+
+    def _select_inventory_item_by_id(self, item_id: str) -> None:
+        clean_item_id = str(item_id or "").strip()
+        if not clean_item_id:
+            self._inventory_list.clearSelection()
+            self._inventory_list.setCurrentRow(-1)
+            return
+        for index in range(self._inventory_list.count()):
+            item = self._inventory_list.item(index)
+            if str(item.data(INVENTORY_ITEM_ID_ROLE) or "").strip() != clean_item_id:
+                continue
+            self._inventory_list.setCurrentItem(item)
+            item.setSelected(True)
+            self._inventory_list.scrollToItem(item)
+            return
+        self._inventory_list.clearSelection()
+        self._inventory_list.setCurrentRow(-1)
+
     def _inventory_icon_for_item(self, item: Optional[LootItem]) -> QPixmap:
         if item is None:
             return _missing_inventory_icon_pixmap()
@@ -5709,7 +6074,10 @@ class PlayerSheetsWidget(QWidget):
             existing_item = equipment.get(slot_id)
             equipment[slot_id] = item_id
             if existing_item:
-                self._current_entry.inventory.append(existing_item)
+                self._current_entry.inventory = _inventory_increment_item(
+                    self._current_entry.inventory,
+                    existing_item,
+                )
             self._remove_inventory_item_by_index(item_id, source_index)
         else:
             return
@@ -5725,11 +6093,15 @@ class PlayerSheetsWidget(QWidget):
         source_slot = payload.get("slot")
         if not item_id or not source_slot:
             return
-        self._current_entry.inventory.append(item_id)
+        self._current_entry.inventory = _inventory_increment_item(
+            self._current_entry.inventory,
+            item_id,
+        )
         self._current_entry.equipment[source_slot] = None
         self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
+        self._select_inventory_item_by_id(str(item_id or ""))
         self._clear_equipment_selection()
 
     def _on_equipment_slot_hovered(self, slot_id: str, item_id: Optional[str]) -> None:
@@ -5850,13 +6222,52 @@ class PlayerSheetsWidget(QWidget):
             return
         if isinstance(source_index, int):
             if 0 <= source_index < len(self._current_entry.inventory):
-                if self._current_entry.inventory[source_index] == item_id:
-                    self._current_entry.inventory.pop(source_index)
+                if _inventory_entry_item_id_local(self._current_entry.inventory[source_index]) == item_id:
+                    self._current_entry.inventory = _inventory_with_item_quantity(
+                        self._current_entry.inventory,
+                        item_id,
+                        self._inventory_quantity_for_item_id(item_id) - 1,
+                    )
                     return
-        try:
-            self._current_entry.inventory.remove(item_id)
-        except ValueError:
-            pass
+        self._current_entry.inventory = _inventory_with_item_quantity(
+            self._current_entry.inventory,
+            item_id,
+            self._inventory_quantity_for_item_id(item_id) - 1,
+        )
+
+    def _edit_inventory_item_quantity(self, item_id: str) -> None:
+        clean_item_id = str(item_id or "").strip()
+        if not self._current_entry or not clean_item_id:
+            return
+        current_quantity = self._inventory_quantity_for_item_id(clean_item_id)
+        if current_quantity <= 0:
+            return
+        loot_item = self._inventory_item_for_id(clean_item_id)
+        item_label = (
+            str(getattr(loot_item, "title", "") or "").strip()
+            if loot_item is not None
+            else ""
+        ) or clean_item_id
+        default_value = min(INVENTORY_QUANTITY_EDIT_MAX, current_quantity)
+        new_quantity, accepted = QInputDialog.getInt(
+            self,
+            "Set Backpack Quantity",
+            f"Quantity for {item_label}:",
+            default_value,
+            0,
+            INVENTORY_QUANTITY_EDIT_MAX,
+            1,
+        )
+        if not accepted:
+            return
+        applied_quantity = self._set_current_inventory_item_quantity(clean_item_id, new_quantity)
+        self._save_entries(sync_entries=[self._current_entry])
+        self._mark_current_sheet_data_dirty()
+        self._set_inventory(self._current_entry)
+        if applied_quantity > 0:
+            self._select_inventory_item_by_id(clean_item_id)
+        else:
+            self._sync_inventory_controls()
 
     def _set_inventory(self, entry: Optional[PlayerSheetEntry]) -> None:
         self._hide_inventory_preview()
@@ -5876,10 +6287,21 @@ class PlayerSheetsWidget(QWidget):
             self._set_equipment(None)
             return
 
-        for item_id in entry.inventory:
+        for stack_entry in _stacked_inventory_entries(entry.inventory):
+            item_id = str(stack_entry.get("item_id") or "").strip()
+            if not item_id:
+                continue
             loot_item = self._inventory_item_for_id(item_id)
             row = QListWidgetItem("")
-            row.setData(Qt.ItemDataRole.UserRole, item_id)
+            row.setData(INVENTORY_ITEM_ID_ROLE, item_id)
+            row.setData(
+                INVENTORY_ITEM_QUANTITY_ROLE,
+                max(1, int(stack_entry.get("quantity", 1))),
+            )
+            row.setData(
+                INVENTORY_ITEM_FIRST_INDEX_ROLE,
+                max(0, int(stack_entry.get("first_index", 0))),
+            )
             row.setIcon(QIcon(self._inventory_icon_for_item(loot_item)))
             row.setSizeHint(QSize(INVENTORY_ITEM_SIZE, INVENTORY_ITEM_SIZE))
             row.setFlags(row.flags() | Qt.ItemFlag.ItemIsDragEnabled)
@@ -5978,12 +6400,14 @@ class PlayerSheetsWidget(QWidget):
     def _add_inventory_item(self, item_id: str) -> None:
         if not self._current_entry:
             return
-        self._current_entry.inventory.append(item_id)
+        self._current_entry.inventory = _inventory_increment_item(
+            self._current_entry.inventory,
+            item_id,
+        )
         self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
         self._set_inventory(self._current_entry)
-        if self._inventory_list.count() > 0:
-            self._inventory_list.setCurrentRow(self._inventory_list.count() - 1)
+        self._select_inventory_item_by_id(item_id)
 
     def _on_inventory_notepad_changed(self) -> None:
         if (
@@ -6015,22 +6439,36 @@ class PlayerSheetsWidget(QWidget):
         if not selected:
             QMessageBox.information(self, "No Selection", "Select an inventory item first.")
             return
-        for item in selected:
-            row = self._inventory_list.row(item)
-            self._inventory_list.takeItem(row)
-        self._sync_inventory_from_list()
+        item_id = str(selected[0].data(INVENTORY_ITEM_ID_ROLE) or "").strip()
+        if not item_id:
+            return
+        remaining = self._set_current_inventory_item_quantity(
+            item_id,
+            self._inventory_quantity_for_item_id(item_id) - 1,
+        )
+        self._save_entries(sync_entries=[self._current_entry])
+        self._mark_current_sheet_data_dirty()
+        self._set_inventory(self._current_entry)
         self._hide_inventory_preview()
-        self._sync_inventory_controls()
+        if remaining > 0:
+            self._select_inventory_item_by_id(item_id)
+        else:
+            self._sync_inventory_controls()
 
     def _sync_inventory_from_list(self) -> None:
         if not self._current_entry:
             return
-        inventory: List[str] = []
+        inventory: List[dict[str, object]] = []
         for index in range(self._inventory_list.count()):
             item = self._inventory_list.item(index)
-            item_id = item.data(Qt.ItemDataRole.UserRole)
-            if item_id:
-                inventory.append(item_id)
+            item_id = str(item.data(INVENTORY_ITEM_ID_ROLE) or "").strip()
+            if not item_id:
+                continue
+            try:
+                quantity = max(1, int(item.data(INVENTORY_ITEM_QUANTITY_ROLE) or 1))
+            except (TypeError, ValueError):
+                quantity = 1
+            inventory.append(_canonical_item_entry_for_item_id(item_id, quantity=quantity))
         self._current_entry.inventory = inventory
         self._save_entries(sync_entries=[self._current_entry])
         self._mark_current_sheet_data_dirty()
@@ -6039,7 +6477,7 @@ class PlayerSheetsWidget(QWidget):
     def _show_inventory_preview_for_item(self, item: QListWidgetItem) -> None:
         if item is None:
             return
-        item_id = item.data(Qt.ItemDataRole.UserRole)
+        item_id = item.data(INVENTORY_ITEM_ID_ROLE)
         loot_item = self._inventory_item_for_id(item_id)
         if loot_item is None:
             return
@@ -6527,15 +6965,7 @@ class PlayerSheetsWidget(QWidget):
             entry.archive_path = str(archive_path)
             entry.pdf_path = str(storage_path)
             archive_inventory = read_character_inventory(archive_path)
-            entry.inventory = list(archive_inventory.get("inventory", []))
-            entry.inventory_notes = str(archive_inventory.get("inventory_notes", ""))
-            entry.equipment = _normalize_equipment(archive_inventory.get("equipment", {}))
-            try:
-                entry.gold = max(0, int(archive_inventory.get("gold", entry.gold)))
-                entry.silver = max(0, int(archive_inventory.get("silver", entry.silver)))
-                entry.copper = max(0, int(archive_inventory.get("copper", entry.copper)))
-            except (TypeError, ValueError):
-                pass
+            _apply_inventory_payload_to_entry(entry, archive_inventory)
             self._save_entries()
             return str(storage_path)
 
