@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 import uuid
 from typing import TYPE_CHECKING, Optional
 
@@ -915,11 +916,15 @@ class SelectState(CanvasState):
 
 class FreeDrawState(CanvasState):
     """State for free-form drawing strokes (no snapping)."""
+    MIN_POINT_DISTANCE = 3.0
+    MAX_STROKE_ELEMENTS = 2048
+
     def __init__(self, canvas: 'DungeonCanvas'):
         super().__init__(canvas)
         self.current_path: Optional[QPainterPath] = None
         self.preview_item: Optional[QGraphicsPathItem] = None
         self.is_drawing = False
+        self._last_accepted_point: Optional[QPointF] = None
 
     def on_enter(self):
         self.canvas.setCursor(Qt.CursorShape.CrossCursor)
@@ -934,6 +939,35 @@ class FreeDrawState(CanvasState):
         self.preview_item = None
         self.current_path = None
         self.is_drawing = False
+        self._last_accepted_point = None
+
+    def _should_accept_point(self, scene_pos: QPointF) -> bool:
+        if self._last_accepted_point is None:
+            return True
+        dx = float(scene_pos.x() - self._last_accepted_point.x())
+        dy = float(scene_pos.y() - self._last_accepted_point.y())
+        return math.hypot(dx, dy) >= self.MIN_POINT_DISTANCE
+
+    def _simplified_current_path(self) -> QPainterPath:
+        path = self.current_path or QPainterPath()
+        element_count = path.elementCount()
+        if element_count <= self.MAX_STROKE_ELEMENTS:
+            return path
+        stride = max(1, math.ceil(element_count / self.MAX_STROKE_ELEMENTS))
+        simplified = QPainterPath()
+        first = path.elementAt(0)
+        simplified.moveTo(QPointF(first.x, first.y))
+        for index in range(1, element_count - 1, stride):
+            element = path.elementAt(index)
+            simplified.lineTo(QPointF(element.x, element.y))
+        last = path.elementAt(element_count - 1)
+        simplified.lineTo(QPointF(last.x, last.y))
+        print(
+            "[WARN] Freehand stroke was simplified before online sync "
+            f"({element_count} -> {simplified.elementCount()} points).",
+            file=sys.stderr,
+        )
+        return simplified
 
     def mousePressEvent(self, event, scene_pos: QPointF):
         if super().mousePressEvent(event, scene_pos): return True
@@ -941,6 +975,7 @@ class FreeDrawState(CanvasState):
             self.is_drawing = True
             self.current_path = QPainterPath()
             self.current_path.moveTo(scene_pos)
+            self._last_accepted_point = QPointF(scene_pos)
             self.preview_item = StrokeItem(self.current_path)
             draw_color = QColor(getattr(self.canvas, "stroke_color", QColor(WALL_COLOR)))
             self.preview_item.setPen(QPen(draw_color, WALL_WIDTH))
@@ -958,18 +993,25 @@ class FreeDrawState(CanvasState):
     def mouseMoveEvent(self, event, scene_pos: QPointF):
         if super().mouseMoveEvent(event, scene_pos): return
         if self.is_drawing and self.current_path and self.preview_item:
+            if not self._should_accept_point(scene_pos):
+                return
             if not _qt_object_is_valid(self.preview_item):
                 self.cleanup()
                 return
             self.current_path.lineTo(scene_pos)
+            self._last_accepted_point = QPointF(scene_pos)
             self.preview_item.setPath(self.current_path)
 
     def mouseReleaseEvent(self, event, scene_pos: QPointF):
         if super().mouseReleaseEvent(event, scene_pos): return
         if event.button() == Qt.MouseButton.LeftButton and self.is_drawing:
             if self.current_path and self.preview_item and _qt_object_is_valid(self.preview_item):
+                if self._should_accept_point(scene_pos):
+                    self.current_path.lineTo(scene_pos)
+                    self._last_accepted_point = QPointF(scene_pos)
+                final_path = self._simplified_current_path()
                 # Finalize the stroke
-                final_item = StrokeItem(self.current_path)
+                final_item = StrokeItem(final_path)
                 
                 # Layer assignment
                 current_layer = getattr(self.canvas, "_current_layer", LAYER_FG)

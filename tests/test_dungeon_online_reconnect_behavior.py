@@ -157,7 +157,7 @@ def test_failed_reconnect_attempt_after_established_session_keeps_player_mode(du
     assert controller._manual_disconnect is False
 
 
-def test_player_disconnect_clears_pending_online_command_requests(dungeon_widget):
+def test_player_disconnect_marks_pending_online_command_requests_for_retry(dungeon_widget):
     dungeon_widget._online_mode = ONLINE_MODE_PLAYER
     dungeon_widget._player_connection_ready = True
     dungeon_widget._client_controller = types.SimpleNamespace(
@@ -171,9 +171,9 @@ def test_player_disconnect_clears_pending_online_command_requests(dungeon_widget
 
     dungeon_widget._on_client_disconnected()
 
-    assert dungeon_widget._pending_link_entity_requests == {}
-    assert dungeon_widget._pending_unlink_entity_requests == {}
-    assert dungeon_widget._pending_add_loot_from_inventory_requests == {}
+    assert dungeon_widget._pending_link_entity_requests["link-1"]["_retry_needed"] is True
+    assert dungeon_widget._pending_unlink_entity_requests["unlink-1"]["_retry_needed"] is True
+    assert dungeon_widget._pending_add_loot_from_inventory_requests["loot-1"]["_retry_needed"] is True
 
 
 def test_first_player_snapshot_does_not_auto_push_pending_character_overrides(dungeon_widget):

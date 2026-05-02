@@ -658,6 +658,18 @@ def test_client_controller_hello_ack_clears_reconnect_timeout_and_marks_connecte
     assert hello_acks == [("player-7", True)]
 
 
+def test_client_controller_hello_ack_does_not_request_duplicate_snapshot(monkeypatch):
+    controller = ClientSessionController()
+    sent = []
+    monkeypatch.setattr(controller.client, "is_connected", lambda: True)
+    monkeypatch.setattr(controller.client, "send", lambda message: sent.append(dict(message)) or True)
+
+    controller._active_transport_epoch = 4
+    controller._on_hello_ack(4, "player-7", False)
+
+    assert sent == []
+
+
 def test_client_controller_ignores_stale_transport_snapshot_message():
     controller = ClientSessionController()
     controller._active_transport_epoch = 2

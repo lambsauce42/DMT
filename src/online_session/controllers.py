@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
@@ -15,6 +17,8 @@ _RECONNECT_BASE_DELAY_MS = 1200
 _RECONNECT_MAX_DELAY_MS = 8000
 _RECONNECT_MAX_ATTEMPTS = 5
 _RECONNECT_CONNECT_TIMEOUT_MS = 6000
+_COMMAND_RESULT_CACHE_MAX_ENTRIES = 512
+_COMMAND_RESULT_CACHE_TTL_SECONDS = 15 * 60
 
 
 def _utc_timestamp() -> str:
@@ -36,7 +40,7 @@ class HostSessionController(QObject):
         self.server.player_disconnected.connect(self._on_player_disconnected)
         self.server.message_received.connect(self._on_server_message)
         self._pending_kick_messages: Dict[str, str] = {}
-        self._command_result_cache: Dict[tuple[str, str], dict] = {}
+        self._command_result_cache: OrderedDict[tuple[str, str], dict] = OrderedDict()
 
     @property
     def players(self) -> Dict[str, str]:
@@ -48,6 +52,28 @@ class HostSessionController(QObject):
     def stop(self) -> None:
         self._command_result_cache.clear()
         self.server.stop()
+
+    @staticmethod
+    def _command_result_cacheable(payload: dict) -> bool:
+        data = payload.get("data")
+        action = str(data.get("action") or "").strip() if isinstance(data, dict) else ""
+        # High-frequency scene diffs are already reconnect-safe via snapshot-aware
+        # replay, so caching every ack would grow without bound during movement.
+        return action != "state_update"
+
+    def _prune_command_result_cache(self) -> None:
+        if not self._command_result_cache:
+            return
+        now = time.monotonic()
+        expired_keys = [
+            key
+            for key, entry in self._command_result_cache.items()
+            if (now - float(entry.get("created_monotonic") or 0.0)) > _COMMAND_RESULT_CACHE_TTL_SECONDS
+        ]
+        for key in expired_keys:
+            self._command_result_cache.pop(key, None)
+        while len(self._command_result_cache) > _COMMAND_RESULT_CACHE_MAX_ENTRIES:
+            self._command_result_cache.popitem(last=False)
 
     def broadcast_snapshot(self, snapshot: dict) -> None:
         self.server.broadcast({"type": "snapshot", "state": snapshot, "ts": _utc_timestamp()})
@@ -64,6 +90,25 @@ class HostSessionController(QObject):
                 "state": dict(state) if isinstance(state, dict) else {},
                 "ts": _utc_timestamp(),
             }
+        )
+
+    def send_player_state_patch_to(
+        self,
+        target_player_id: str,
+        *,
+        player_id: str,
+        dungeon_id: str,
+        state: dict,
+    ) -> None:
+        self.server.send_to_player(
+            target_player_id,
+            {
+                "type": "player_state_patch",
+                "player_id": str(player_id or ""),
+                "dungeon_id": str(dungeon_id or ""),
+                "state": dict(state) if isinstance(state, dict) else {},
+                "ts": _utc_timestamp(),
+            },
         )
 
     def send_command_result(
@@ -84,8 +129,14 @@ class HostSessionController(QObject):
         }
         clean_player_id = str(player_id or "").strip()
         clean_request_id = str(request_id or "").strip()
-        if clean_player_id and clean_request_id:
-            self._command_result_cache[(clean_player_id, clean_request_id)] = dict(payload)
+        if clean_player_id and clean_request_id and self._command_result_cacheable(payload):
+            cache_key = (clean_player_id, clean_request_id)
+            self._command_result_cache[cache_key] = {
+                "created_monotonic": time.monotonic(),
+                "payload": dict(payload),
+            }
+            self._command_result_cache.move_to_end(cache_key)
+            self._prune_command_result_cache()
         self.server.send_to_player(player_id, payload)
 
     def send_snapshot_status(
@@ -237,12 +288,15 @@ class HostSessionController(QObject):
     def _on_server_message(self, player_id: str, message: dict) -> None:
         msg_type = message.get("type")
         if msg_type == "command":
+            self._prune_command_result_cache()
             request_id = str(message.get("request_id") or "").strip()
             clean_player_id = str(player_id or "").strip()
             if clean_player_id and request_id:
                 cached_result = self._command_result_cache.get((clean_player_id, request_id))
                 if isinstance(cached_result, dict):
-                    self.server.send_to_player(clean_player_id, dict(cached_result))
+                    payload = cached_result.get("payload")
+                    if isinstance(payload, dict):
+                        self.server.send_to_player(clean_player_id, dict(payload))
                     return
             self.command_received.emit(player_id, message)
             return
@@ -472,7 +526,6 @@ class ClientSessionController(QObject):
         self._emit_reconnect_state("connected")
         self.hello_ack_received.emit(str(effective_player_id or ""), bool(effective_resumed))
         self.connected.emit()
-        self.request_snapshot()
 
     def _on_socket_error(self, transport_epoch: int | str, reason: str | None = None) -> None:
         if isinstance(transport_epoch, int):

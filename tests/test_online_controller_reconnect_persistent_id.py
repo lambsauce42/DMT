@@ -115,3 +115,47 @@ def test_host_controller_replays_cached_command_results_without_reprocessing():
         ]
     finally:
         controller.stop()
+
+
+def test_host_controller_does_not_cache_high_frequency_state_update_results():
+    controller = HostSessionController()
+    emitted_commands = []
+    sent_messages = []
+    controller.command_received.connect(
+        lambda player_id, message: emitted_commands.append((player_id, dict(message)))
+    )
+    controller.server.send_to_player = lambda player_id, payload: sent_messages.append((player_id, dict(payload)))
+    try:
+        controller.send_command_result(
+            "player-1",
+            ok=True,
+            message="State merged",
+            request_id="req-state-1",
+            data={"action": "state_update"},
+        )
+        sent_messages.clear()
+
+        controller._on_server_message(
+            "player-1",
+            {
+                "type": "command",
+                "action": "state_update",
+                "payload": {"state": {"items": []}},
+                "request_id": "req-state-1",
+            },
+        )
+
+        assert sent_messages == []
+        assert emitted_commands == [
+            (
+                "player-1",
+                {
+                    "type": "command",
+                    "action": "state_update",
+                    "payload": {"state": {"items": []}},
+                    "request_id": "req-state-1",
+                },
+            )
+        ]
+    finally:
+        controller.stop()

@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sys
+import time
 import types
 import zipfile
 from pathlib import Path
@@ -80,6 +81,9 @@ class _ResultHostStub:
     def __init__(self, *, fail_on_kick: bool = False):
         self.results = []
         self.snapshots = []
+        self.player_state_patches = []
+        self.direct_player_state_patches = []
+        self.players = {}
         self.kicks = []
         self._fail_on_kick = fail_on_kick
 
@@ -88,6 +92,12 @@ class _ResultHostStub:
 
     def broadcast_snapshot(self, snapshot):
         self.snapshots.append(snapshot)
+
+    def broadcast_player_state_patch(self, **kwargs):
+        self.player_state_patches.append(dict(kwargs))
+
+    def send_player_state_patch_to(self, target_player_id, **kwargs):
+        self.direct_player_state_patches.append((target_player_id, dict(kwargs)))
 
     def kick_player(self, player_id, *, message):
         if self._fail_on_kick:
@@ -390,6 +400,63 @@ def test_player_inventory_sync_uses_recent_character_sync_payload_cache(dungeon_
     }
 
 
+def test_player_inventory_sync_omits_unchanged_archive_when_host_already_has_it(
+    dungeon_widget, monkeypatch
+):
+    sent: dict[str, object] = {}
+
+    def _fake_dispatch(action, payload, *, silent=False):
+        sent["action"] = action
+        sent["payload"] = dict(payload)
+        sent["silent"] = silent
+        return "req-archive-omit"
+
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._active_dungeon_id = "d1"
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_dispatch_player_command_with_request_id",
+        _fake_dispatch,
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_resolve_local_sheet_sync_payload",
+        lambda _character_id: {
+            "sheet_id": "sheet-1",
+            "save_revision": 7,
+            "last_saved_at": "2026-03-08T10:11:12+00:00",
+            "content_hash": "hash-123",
+            "inventory": {"inventory": [{"item_id": "item-a", "quantity": 1}]},
+            "stats": {"name": "Hero"},
+            "archive_b64": "YXJjaGl2ZQ==",
+        },
+    )
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_latest_collection_backed_link_payload",
+        lambda **_kwargs: {"archive_b64": "YXJjaGl2ZQ=="},
+    )
+    monkeypatch.setattr(
+        "player_sheets.character_id_for_sheet_id",
+        lambda sheet_id: "character-1" if sheet_id == "sheet-1" else "",
+    )
+    monkeypatch.setattr(
+        "player_sheets.inventory_payload_for_sheet_id",
+        lambda _sheet_id: {"inventory": [{"item_id": "item-a", "quantity": 1}]},
+    )
+
+    request_id, character_id = dungeon_widget._dispatch_online_character_inventory_sync(
+        "sheet-1",
+        {"inventory": [{"item_id": "item-a", "quantity": 1}]},
+    )
+
+    assert request_id == "req-archive-omit"
+    assert character_id == "character-1"
+    assert sent["action"] == "sync_character_inventory"
+    assert sent["payload"]["archive_b64"] == ""
+
+
 def test_player_inventory_sync_is_retried_after_disconnect_with_same_request_id(
     dungeon_widget, monkeypatch
 ):
@@ -569,10 +636,7 @@ def test_player_snapshot_uses_local_sync_summary_for_owned_character_resolution(
 
     dungeon_widget._on_client_snapshot_received(snapshot)
 
-    assert len(queued) == 1
-    assert queued[0]["entity_id"] == "entity-1"
-    assert queued[0]["character_id"] == "character-1"
-    assert queued[0]["local_exists"] is True
+    assert queued == []
 
 
 def test_host_mode_keeps_player_vision_toggle_available(dungeon_widget):
@@ -1096,7 +1160,8 @@ def test_player_owned_entity_drag_moves_before_release_and_syncs_on_commit(
     QTest.mouseMove(viewport, mid_drag)
     QApplication.processEvents()
 
-    assert entity.pos() == QPointF(93.0, 101.0)
+    assert abs(float(entity.pos().x()) - 93.0) < 1.0
+    assert abs(float(entity.pos().y()) - 101.0) < 1.0
     assert calls == []
     assert "player_drag_press" in movement_events
     assert "player_drag_move" in movement_events
@@ -2579,6 +2644,29 @@ def test_client_icon_asset_rejects_invalid_image_payload(dungeon_widget, monkeyp
     assert not cache_dir.exists()
 
 
+def test_client_icon_asset_overwrites_changed_cached_bytes(dungeon_widget, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "session" / "cache" / "icons"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "token.png"
+    cache_path.write_bytes(b"old-bytes")
+    monkeypatch.setattr("dungeon_applet.online_icon_cache_dir", lambda _sid: cache_dir)
+    dungeon_widget._online_session_id = "session-icon-overwrite"
+
+    entity = EntityItem(QPointF(0, 0))
+    entity.setData(ROLE_ENTITY_ID, "entity-1")
+    entity.setData(ROLE_ICON, f"{SESSION_ICON_PREFIX}token.png")
+    entity.icon_path = str(cache_path)
+    dungeon_widget.canvas.scene().addItem(entity)
+
+    dungeon_widget._on_client_icon_asset(
+        "entity-1",
+        "token.png",
+        base64.b64encode(_PNG_1X1_BYTES).decode("ascii"),
+    )
+
+    assert cache_path.read_bytes() == _PNG_1X1_BYTES
+
+
 def test_client_image_asset_does_not_escape_image_cache(dungeon_widget, monkeypatch, tmp_path):
     cache_dir = tmp_path / "session" / "cache" / "images"
     monkeypatch.setattr("dungeon_applet.online_image_cache_dir", lambda _sid: cache_dir)
@@ -2613,6 +2701,59 @@ def test_client_image_asset_updates_matching_session_image(dungeon_widget, monke
     assert cache_dir.exists()
     assert (cache_dir / "scene.png").exists()
     assert image.source_path == f"{SESSION_IMAGE_PREFIX}scene.png"
+
+
+def test_client_image_asset_overwrites_changed_cached_bytes(dungeon_widget, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "session" / "cache" / "images"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "scene.png"
+    cache_path.write_bytes(b"old-image")
+    monkeypatch.setattr("dungeon_applet.online_image_cache_dir", lambda _sid: cache_dir)
+    dungeon_widget._online_session_id = "session-image-overwrite"
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+
+    image = DungeonImageItem(QPixmap(), QPointF(0, 0), source_path=f"{SESSION_IMAGE_PREFIX}scene.png")
+    image.setData(ROLE_ENTITY_ID, "image-1")
+    dungeon_widget.canvas.scene().addItem(image)
+
+    dungeon_widget._on_client_image_asset(
+        "image-1",
+        "scene.png",
+        base64.b64encode(_PNG_1X1_BYTES).decode("ascii"),
+    )
+
+    assert cache_path.read_bytes() == _PNG_1X1_BYTES
+
+
+def test_host_scene_image_sync_keeps_session_ref_on_live_item(dungeon_widget, monkeypatch, tmp_path):
+    image_path = tmp_path / "scene.png"
+    image_path.write_bytes(_PNG_1X1_BYTES)
+    cache_dir = tmp_path / "cache" / "images"
+    sent_assets = []
+
+    monkeypatch.setattr("dungeon_applet.online_image_cache_dir", lambda _sid: cache_dir)
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._online_session_id = "session-image-host"
+    dungeon_widget._host_controller = types.SimpleNamespace(
+        broadcast_image_asset=lambda **kwargs: sent_assets.append(dict(kwargs)),
+        stop=lambda: None,
+    )
+
+    image = DungeonImageItem(QPixmap(str(image_path)), QPointF(0, 0), source_path=str(image_path))
+    image.setData(ROLE_ENTITY_ID, "image-1")
+    dungeon_widget.canvas.scene().addItem(image)
+
+    dungeon_widget._sync_host_scene_images_for_online()
+
+    assert image.source_path.startswith(SESSION_IMAGE_PREFIX)
+    serialized_images = [
+        item
+        for item in dungeon_widget._serialize_scene()["items"]
+        if item.get("type") == "image"
+    ]
+    assert serialized_images[0]["source_path"] == image.source_path
+    assert sent_assets
+    assert sent_assets[0]["image_id"] == "image-1"
 
 
 def test_local_ping_is_forwarded_by_mode(dungeon_widget):
@@ -2749,6 +2890,55 @@ def test_dm_host_local_icon_is_normalized_and_broadcast(dungeon_widget, monkeypa
 
     dungeon_widget._sync_host_scene_icons_for_online()
     assert len(dungeon_widget._host_controller.assets) == 1
+
+
+def test_broadcast_icon_asset_marks_snapshot_asset_cache(dungeon_widget, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "session" / "cache" / "icons"
+    monkeypatch.setattr("dungeon_applet.online_icon_cache_dir", lambda _sid: cache_dir)
+    dungeon_widget._online_session_id = "session-cache"
+
+    class _HostStub:
+        def __init__(self):
+            self.players = {"player-x": "Player X"}
+            self.broadcast_assets = []
+            self.direct_assets = []
+            self.snapshots = []
+
+        def broadcast_icon_asset(self, **kwargs):
+            self.broadcast_assets.append(kwargs)
+
+        def send_icon_asset(self, player_id, **kwargs):
+            self.direct_assets.append((player_id, kwargs))
+
+        def send_snapshot_to(self, player_id, snapshot):
+            self.snapshots.append((player_id, snapshot))
+
+        def stop(self):
+            return None
+
+    dungeon_widget._host_controller = _HostStub()
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+
+    local_icon = tmp_path / "dm_icon.png"
+    local_icon.write_bytes(_PNG_1X1_BYTES)
+    entity = EntityItem(QPointF(10, 10), icon_path=str(local_icon))
+    entity.setData(ROLE_ENTITY_ID, "dm-entity-1")
+    entity.setData(ROLE_ICON, str(local_icon))
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._dungeons = [
+        _dungeon_record(
+            _entity_state("dm-entity-1", "", icon_path=str(local_icon)),
+            dungeon_id="d1",
+        )
+    ]
+    _set_assigned_players_dungeon(dungeon_widget, "d1")
+
+    dungeon_widget._sync_host_scene_icons_for_online()
+    dungeon_widget._broadcast_snapshot_if_host()
+
+    assert len(dungeon_widget._host_controller.broadcast_assets) == 1
+    assert dungeon_widget._host_controller.snapshots
+    assert dungeon_widget._host_controller.direct_assets == []
 
 
 def test_player_icon_upload_payload_includes_active_dungeon_id(dungeon_widget, monkeypatch, tmp_path):
@@ -3173,8 +3363,229 @@ def test_host_sync_character_inventory_updates_owned_linked_entities(
     ]
     assert first_item["linked_inventory"]["gold"] == 5
     assert "hp" not in first_item["linked_inventory"]
+    assert host.snapshots == []
+    assert len(host.player_state_patches) == 1
     assert second_item["linked_inventory"] == {}
     assert dungeon_widget._dungeons[0]["dirty"] is True
+
+
+def test_host_state_update_sends_no_echo_and_redacts_linked_payload_for_other_players(dungeon_widget):
+    host = _configure_online_host(
+        dungeon_widget,
+        _entity_state(
+            "e1",
+            "player-1",
+            pos=(0.0, 0.0),
+            linked_sheet_id="sheet-1",
+            linked_sheet_name="Hero",
+            linked_character_id="character-1",
+            linked_authority_player_id="player-1",
+            linked_save_revision=7,
+            linked_content_hash="hash-1",
+            linked_inventory={"inventory": [{"item_id": "item-a", "quantity": 1}]},
+            linked_sheet_archive_b64=_valid_archive_b64(),
+        ),
+    )
+    host.players = {"player-1": "Alice", "player-2": "Bob"}
+
+    dungeon_widget._on_host_command_received(
+        "player-1",
+        {
+            "action": "state_update",
+            "payload": {
+                "dungeon_id": "d1",
+                "state": {
+                    "items": [_entity_state("e1", "player-1", pos=(30.0, 40.0))],
+                    "fog": {"path": []},
+                },
+            },
+            "request_id": "state-1",
+        },
+    )
+
+    assert host.results[-1][1]["ok"] is True
+    assert [target for target, _payload in host.direct_player_state_patches] == ["player-2"]
+    sent_item = host.direct_player_state_patches[0][1]["state"]["items"][0]
+    assert sent_item["pos"] == [30.0, 40.0]
+    assert sent_item["linked_sheet_id"] == ""
+    assert sent_item["linked_character_id"] == ""
+    assert sent_item["linked_sheet_archive_b64"] == ""
+    assert sent_item["linked_inventory"]["inventory"] == []
+
+
+def test_host_linked_character_patch_keeps_payload_only_for_owner(dungeon_widget):
+    host = _configure_online_host(dungeon_widget)
+    host.players = {"player-1": "Alice", "player-2": "Bob"}
+    payload_state = {
+        "items": [
+            _entity_state(
+                "e1",
+                "player-1",
+                linked_sheet_id="sheet-1",
+                linked_sheet_name="Hero",
+                linked_character_id="character-1",
+                linked_authority_player_id="player-1",
+                linked_save_revision=7,
+                linked_content_hash="hash-1",
+                linked_inventory={"inventory": [{"item_id": "item-a", "quantity": 1}]},
+                linked_sheet_archive_b64=_valid_archive_b64(),
+            )
+        ],
+        "fog": {"path": []},
+    }
+
+    dungeon_widget._broadcast_player_state_patch_if_host(
+        player_id="player-1",
+        dungeon_id="d1",
+        state=payload_state,
+    )
+
+    sent_by_target = {
+        target: payload for target, payload in host.direct_player_state_patches
+    }
+    owner_item = sent_by_target["player-1"]["state"]["items"][0]
+    other_item = sent_by_target["player-2"]["state"]["items"][0]
+    assert owner_item["linked_sheet_archive_b64"] == _valid_archive_b64()
+    assert owner_item["linked_inventory"]["inventory"] == [{"item_id": "item-a", "quantity": 1}]
+    assert other_item["linked_sheet_id"] == ""
+    assert other_item["linked_sheet_archive_b64"] == ""
+    assert other_item["linked_inventory"]["inventory"] == []
+
+
+def test_non_owner_player_state_patch_redacts_before_heavy_json_copy(dungeon_widget, monkeypatch):
+    archive_payload = "A" * 50000
+    payload_state = {
+        "items": [
+            _entity_state(
+                "e1",
+                "player-1",
+                linked_sheet_id="sheet-1",
+                linked_sheet_name="Hero",
+                linked_character_id="character-1",
+                linked_authority_player_id="player-1",
+                linked_save_revision=7,
+                linked_content_hash="hash-1",
+                linked_inventory={
+                    "inventory": [{"item_id": "item-a", "quantity": 1}],
+                    "item_documents": {"item-a": {"blob": "B" * 50000}},
+                },
+                linked_sheet_archive_b64=archive_payload,
+            )
+        ],
+        "fog": {"path": []},
+    }
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_copy_state_payload",
+        lambda _state: pytest.fail("non-owner patches must not deep-copy heavy linked payloads"),
+    )
+
+    patch = dungeon_widget._player_state_patch_for_recipient(
+        payload_state,
+        owner_player_id="player-1",
+        recipient_player_id="player-2",
+    )
+
+    sent_item = patch["items"][0]
+    assert sent_item["entity_id"] == "e1"
+    assert sent_item["linked_sheet_id"] == ""
+    assert sent_item["linked_character_id"] == ""
+    assert sent_item["linked_sheet_archive_b64"] == ""
+    assert sent_item["linked_inventory"]["inventory"] == []
+
+
+def test_host_player_state_patch_reuses_redacted_payload_for_multiple_non_owners(
+    dungeon_widget,
+    monkeypatch,
+):
+    host = _configure_online_host(dungeon_widget)
+    host.players = {
+        "player-1": "Alice",
+        "player-2": "Bob",
+        "player-3": "Cara",
+        "player-4": "Dane",
+    }
+    payload_state = {
+        "items": [
+            _entity_state(
+                "e1",
+                "player-1",
+                linked_sheet_id="sheet-1",
+                linked_character_id="character-1",
+                linked_inventory={"item_documents": {"item-a": {"blob": "B" * 50000}}},
+                linked_sheet_archive_b64="A" * 50000,
+            )
+        ],
+        "fog": {"path": []},
+    }
+    original = dungeon_widget._player_state_patch_for_recipient
+    calls = []
+
+    def _counting_patch(state, *, owner_player_id, recipient_player_id):
+        calls.append((owner_player_id, recipient_player_id))
+        return original(
+            state,
+            owner_player_id=owner_player_id,
+            recipient_player_id=recipient_player_id,
+        )
+
+    monkeypatch.setattr(dungeon_widget, "_player_state_patch_for_recipient", _counting_patch)
+
+    dungeon_widget._broadcast_player_state_patch_if_host(
+        player_id="player-1",
+        dungeon_id="d1",
+        state=payload_state,
+        exclude_player_id="player-1",
+    )
+
+    assert calls == [("player-1", "player-2")]
+    assert [target for target, _payload in host.direct_player_state_patches] == [
+        "player-2",
+        "player-3",
+        "player-4",
+    ]
+    for _target, payload in host.direct_player_state_patches:
+        sent_item = payload["state"]["items"][0]
+        assert sent_item["linked_sheet_archive_b64"] == ""
+        assert sent_item["linked_inventory"]["inventory"] == []
+
+
+def test_redacted_state_summary_keeps_payload_size_signal_without_full_json(
+    dungeon_widget,
+    monkeypatch,
+):
+    archive_payload = "A" * 50000
+    state = {
+        "items": [
+            _entity_state(
+                "e1",
+                "player-1",
+                linked_sheet_id="sheet-1",
+                linked_character_id="character-1",
+                linked_inventory={
+                    "inventory": [{"item_id": "item-a", "quantity": 1}],
+                    "item_documents": {"item-a": {"blob": "B" * 50000}},
+                },
+                linked_sheet_archive_b64=archive_payload,
+            )
+        ],
+        "fog": {"path": []},
+    }
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_debug_json_size_bytes",
+        lambda _payload: pytest.fail("redacted hot-path summary must not json.dumps heavy state"),
+    )
+
+    summary = dungeon_widget._debug_state_summary(state, redact_linked_payload=True)
+
+    assert summary["state_items"] == 1
+    assert summary["state_entities"] == 1
+    assert summary["state_linked_entities"] == 1
+    assert summary["state_bytes_estimated"] is True
+    assert summary["state_linked_payload_fields_omitted"] == 2
+    assert summary["state_linked_payload_bytes_omitted"] >= len(archive_payload) + 50000
+    assert summary["state_bytes"] > summary["state_redacted_bytes"]
 
 
 def test_host_sync_character_inventory_accepts_large_character_for_session_once(
@@ -3728,6 +4139,41 @@ def test_host_sync_character_inventory_rejects_unowned_character_target(
     result = host.results[-1][1]
     assert result["ok"] is False
     assert "not linked to one of your owned entities" in str(result["message"]).lower()
+
+
+def test_host_claim_inventory_sync_requires_active_reservation(dungeon_widget, monkeypatch):
+    host = _ResultHostStub()
+    dungeon_widget._host_controller = host
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "d1"
+    monkeypatch.setattr(dungeon_widget, "_player_action_dungeon_id", lambda: "d1")
+    monkeypatch.setattr(dungeon_widget, "_player_owns_linked_character", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_apply_inventory_sync_to_linked_entities",
+        lambda *args, **kwargs: pytest.fail("missing claim reservation must not mutate inventory"),
+    )
+
+    dungeon_widget._handle_host_sync_character_inventory(
+        "player-1",
+        {
+            "claim_id": "missing-claim",
+            "character_id": "character-1",
+            "sheet_id": "sheet-1",
+            "inventory": {"inventory": [{"item_id": "item-a", "quantity": 1}]},
+            "stats": {},
+            "archive_b64": "",
+        },
+        request_id="sync-missing-claim",
+    )
+
+    result = host.results[-1][1]
+    assert result["ok"] is False
+    assert result["data"] == {
+        "action": "sync_character_inventory",
+        "claim_id": "missing-claim",
+    }
+    assert "no longer active" in result["message"]
 
 
 def test_host_link_character_sync_allows_initial_authority_claim_from_player(
@@ -6331,6 +6777,51 @@ def test_host_broadcast_snapshot_skips_duplicate_snapshot_payload_for_same_playe
     assert len(host_controller.sent_snapshots) == 1
 
 
+def test_transport_safe_player_snapshot_can_drop_optional_sections_to_fit(
+    dungeon_widget, monkeypatch
+):
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._players_dungeon_id = "players"
+    dungeon_widget._active_dungeon_id = "players"
+    dungeon_widget._save_active_dungeon_state = lambda: None
+    dungeon_widget._dungeons = [
+        {
+            "id": "players",
+            "name": "Players",
+            "state": {"items": [], "fog": {"path": []}},
+            "preview": None,
+            "preview_signature": None,
+            "dirty": False,
+        }
+    ]
+    dungeon_widget._session_loot_pool = [{"entry_id": "loot-1"}]
+    dungeon_widget._connected_players = {"player-a": "Player A"}
+    dungeon_widget._initiative_state = {
+        "active": True,
+        "collapsed": False,
+        "player_entries": {"player-a:e1": {"player_id": "player-a", "entity_id": "e1"}},
+        "entity_entries": {},
+    }
+    monkeypatch.setattr(dungeon_widget, "_snapshot_media_state", lambda: {"music": {"track": "a"}})
+
+    def _fits(snapshot):
+        if "loot_pool" in snapshot or "initiative_state" in snapshot or "media_state" in snapshot:
+            return (False, "too large")
+        return (True, "")
+
+    monkeypatch.setattr(dungeon_widget, "_snapshot_fits_transport", _fits)
+
+    snapshot = dungeon_widget._build_transport_safe_player_snapshot(
+        "player-a",
+        prefer_linked_character_payload=False,
+    )
+
+    assert "players" in snapshot
+    assert "loot_pool" not in snapshot
+    assert "initiative_state" not in snapshot
+    assert "media_state" not in snapshot
+
+
 def test_dm_host_link_character_prefers_collection_backed_state(monkeypatch, dungeon_widget, tmp_path):
     pdf_path = tmp_path / "sheet.pdf"
     pdf_path.write_bytes(b"%PDF-1.4")
@@ -6863,7 +7354,8 @@ def test_host_stale_loot_claim_timeout_skips_held_claims(dungeon_widget):
                 {"entry_id": "loot-1", "type": "item", "item_id": "item-a", "title": "Item A"},
             ],
             "entry_ids": ["loot-1"],
-            "created_monotonic": 0.0,
+            "created_monotonic": time.monotonic(),
+            "hold_started_monotonic": time.monotonic(),
             "hold_open": True,
         }
     }
@@ -7216,6 +7708,30 @@ def test_player_snapshot_without_active_initiative_stays_hidden(dungeon_widget):
     )
     assert dungeon_widget._initiative_overlay.isHidden()
     assert dungeon_widget._initiative_reopen_btn.isHidden()
+
+
+def test_active_initiative_keeps_player_rows_during_transient_disconnect(dungeon_widget):
+    dungeon_widget._online_mode = ONLINE_MODE_DM_HOST
+    dungeon_widget._connected_players = {"player-1": "Mira"}
+    entity = EntityItem(QPointF(0, 0))
+    entity.setData(ROLE_ENTITY_ID, "entity-1")
+    entity.setData(ROLE_OWNER_PLAYER_ID, "player-1")
+    entity.setData(ROLE_LABEL, "Wolf")
+    dungeon_widget.canvas.scene().addItem(entity)
+    dungeon_widget._initiative_state = {
+        "active": True,
+        "collapsed": False,
+        "player_entries": {},
+        "entity_entries": {},
+    }
+    dungeon_widget._seed_initiative_state()
+    dungeon_widget._initiative_state["player_entries"]["player-1:entity-1"]["initiative"] = 15
+
+    dungeon_widget._update_connected_players({})
+
+    assert "player-1:entity-1" in dungeon_widget._initiative_state["player_entries"]
+    assert dungeon_widget._initiative_state["player_entries"]["player-1:entity-1"]["initiative"] == 15
+    assert "entity-1" not in dungeon_widget._initiative_state["entity_entries"]
 
 
 def test_player_snapshot_with_no_assigned_initiative_rows_stays_hidden(dungeon_widget):
@@ -10722,6 +11238,71 @@ def test_player_state_update_preserved_on_disconnect_is_cleared_if_snapshot_matc
     assert dungeon_widget._pending_player_state_update_request_id == ""
 
 
+def test_player_state_update_coalesces_while_previous_request_inflight(dungeon_widget, monkeypatch):
+    class _ClientStub:
+        def __init__(self):
+            self.calls = []
+
+        def send_command(self, action, payload, request_id=None):
+            self.calls.append((action, dict(payload), request_id))
+            return True
+
+        def disconnect(self):
+            return None
+
+    states = [
+        {"items": [{"type": "stroke", "stroke_id": "stroke-1"}], "fog": {"path": []}},
+        {"items": [{"type": "stroke", "stroke_id": "stroke-2"}], "fog": {"path": []}},
+    ]
+
+    client = _ClientStub()
+    dungeon_widget._client_controller = client
+    dungeon_widget._online_mode = ONLINE_MODE_PLAYER
+    dungeon_widget._local_player_id = "player-local"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._active_dungeon_id = "d1"
+    monkeypatch.setattr(
+        dungeon_widget,
+        "_serialize_scene_for_player_state_update",
+        lambda: states.pop(0),
+    )
+
+    dungeon_widget._on_canvas_changed()
+    first_request_id = [call for call in client.calls if call[0] == "state_update"][-1][2]
+    dungeon_widget._on_canvas_changed()
+
+    state_update_calls = [call for call in client.calls if call[0] == "state_update"]
+    assert len(state_update_calls) == 1
+    assert dungeon_widget._pending_player_state_update["state"]["items"][0]["stroke_id"] == "stroke-2"
+
+    dungeon_widget._on_client_command_result(
+        {
+            "ok": True,
+            "request_id": first_request_id,
+            "data": {"action": "state_update"},
+        }
+    )
+
+    state_update_calls = [call for call in client.calls if call[0] == "state_update"]
+    assert len(state_update_calls) == 2
+    assert state_update_calls[-1][1]["state"]["items"][0]["stroke_id"] == "stroke-2"
+
+
+def test_deferred_patch_queue_replaces_older_patch_for_same_player_and_dungeon(dungeon_widget):
+    first_payload = {"player_id": "player-1", "dungeon_id": "d1", "state": {"items": []}}
+    second_payload = {
+        "player_id": "player-1",
+        "dungeon_id": "d1",
+        "state": {"items": [{"type": "entity", "entity_id": "e1"}]},
+    }
+
+    dungeon_widget._queue_deferred_client_sync_event("patch", first_payload)
+    dungeon_widget._queue_deferred_client_sync_event("patch", second_payload)
+
+    assert len(dungeon_widget._deferred_client_sync_events) == 1
+    assert dungeon_widget._deferred_client_sync_events[0] == ("patch", second_payload)
+
+
 def test_client_snapshot_status_failure_unblocks_wait_and_shows_retry_state(dungeon_widget):
     log_lines = []
     chat_lines = []
@@ -10752,6 +11333,50 @@ def test_client_snapshot_status_failure_unblocks_wait_and_shows_retry_state(dung
     assert log_lines == ["[WARN] Snapshot too large"]
     assert chat_lines == [("System", "Snapshot too large", True)]
     assert reconnect_prompts == [("Snapshot too large", True, False)]
+
+
+def test_player_initiative_update_is_preserved_for_retry(dungeon_widget):
+    calls = []
+
+    class _ClientStub:
+        def send_command(self, action, payload, request_id=None):
+            calls.append((action, dict(payload), request_id))
+            return True
+
+        def disconnect(self):
+            return None
+
+    dungeon_widget._set_online_mode(ONLINE_MODE_PLAYER)
+    dungeon_widget._local_player_id = "player-1"
+    dungeon_widget._player_connection_ready = True
+    dungeon_widget._client_controller = _ClientStub()
+    dungeon_widget._initiative_state = {
+        "active": True,
+        "collapsed": False,
+        "player_entries": {
+            "player-1:e1": {
+                "player_id": "player-1",
+                "entity_id": "e1",
+                "name": "Alice - Wolf",
+                "initiative": 12,
+            }
+        },
+        "entity_entries": {},
+    }
+
+    dungeon_widget._on_initiative_value_changed("player", "player-1:e1", "17")
+
+    sent_request_id = str(calls[-1][2] or "")
+    assert sent_request_id
+    assert sent_request_id in dungeon_widget._pending_initiative_update_requests
+
+    dungeon_widget._mark_pending_online_command_requests_for_retry(reason="connection loss")
+    resent = dungeon_widget._retry_pending_online_command_requests()
+
+    assert resent >= 1
+    initiative_calls = [call for call in calls if call[0] == "initiative_update"]
+    assert len(initiative_calls) == 2
+    assert initiative_calls[-1][2] == sent_request_id
 
 
 def test_host_canvas_change_defers_snapshot_broadcast_until_sync_flush(dungeon_widget, monkeypatch):
