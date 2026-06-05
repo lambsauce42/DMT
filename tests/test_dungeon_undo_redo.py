@@ -266,8 +266,7 @@ def test_round_trip_preserves_layer_z_and_image(dungeon_widget, tmp_path):
 
     assert len(loaded_strokes) == 1
     assert loaded_strokes[0].data(ROLE_LAYER) == LAYER_BG
-    # Strokes are elevated above fog so they stay visible in FoW mode.
-    assert loaded_strokes[0].zValue() == 205
+    assert loaded_strokes[0].zValue() == -95
 
     assert len(loaded_images) == 1
     assert loaded_images[0].data(ROLE_LAYER) == LAYER_BG

@@ -44,10 +44,10 @@ if TYPE_CHECKING:
 
 def _stroke_z_for_layer(layer: str) -> float:
     if layer == LAYER_MID:
-        return 255.0
+        return -35.0
     if layer == LAYER_BG:
-        return 205.0
-    return 305.0
+        return -85.0
+    return 15.0
 
 
 def _snap(value: float, grid: int = GRID_SIZE) -> float:
@@ -925,6 +925,7 @@ class FreeDrawState(CanvasState):
         self.preview_item: Optional[QGraphicsPathItem] = None
         self.is_drawing = False
         self._last_accepted_point: Optional[QPointF] = None
+        self._ruler_anchor: Optional[QPointF] = None
 
     def on_enter(self):
         self.canvas.setCursor(Qt.CursorShape.CrossCursor)
@@ -940,6 +941,10 @@ class FreeDrawState(CanvasState):
         self.current_path = None
         self.is_drawing = False
         self._last_accepted_point = None
+        self._ruler_anchor = None
+        set_anchor = getattr(self.canvas, "set_draw_ruler_anchor", None)
+        if callable(set_anchor):
+            set_anchor(None)
 
     def _should_accept_point(self, scene_pos: QPointF) -> bool:
         if self._last_accepted_point is None:
@@ -969,6 +974,28 @@ class FreeDrawState(CanvasState):
         )
         return simplified
 
+    def _ruler_projected_point(self, scene_pos: QPointF) -> QPointF:
+        anchor = self._ruler_anchor or scene_pos
+        angle = math.radians(float(getattr(self.canvas, "draw_ruler_angle", 0)))
+        dx = math.cos(angle)
+        dy = math.sin(angle)
+        vx = float(scene_pos.x() - anchor.x())
+        vy = float(scene_pos.y() - anchor.y())
+        distance = (vx * dx) + (vy * dy)
+        return QPointF(anchor.x() + (dx * distance), anchor.y() + (dy * distance))
+
+    def _set_current_line_to(self, scene_pos: QPointF) -> None:
+        if self._ruler_anchor is None:
+            return
+        projected = self._ruler_projected_point(scene_pos)
+        path = QPainterPath()
+        path.moveTo(self._ruler_anchor)
+        path.lineTo(projected)
+        self.current_path = path
+        self._last_accepted_point = QPointF(projected)
+        if self.preview_item and _qt_object_is_valid(self.preview_item):
+            self.preview_item.setPath(path)
+
     def mousePressEvent(self, event, scene_pos: QPointF):
         if super().mousePressEvent(event, scene_pos): return True
         if event.button() == Qt.MouseButton.LeftButton:
@@ -976,6 +1003,11 @@ class FreeDrawState(CanvasState):
             self.current_path = QPainterPath()
             self.current_path.moveTo(scene_pos)
             self._last_accepted_point = QPointF(scene_pos)
+            if bool(getattr(self.canvas, "draw_ruler_enabled", False)):
+                self._ruler_anchor = QPointF(scene_pos)
+                set_anchor = getattr(self.canvas, "set_draw_ruler_anchor", None)
+                if callable(set_anchor):
+                    set_anchor(self._ruler_anchor)
             self.preview_item = StrokeItem(self.current_path)
             draw_color = QColor(getattr(self.canvas, "stroke_color", QColor(WALL_COLOR)))
             self.preview_item.setPen(QPen(draw_color, WALL_WIDTH))
@@ -993,6 +1025,9 @@ class FreeDrawState(CanvasState):
     def mouseMoveEvent(self, event, scene_pos: QPointF):
         if super().mouseMoveEvent(event, scene_pos): return
         if self.is_drawing and self.current_path and self.preview_item:
+            if self._ruler_anchor is not None:
+                self._set_current_line_to(scene_pos)
+                return
             if not self._should_accept_point(scene_pos):
                 return
             if not _qt_object_is_valid(self.preview_item):
@@ -1006,7 +1041,9 @@ class FreeDrawState(CanvasState):
         if super().mouseReleaseEvent(event, scene_pos): return
         if event.button() == Qt.MouseButton.LeftButton and self.is_drawing:
             if self.current_path and self.preview_item and _qt_object_is_valid(self.preview_item):
-                if self._should_accept_point(scene_pos):
+                if self._ruler_anchor is not None:
+                    self._set_current_line_to(scene_pos)
+                elif self._should_accept_point(scene_pos):
                     self.current_path.lineTo(scene_pos)
                     self._last_accepted_point = QPointF(scene_pos)
                 final_path = self._simplified_current_path()

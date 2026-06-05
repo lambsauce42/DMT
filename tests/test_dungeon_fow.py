@@ -69,7 +69,7 @@ def test_fog_of_war_tools(qtbot):
     assert widget.canvas.current_tool == ToolType.FOW_ERASER
 
 
-def test_fog_overlay_keeps_strokes_visible_after_state_reload(qtbot):
+def test_fog_overlay_covers_strokes_after_state_reload(qtbot):
     if not QApplication.instance():
         app = QApplication(sys.argv)
 
@@ -103,4 +103,53 @@ def test_fog_overlay_keeps_strokes_visible_after_state_reload(qtbot):
     ]
     assert loaded_fog is not None
     assert loaded_strokes
-    assert loaded_strokes[0].zValue() > loaded_fog.zValue()
+    assert loaded_strokes[0].zValue() < loaded_fog.zValue()
+
+
+def test_fog_overlay_normalizes_old_above_fog_strokes_on_reload(qtbot):
+    if not QApplication.instance():
+        app = QApplication(sys.argv)
+
+    widget = DungeonAppletWidget()
+    qtbot.addWidget(widget)
+    widget.show()
+    qtbot.waitExposed(widget)
+
+    move_to = int(QPainterPath.ElementType.MoveToElement.value)
+    line_to = int(QPainterPath.ElementType.LineToElement.value)
+    state = {
+        "items": [
+            {
+                "type": "stroke",
+                "path": [
+                    {"type": move_to, "x": 0.0, "y": 0.0},
+                    {"type": line_to, "x": 40.0, "y": 40.0},
+                ],
+                "pen_color": "#ffffff",
+                "pen_width": 6,
+                "layer": LAYER_BG,
+                "z": 305.0,
+            }
+        ],
+        "fog": {
+            "path": [
+                {"type": move_to, "x": -100.0, "y": -100.0},
+                {"type": line_to, "x": 100.0, "y": -100.0},
+                {"type": line_to, "x": 100.0, "y": 100.0},
+                {"type": line_to, "x": -100.0, "y": 100.0},
+                {"type": line_to, "x": -100.0, "y": -100.0},
+            ]
+        },
+    }
+
+    widget._load_dungeon_state(state)
+
+    loaded_fog = widget.canvas.fog_item
+    loaded_strokes = [
+        item
+        for item in widget.canvas.scene().items()
+        if isinstance(item, QGraphicsPathItem) and item.data(ROLE_KIND) == "stroke"
+    ]
+    assert loaded_fog is not None
+    assert loaded_strokes
+    assert loaded_strokes[0].zValue() < loaded_fog.zValue()

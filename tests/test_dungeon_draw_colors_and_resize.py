@@ -65,6 +65,54 @@ def test_draw_color_rail_has_requested_core_colors(dungeon_widget):
     assert "#facc15" in colors
 
 
+def test_draw_color_rail_exposes_ruler_toggle_below_colors(dungeon_widget, qtbot):
+    panel = dungeon_widget.tool_panel
+    free_draw_btn = panel.button_for_tool(ToolType.FREE_DRAW)
+    assert free_draw_btn is not None
+
+    qtbot.mouseClick(free_draw_btn, Qt.MouseButton.LeftButton)
+    qtbot.wait(120)
+    QApplication.processEvents()
+
+    rail = panel._draw_color_rail
+    ruler_button = rail._ruler_button
+    assert ruler_button.isVisible()
+    assert ruler_button.width() == ruler_button.height()
+    assert ruler_button.y() > rail._buttons[-1].y()
+    assert rail._ruler_angle_label.isVisible()
+    assert rail._ruler_angle_label.y() > ruler_button.y()
+
+
+def test_draw_ruler_toggle_updates_canvas(dungeon_widget, qtbot):
+    panel = dungeon_widget.tool_panel
+    ruler_button = panel._draw_color_rail._ruler_button
+
+    assert not dungeon_widget.canvas.draw_ruler_enabled
+    qtbot.mouseClick(ruler_button, Qt.MouseButton.LeftButton)
+
+    assert dungeon_widget.canvas.draw_ruler_enabled
+
+
+def test_draw_ruler_angle_is_integer(dungeon_widget):
+    canvas = dungeon_widget.canvas
+
+    canvas.set_draw_ruler_angle(12.4)
+    assert canvas.draw_ruler_angle == 12
+    assert dungeon_widget.tool_panel._draw_color_rail._ruler_angle_label.text() == "12 deg"
+
+    canvas.rotate_draw_ruler(1)
+    assert canvas.draw_ruler_angle == 13
+    assert dungeon_widget.tool_panel._draw_color_rail._ruler_angle_label.text() == "13 deg"
+
+    canvas.set_draw_ruler_angle(180)
+    assert canvas.draw_ruler_angle == 0
+    assert dungeon_widget.tool_panel._draw_color_rail._ruler_angle_label.text() == "0 deg"
+
+    canvas.set_draw_ruler_angle(181)
+    assert canvas.draw_ruler_angle == 1
+    assert dungeon_widget.tool_panel._draw_color_rail._ruler_angle_label.text() == "1 deg"
+
+
 def test_draw_color_rail_does_not_squeeze_tool_grid(dungeon_widget, qtbot):
     panel = dungeon_widget.tool_panel
     free_draw_btn = panel.button_for_tool(ToolType.FREE_DRAW)
@@ -131,6 +179,38 @@ def test_free_draw_uses_selected_color(dungeon_widget, qtbot):
     strokes = [item for item in canvas.scene().items() if item.data(ROLE_KIND) == "stroke"]
     assert strokes
     assert strokes[0].pen().color().name().lower() == "#ef4444"
+
+
+def test_ruler_draws_straight_line_with_selected_color(dungeon_widget, qtbot):
+    panel = dungeon_widget.tool_panel
+    free_draw_btn = panel.button_for_tool(ToolType.FREE_DRAW)
+    assert free_draw_btn is not None
+    qtbot.mouseClick(free_draw_btn, Qt.MouseButton.LeftButton)
+    panel.set_draw_color(QColor("#22c55e"))
+    qtbot.mouseClick(panel._draw_color_rail._ruler_button, Qt.MouseButton.LeftButton)
+
+    canvas = dungeon_widget.canvas
+    canvas.set_draw_ruler_angle(0)
+    viewport = canvas.viewport()
+    p1 = QPointF(120, 140)
+    p2 = QPointF(260, 210)
+    qtbot.mouseMove(viewport, canvas.mapFromScene(p1))
+    qtbot.mousePress(viewport, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(p1))
+    qtbot.mouseMove(viewport, canvas.mapFromScene(p2))
+    qtbot.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=canvas.mapFromScene(p2))
+    QApplication.processEvents()
+
+    strokes = [item for item in canvas.scene().items() if item.data(ROLE_KIND) == "stroke"]
+    assert strokes
+    stroke = strokes[0]
+    path = stroke.path()
+    assert path.elementCount() == 2
+    start = path.elementAt(0)
+    end = path.elementAt(1)
+    assert abs(float(start.y) - p1.y()) < 0.1
+    assert abs(float(end.y) - p1.y()) < 0.1
+    assert abs(float(end.x) - p2.x()) < 0.1
+    assert stroke.pen().color().name().lower() == "#22c55e"
 
 
 def test_room_resize_snaps_to_grid_unless_alt(dungeon_widget, qtbot):

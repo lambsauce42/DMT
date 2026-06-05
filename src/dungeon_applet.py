@@ -842,10 +842,10 @@ def _default_item_z(item_type: str, layer: str) -> float:
         return 10.0
     if item_type == "stroke":
         if layer == LAYER_MID:
-            return 255.0
+            return -35.0
         if layer == LAYER_BG:
-            return 205.0
-        return 305.0
+            return -85.0
+        return 15.0
     if item_type == "image":
         if layer == LAYER_MID:
             return -45.0
@@ -1025,6 +1025,7 @@ class DungeonCanvas(QGraphicsView):
     zoomChanged = Signal(float)
     viewChanged = Signal(QPointF)
     toolChanged = Signal(ToolType)
+    drawRulerAngleChanged = Signal(int)
     pingPlaced = Signal(QPointF)
 
     def __init__(self, parent=None) -> None:
@@ -1054,6 +1055,10 @@ class DungeonCanvas(QGraphicsView):
         self.snap_to_grid = True
         self._stroke_color = QColor(WALL_COLOR)
         self._stroke_owner_player_id = ""
+        self._draw_ruler_enabled = False
+        self._draw_ruler_angle = 0
+        self._draw_ruler_anchor: QPointF | None = None
+        self._draw_ruler_cursor = QPointF(0, 0)
         self._interaction_blocked_checker: Callable[[], bool] | None = None
         self._delete_change_callback: Callable[[], None] | None = None
         self._bypass_layer_filter_for_owned_items = False
@@ -1129,6 +1134,35 @@ class DungeonCanvas(QGraphicsView):
     def set_stroke_owner_player_id(self, player_id: str) -> None:
         self._stroke_owner_player_id = str(player_id or "").strip()
 
+    @property
+    def draw_ruler_enabled(self) -> bool:
+        return bool(self._draw_ruler_enabled)
+
+    @property
+    def draw_ruler_angle(self) -> int:
+        return int(self._draw_ruler_angle)
+
+    def set_draw_ruler_enabled(self, enabled: bool) -> None:
+        self._draw_ruler_enabled = bool(enabled)
+        self.viewport().update()
+
+    def set_draw_ruler_angle(self, angle: float | int) -> None:
+        self._draw_ruler_angle = int(round(float(angle))) % 180
+        self.viewport().update()
+        self.drawRulerAngleChanged.emit(self._draw_ruler_angle)
+
+    def rotate_draw_ruler(self, delta_degrees: int) -> None:
+        self.set_draw_ruler_angle(self._draw_ruler_angle + int(delta_degrees))
+
+    def set_draw_ruler_anchor(self, anchor: QPointF | None) -> None:
+        self._draw_ruler_anchor = QPointF(anchor) if anchor is not None else None
+        self.viewport().update()
+
+    def update_draw_ruler_cursor(self, scene_pos: QPointF) -> None:
+        self._draw_ruler_cursor = QPointF(scene_pos)
+        if self._draw_ruler_enabled and self._current_tool == ToolType.FREE_DRAW:
+            self.viewport().update()
+
     def set_interaction_blocked_checker(
         self,
         checker: Callable[[], bool] | None,
@@ -1151,6 +1185,18 @@ class DungeonCanvas(QGraphicsView):
         modifiers = event.modifiers()
         control_pressed = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+        if (
+            self._draw_ruler_enabled
+            and self._current_tool == ToolType.FREE_DRAW
+            and not control_pressed
+        ):
+            delta = event.angleDelta().y()
+            if delta:
+                direction = 1 if delta > 0 else -1
+                self.rotate_draw_ruler(direction * (15 if shift_pressed else 1))
+                event.accept()
+                return
 
         # Sideways scrolling: Ctrl + Shift + Scroll
         if control_pressed and shift_pressed:
@@ -1296,6 +1342,7 @@ class DungeonCanvas(QGraphicsView):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         scene_pos = self._map_viewport_pos_to_scene(event.position())
+        self.update_draw_ruler_cursor(scene_pos)
         
         # Filter interaction to current layer
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1350,6 +1397,7 @@ class DungeonCanvas(QGraphicsView):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         scene_pos = self._map_viewport_pos_to_scene(event.position())
+        self.update_draw_ruler_cursor(scene_pos)
         
         # Don't snap coordinate display if Alt is held
         if event.modifiers() & Qt.KeyboardModifier.AltModifier:
@@ -1380,6 +1428,7 @@ class DungeonCanvas(QGraphicsView):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         scene_pos = self._map_viewport_pos_to_scene(event.position())
+        self.update_draw_ruler_cursor(scene_pos)
         # Let state handle the event
         handled = False
         if self._current_state:
@@ -1684,6 +1733,9 @@ class DungeonCanvas(QGraphicsView):
             painter.setPen(QPen(QColor(255, 255, 255, 20), 1))
             painter.drawLine(-size, 0, size, 0)
             painter.drawLine(0, -size, 0, size)
+
+        if self._draw_ruler_enabled and self._current_tool == ToolType.FREE_DRAW:
+            self._draw_ruler_overlay(painter, rect)
         
         # Draw fog brush preview if in fog tool mode
         if hasattr(self, '_fog_preview_pos') and self._fog_preview_pos is not None:
@@ -1698,6 +1750,35 @@ class DungeonCanvas(QGraphicsView):
                 painter.setPen(QPen(QColor(255, 255, 255, 180), 1, Qt.PenStyle.DashLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(preview_rect)
+
+    def _draw_ruler_overlay(self, painter: QPainter, rect: QRectF) -> None:
+        anchor = self._draw_ruler_anchor or self._draw_ruler_cursor
+        angle = math.radians(float(self._draw_ruler_angle))
+        direction = QPointF(math.cos(angle), math.sin(angle))
+        normal = QPointF(-direction.y(), direction.x())
+        length = max(rect.width(), rect.height()) * 2.5
+        if length <= 0:
+            return
+        start = anchor - direction * length
+        end = anchor + direction * length
+
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255, 34), 18, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+            painter.drawLine(start, end)
+            painter.setPen(QPen(QColor(147, 197, 253, 130), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+            painter.drawLine(start, end)
+            tick_pen = QPen(QColor(255, 255, 255, 88), 1)
+            painter.setPen(tick_pen)
+            tick_count = int(length // self.grid_size)
+            for index in range(-tick_count, tick_count + 1):
+                center = anchor + direction * (index * self.grid_size)
+                tick_half = 8 if index % 2 == 0 else 5
+                painter.drawLine(center - normal * tick_half, center + normal * tick_half)
+        finally:
+            painter.restore()
 
     def init_fog(self):
         if not self.fog_item:
@@ -1874,8 +1955,68 @@ class DrawColorButton(QPushButton):
                 painter.end()
 
 
+class DrawRulerButton(QPushButton):
+    rulerToggled = Signal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hovered = False
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(32, 32)
+        self.setToolTip("Ruler: draw straight strokes. Wheel rotates 1 deg, Shift+wheel rotates 15 deg.")
+        self.toggled.connect(self.rulerToggled.emit)
+        self.setStyleSheet("QPushButton { background-color: transparent; border: none; padding: 0px; margin: 0px; }")
+
+    def sizeHint(self) -> QSize:
+        return QSize(32, 32)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(32, 32)
+
+    def enterEvent(self, event: QEvent) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            box = QRectF(1.5, 1.5, self.width() - 3.0, self.height() - 3.0)
+            if self.isChecked():
+                painter.setBrush(QColor(59, 130, 246, 92))
+                painter.setPen(QPen(QColor(147, 197, 253, 176), 1.2))
+            elif self._hovered:
+                painter.setBrush(QColor(255, 255, 255, 28))
+                painter.setPen(QPen(QColor(255, 255, 255, 48), 1.0))
+            else:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(255, 255, 255, 30), 1.0))
+            painter.drawRoundedRect(box, 5.0, 5.0)
+
+            painter.translate(self.width() / 2.0, self.height() / 2.0)
+            painter.rotate(-45)
+            body = QRectF(-10.5, -4.0, 21.0, 8.0)
+            painter.setBrush(QColor(255, 255, 255, 28))
+            painter.setPen(QPen(QColor(255, 255, 255, 218), 1.6))
+            painter.drawRoundedRect(body, 1.2, 1.2)
+            painter.setPen(QPen(QColor(255, 255, 255, 180), 1.0))
+            for x, height in ((-6.0, 3.2), (-2.0, 5.0), (2.0, 3.2), (6.0, 5.0)):
+                painter.drawLine(QPointF(x, -4.0), QPointF(x, -4.0 + height))
+        finally:
+            if painter.isActive():
+                painter.end()
+
+
 class DrawColorRail(QWidget):
     colorChanged = Signal(QColor)
+    rulerToggled = Signal(bool)
     _ANIM_SLOWDOWN = 1.35
 
     def __init__(self, parent=None):
@@ -1887,6 +2028,7 @@ class DrawColorRail(QWidget):
         self._anims: list[QPropertyAnimation] = []
         self._selected_color = QColor(WALL_COLOR)
         self._is_expanded = False
+        self._ruler_enabled = False
 
         self._rail = QFrame(self)
         self._rail.setObjectName("DrawColorRailFrame")
@@ -1917,8 +2059,21 @@ class DrawColorRail(QWidget):
             button = DrawColorButton(QColor(color_hex), self._rail)
             button.colorPicked.connect(self._on_color_picked)
             button._set_reveal_progress(0.0)
-            rail_layout.addWidget(button)
+            rail_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
             self._buttons.append(button)
+
+        self._ruler_button = DrawRulerButton(self._rail)
+        self._ruler_button.rulerToggled.connect(self._on_ruler_toggled)
+        rail_layout.addWidget(self._ruler_button, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self._ruler_angle_label = QLabel("0 deg", self._rail)
+        self._ruler_angle_label.setFixedSize(40, 14)
+        self._ruler_angle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._ruler_angle_label.setToolTip("Ruler angle")
+        self._ruler_angle_label.setStyleSheet(
+            "QLabel { color: rgba(229, 231, 235, 210); background-color: transparent; font-size: 8px; font-weight: 600; }"
+        )
+        rail_layout.addWidget(self._ruler_angle_label, 0, Qt.AlignmentFlag.AlignHCenter)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1935,8 +2090,11 @@ class DrawColorRail(QWidget):
         button_w = max(btn.width() for btn in self._buttons)
         button_h = max(btn.height() for btn in self._buttons)
         button_count = len(self._buttons)
-        content_w = margins.left() + margins.right() + button_w
-        content_h = margins.top() + margins.bottom() + (button_h * button_count) + (max(0, button_count - 1) * spacing)
+        control_w = max(button_w, self._ruler_button.width(), self._ruler_angle_label.width())
+        control_h = (button_h * button_count) + self._ruler_button.height() + self._ruler_angle_label.height()
+        control_count = button_count + 2
+        content_w = margins.left() + margins.right() + control_w
+        content_h = margins.top() + margins.bottom() + control_h + (max(0, control_count - 1) * spacing)
         self._rail.setFixedSize(content_w, content_h)
         self.setFixedSize(content_w, content_h)
 
@@ -1957,6 +2115,10 @@ class DrawColorRail(QWidget):
     def _on_color_picked(self, color: QColor) -> None:
         self.set_color(color, emit_signal=True)
 
+    def _on_ruler_toggled(self, enabled: bool) -> None:
+        self._ruler_enabled = bool(enabled)
+        self.rulerToggled.emit(self._ruler_enabled)
+
     def set_color(self, color: QColor, *, emit_signal: bool = True) -> None:
         self._selected_color = QColor(color)
         for button in self._buttons:
@@ -1966,6 +2128,12 @@ class DrawColorRail(QWidget):
 
     def current_color(self) -> QColor:
         return QColor(self._selected_color)
+
+    def is_ruler_enabled(self) -> bool:
+        return bool(self._ruler_enabled)
+
+    def set_ruler_angle(self, angle: int) -> None:
+        self._ruler_angle_label.setText(f"{int(angle) % 180} deg")
 
     def show_animated(self) -> None:
         if self._is_expanded and self.isVisible():
@@ -2032,6 +2200,7 @@ class ActionButton(QPushButton):
 class FloatingToolPanel(QWidget):
     toolChanged = Signal(ToolType)
     drawColorChanged = Signal(QColor)
+    drawRulerChanged = Signal(bool)
     fogFillRequested = Signal()
     fogClearRequested = Signal()
     viewModeChanged = Signal(str) # "dm" or "player"
@@ -2072,6 +2241,7 @@ class FloatingToolPanel(QWidget):
 
         self._draw_color_rail = DrawColorRail(self)
         self._draw_color_rail.colorChanged.connect(self.drawColorChanged.emit)
+        self._draw_color_rail.rulerToggled.connect(self.drawRulerChanged.emit)
         self._draw_color_slot_width = max(32, int(self._draw_color_rail.sizeHint().width()))
         self._draw_color_rail.setFixedWidth(self._draw_color_slot_width)
 
@@ -2287,6 +2457,12 @@ class FloatingToolPanel(QWidget):
 
     def set_draw_color(self, color: QColor) -> None:
         self._draw_color_rail.set_color(color, emit_signal=True)
+
+    def is_draw_ruler_enabled(self) -> bool:
+        return self._draw_color_rail.is_ruler_enabled()
+
+    def set_draw_ruler_angle(self, angle: int) -> None:
+        self._draw_color_rail.set_ruler_angle(angle)
 
     def button_for_tool(self, tool: ToolType) -> ToolButton | None:
         return self._tool_buttons.get(tool)
@@ -5515,8 +5691,10 @@ class DungeonAppletWidget(QWidget):
         self.canvas.viewChanged.connect(self._update_coords)
         self.canvas.zoomChanged.connect(self._update_zoom_label)
         self.canvas.toolChanged.connect(self.tool_panel.set_tool)
+        self.canvas.drawRulerAngleChanged.connect(self.tool_panel.set_draw_ruler_angle)
         self.tool_panel.toolChanged.connect(self._on_tool_changed)
         self.tool_panel.drawColorChanged.connect(self.canvas.set_stroke_color)
+        self.tool_panel.drawRulerChanged.connect(self.canvas.set_draw_ruler_enabled)
         self.tool_panel.lootPoolRequested.connect(self._toggle_loot_pool_panel)
         self.tool_panel.lootAddItemsRequested.connect(self._on_loot_add_items)
         self.canvas.pingPlaced.connect(self._on_local_ping_placed)
@@ -5552,6 +5730,7 @@ class DungeonAppletWidget(QWidget):
         self._save_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self._save_shortcut.activated.connect(self._save_collection)
         self.canvas.set_stroke_color(self.tool_panel.current_draw_color())
+        self.canvas.set_draw_ruler_enabled(self.tool_panel.is_draw_ruler_enabled())
 
         self._init_collection()
         self._refresh_loot_pool_list()
@@ -15045,12 +15224,16 @@ class DungeonAppletWidget(QWidget):
         except (TypeError, ValueError):
             pen_width = float(WALL_WIDTH)
         stroke.setPen(QPen(pen_color, pen_width))
+        layer = item_data.get("layer", LAYER_FG) or LAYER_FG
         try:
-            stroke.setZValue(float(item_data.get("z", _default_item_z("stroke", item_data.get("layer", LAYER_FG)))))
+            stroke_z = float(item_data.get("z", _default_item_z("stroke", layer)))
         except (TypeError, ValueError):
-            stroke.setZValue(_default_item_z("stroke", item_data.get("layer", LAYER_FG)))
+            stroke_z = _default_item_z("stroke", layer)
+        if stroke_z >= FOG_OVERLAY_Z:
+            stroke_z = _default_item_z("stroke", layer)
+        stroke.setZValue(stroke_z)
         stroke.setData(ROLE_KIND, "stroke")
-        stroke.setData(ROLE_LAYER, item_data.get("layer", LAYER_FG) or LAYER_FG)
+        stroke.setData(ROLE_LAYER, layer)
         stroke.setData(ROLE_LOCKED, False)
         stroke.setData(ROLE_OWNER_PLAYER_ID, str(item_data.get("owner_player_id") or "").strip())
         stroke_id = str(item_data.get("stroke_id") or item_data.get("entity_id") or "").strip()
@@ -24366,7 +24549,7 @@ class DungeonAppletWidget(QWidget):
                     stroke_z = float(item_data.get("z", _default_item_z("stroke", layer)))
                 except (TypeError, ValueError):
                     stroke_z = _default_item_z("stroke", layer)
-                if stroke_z <= FOG_OVERLAY_Z:
+                if stroke_z >= FOG_OVERLAY_Z:
                     stroke_z = _default_item_z("stroke", layer)
                 stroke.setZValue(stroke_z)
                 stroke.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsSelectable, True)
